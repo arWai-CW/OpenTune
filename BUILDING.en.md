@@ -23,7 +23,7 @@ git clone -b standalone https://github.com/YuFeng926/OpenTune.git
 cd OpenTune
 ```
 
-> **Important: All third-party dependencies are not included in the Git repository** (`JUCE-master/` and `ThirdParty/` are added to `.gitignore` to avoid hundreds of MB of binary blobs in history). Please follow the steps below to obtain and place them in the specified paths.
+> **Important: most third-party dependencies are not included in the Git repository** (`JUCE-master/` and `ThirdParty/` are added to `.gitignore` to avoid hundreds of MB of binary blobs in history; **r8brain is an exception** — the repo ships an adapted copy, see step 3). Please follow the steps below to obtain and place them in the specified paths.
 >
 > **CMake auto-detection:** After dependencies are placed according to the specifications below, no `-D` overrides are needed during configuration. CMakeLists.txt will automatically fall back to the bundled default paths under `ThirdParty/<dep>/` when cache paths are invalid.
 
@@ -39,11 +39,13 @@ git clone https://github.com/juce-framework/JUCE.git JUCE-master
 
 ```bash
 cd ThirdParty
-git clone --recursive --branch releases/2.2.0 https://github.com/Celemony/ARA_SDK.git ARA_SDK-releases-2.2.0
+git clone --recursive --branch releases/2.3.0 https://github.com/Celemony/ARA_SDK.git ARA_SDK-releases-2.3.0
 cd ..
 ```
 
 ### 3. r8brain Resampler
+
+> **Note: `ThirdParty/r8brain-free-src-master/` is already shipped with this repo** (OpenTune ships an adapted copy). **Do not** re-clone upstream `master` — upstream v7.5 changed `oneshot()` to take a non-const input pointer, which conflicts with the `const float*` calls in `Source/DSP/ResamplingManager.cpp` and breaks the build. Skip this step unless the directory is missing.
 
 ```bash
 cd ThirdParty
@@ -168,7 +170,7 @@ OpenTune/
 ├── CMakeLists.txt
 ├── JUCE-master/                          ← JUCE framework
 ├── ThirdParty/
-│   ├── ARA_SDK-releases-2.2.0/           ← ARA SDK
+│   ├── ARA_SDK-releases-2.3.0/           ← ARA SDK
 │   ├── r8brain-free-src-master/          ← Resampling library
 │   ├── onnxruntime-win-x64-1.24.4/      ← ONNX Runtime CPU (Windows)
 │   ├── onnxruntime-dml-1.24.4/           ← ONNX Runtime DML (Windows)
@@ -220,7 +222,7 @@ For development in Visual Studio IDE:
 ```bash
 # Apple Silicon (arm64)
 cmake --preset macos-silicon-ara-ninja
-cmake --build --preset macos-silicon-ara-release
+cmake --build --preset macos-silicon-release
 
 # Intel (x86_64)
 cmake --preset macos-intel-ara-ninja

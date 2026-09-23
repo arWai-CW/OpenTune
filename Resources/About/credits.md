@@ -10,8 +10,8 @@ gratefully acknowledge the work of their authors.
 - **Project**: https://juce.com
 - **Use**: Application framework, audio processing, GUI
 
-### ARA SDK 2.2.0
-- **License**: ARA SDK license (see ThirdParty/ARA_SDK-releases-2.2.0/LICENSE)
+### ARA SDK 2.3.0
+- **License**: ARA SDK license (see ThirdParty/ARA_SDK-releases-2.3.0/LICENSE)
 - **Project**: https://github.com/Celemony/ARA_SDK
 - **Use**: Audio Random Access integration for VST3 plugin
 

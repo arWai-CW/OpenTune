@@ -23,7 +23,7 @@ git clone -b standalone https://github.com/YuFeng926/OpenTune.git
 cd OpenTune
 ```
 
-> **重要：所有三方依赖均不在 Git 仓库中**（`JUCE-master/` 与 `ThirdParty/` 已加入 `.gitignore`，避免数百 MB 二进制 blob 进入历史）。请按下列步骤分别获取并放置到指定路径。
+> **重要：三方依赖大多不在 Git 仓库中**（`JUCE-master/` 与 `ThirdParty/` 已加入 `.gitignore`，避免数百 MB 二进制 blob 进入历史；**r8brain 除外** —— 仓库内已随附适配版本，见步骤 3）。请按下列步骤分别获取并放置到指定路径。
 >
 > **CMake 自动检测：** 依赖按下方规范放置后，配置时**无需任何 `-D` 覆盖**。CMakeLists.txt 在缓存路径失效时会自动 fallback 到 `ThirdParty/<dep>/` 的 bundled 默认路径。
 
@@ -39,11 +39,13 @@ git clone https://github.com/juce-framework/JUCE.git JUCE-master
 
 ```bash
 cd ThirdParty
-git clone --recursive --branch releases/2.2.0 https://github.com/Celemony/ARA_SDK.git ARA_SDK-releases-2.2.0
+git clone --recursive --branch releases/2.3.0 https://github.com/Celemony/ARA_SDK.git ARA_SDK-releases-2.3.0
 cd ..
 ```
 
 ### 3. r8brain Resampler
+
+> **注意：`ThirdParty/r8brain-free-src-master/` 已包含在仓库中**（OpenTune 曾对 r8brain 做过适配）。**不要**重新 clone 上游 master —— 上游 v7.5 的 `oneshot()` 改用了非 const 输入签名，会与 `Source/DSP/ResamplingManager.cpp` 的 `const float*` 调用冲突，导致编译失败。除非此目录缺失，否则跳过本步骤。
 
 ```bash
 cd ThirdParty
@@ -168,7 +170,7 @@ OpenTune/
 ├── CMakeLists.txt
 ├── JUCE-master/                          ← JUCE 框架
 ├── ThirdParty/
-│   ├── ARA_SDK-releases-2.2.0/           ← ARA SDK
+│   ├── ARA_SDK-releases-2.3.0/           ← ARA SDK
 │   ├── r8brain-free-src-master/          ← 重采样库
 │   ├── onnxruntime-win-x64-1.24.4/      ← ONNX Runtime CPU (Windows)
 │   ├── onnxruntime-dml-1.24.4/           ← ONNX Runtime DML (Windows)
@@ -221,11 +223,11 @@ cmake --build --preset windows-ara-ninja-release
 ```bash
 # Apple Silicon (arm64)
 cmake --preset macos-silicon-ara-ninja
-cmake --build --preset macos-silicon-ara-release
+cmake --build --preset macos-silicon-release
 
 # Intel (x86_64)
 cmake --preset macos-intel-ara-ninja
-cmake --build --preset macos-intel-ara-release
+cmake --build --preset macos-intel-release
 ```
 
 打包命令：
