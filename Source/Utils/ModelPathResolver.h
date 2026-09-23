@@ -4,24 +4,15 @@
  * ModelPathResolver - 模型路径解析器
  * 
  * 负责解析 ONNX Runtime 动态库路径和模型目录路径。
- * 搜索顺序：程序目录 > Program Files > AppData > 注册表 > 当前工作目录
+ * 解析顺序：用户自选目录（AppPreferences）> 程序目录 > Program Files >
+ * AppData > 注册表 > 当前工作目录。
+ *
+ * 用户自选目录以进程内缓存保存（由 AppPreferences::setCustomModelsDirectory
+ * 在持久化时同步更新，加载时从磁盘播种），getModelsDirectory() 因此可在
+ * 音频/推理工作线程频繁调用而不触碰磁盘。
+ *
+ * 实现位于 ModelPathResolver.cpp。
  */
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN 1
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX 1
-#endif
-#include <windows.h>
-#ifdef min
-#undef min
-#endif
-#ifdef max
-#undef max
-#endif
-#endif
 
 #include <string>
 #include <juce_core/juce_core.h>
@@ -30,119 +21,15 @@ namespace OpenTune {
 
 class ModelPathResolver {
 public:
-    static bool ensureOnnxRuntimeLoaded() {
-#if defined(_WIN32)
-        if (::GetModuleHandleW(L"OpenTuneOnnxRuntime_1_24_4.dll") != nullptr) {
-            return true;
-        }
+    static bool ensureOnnxRuntimeLoaded();
 
-        const juce::File moduleFile = getCurrentModuleFile();
-        const juce::File programFilesRoot = juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory)
-            .getChildFile("OpenTune");
-        const juce::File programDataRoot = juce::File::getSpecialLocation(juce::File::commonApplicationDataDirectory)
-            .getChildFile("OpenTune");
+    /// 更新进程内用户自选模型目录缓存（AppPreferences 持久化时调用）。
+    static void setUserConfiguredModelsDirectory(const juce::String& directory);
 
-        // 唯一 DLL 名 OpenTuneOnnxRuntime_1_24_4.dll：带版本后缀，绝不装载宿主的同名裸 DLL
-        const juce::File candidates[] = {
-            programFilesRoot.getChildFile("OpenTuneOnnxRuntime_1_24_4.dll"),
-            programDataRoot.getChildFile("OpenTuneOnnxRuntime_1_24_4.dll"),
-            moduleFile.getParentDirectory().getChildFile("OpenTuneOnnxRuntime_1_24_4.dll")
-        };
-
-        for (const auto& candidate : candidates) {
-            if (!candidate.existsAsFile()) {
-                continue;
-            }
-            const auto handle = ::LoadLibraryExW(
-                candidate.getFullPathName().toWideCharPointer(),
-                nullptr,
-                LOAD_WITH_ALTERED_SEARCH_PATH
-            );
-            if (handle != nullptr) {
-                return true;
-            }
-        }
-        return false;
-#else
-        return true;
-#endif
-    }
-
-    static std::string getModelsDirectory() {
-        const juce::File programFilesModelsDir = juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory)
-            .getChildFile("OpenTune")
-            .getChildFile("models");
-        if (programFilesModelsDir.isDirectory()) {
-            return programFilesModelsDir.getFullPathName().toStdString();
-        }
-
-        const juce::File programDataModelsDir = juce::File::getSpecialLocation(juce::File::commonApplicationDataDirectory)
-            .getChildFile("OpenTune")
-            .getChildFile("models");
-        if (programDataModelsDir.isDirectory()) {
-            return programDataModelsDir.getFullPathName().toStdString();
-        }
-
-        const juce::File moduleFile = getCurrentModuleFile();
-        juce::File modelsDir = moduleFile.getParentDirectory().getChildFile("models");
-
-        if (modelsDir.exists() && modelsDir.isDirectory()) {
-            return modelsDir.getFullPathName().toStdString();
-        }
-
-        modelsDir = moduleFile.getParentDirectory().getParentDirectory().getChildFile("Resources").getChildFile("models");
-
-        if (modelsDir.exists() && modelsDir.isDirectory()) {
-            return modelsDir.getFullPathName().toStdString();
-        }
-
-        #ifdef _WIN32
-        juce::String regPath = juce::WindowsRegistry::getValue(
-            "HKEY_LOCAL_MACHINE\\Software\\MakediffVST\\OpenTune\\ModelsPath"
-        );
-        if (regPath.isNotEmpty()) {
-            juce::File regModelsDir(regPath);
-            if (regModelsDir.exists() && regModelsDir.isDirectory()) {
-                return regPath.toStdString();
-            }
-        }
-        #endif
-
-        modelsDir = juce::File::getCurrentWorkingDirectory().getChildFile("models");
-        if (modelsDir.exists() && modelsDir.isDirectory()) {
-            return modelsDir.getFullPathName().toStdString();
-        }
-
-        modelsDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory().getChildFile("models");
-        if (modelsDir.exists() && modelsDir.isDirectory()) {
-            return modelsDir.getFullPathName().toStdString();
-        }
-
-        return "./models";
-    }
+    static std::string getModelsDirectory();
 
 private:
-    static juce::File getCurrentModuleFile() {
-#if defined(_WIN32)
-        HMODULE moduleHandle = nullptr;
-        const BOOL ok = GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&ModelPathResolver::getModelsDirectory),
-            &moduleHandle
-        );
-
-        if (ok != 0 && moduleHandle != nullptr) {
-            std::wstring path;
-            path.resize(32768);
-            const DWORD len = GetModuleFileNameW(moduleHandle, path.data(), static_cast<DWORD>(path.size()));
-            if (len > 0 && len < path.size()) {
-                path.resize(len);
-                return juce::File(juce::String(path.c_str()));
-            }
-        }
-#endif
-        return juce::File::getSpecialLocation(juce::File::currentExecutableFile);
-    }
+    static juce::File getCurrentModuleFile();
 };
 
 } // namespace OpenTune

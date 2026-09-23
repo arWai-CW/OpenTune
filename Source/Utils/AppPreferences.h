@@ -57,6 +57,8 @@ struct SharedPreferencesState {
     RenderingPriority renderingPriority = RenderingPriority::GpuFirst;
     VocoderModelWeight vocoderModelWeight = kDefaultVocoderWeight;
     bool experimentalFeaturesEnabled = false;
+    /// 用户自选模型目录；为空时使用 ModelPathResolver 自动侦测。
+    juce::String customModelsDirectory;
     ExperimentalReferenceAlignMode experimentalReferenceAlignMode = ExperimentalReferenceAlignMode::StandardAuto;
     std::vector<juce::String> recentProjects;   // Most recently used project paths (MRU, max 10)
     SnapSettings snap;
@@ -111,6 +113,8 @@ public:
     void setSuppressEqRemoveConfirmation(bool suppress);
     void setRenderingPriority(RenderingPriority priority);
     void setVocoderModelWeight(const VocoderModelWeight& weight);
+    void setCustomModelsDirectory(const juce::String& customModelsDirectory);
+    juce::String getCustomModelsDirectory() const;
     void setExperimentalFeaturesEnabled(bool enabled);
     void setExperimentalReferenceAlignMode(ExperimentalReferenceAlignMode mode);
     void setMouseTrailTheme(MouseTrailConfig::TrailTheme theme);

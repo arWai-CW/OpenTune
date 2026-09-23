@@ -24,7 +24,8 @@ struct SharedPreferencePages {
         std::function<void(VocoderModelWeight)> onVocoderModelWeightChanged,
         std::function<bool(F0ModelType)> onF0ModelChanged,
         std::function<void(bool)> onLightPitchCorrectionChanged,
-        bool isVst3Plugin);
+        bool isVst3Plugin,
+        std::function<void()> onModelsDirectoryChanged = {});
 };
 
 } // namespace OpenTune

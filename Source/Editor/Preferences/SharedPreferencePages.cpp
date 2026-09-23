@@ -103,9 +103,10 @@ public:
 
         languageSelector_.addItem(getLanguageNativeName(Language::English), 1);
         languageSelector_.addItem(getLanguageNativeName(Language::Chinese), 2);
-        languageSelector_.addItem(getLanguageNativeName(Language::Japanese), 3);
-        languageSelector_.addItem(getLanguageNativeName(Language::Russian), 4);
-        languageSelector_.addItem(getLanguageNativeName(Language::Spanish), 5);
+        languageSelector_.addItem(getLanguageNativeName(Language::TraditionalChinese), 3);
+        languageSelector_.addItem(getLanguageNativeName(Language::Japanese), 4);
+        languageSelector_.addItem(getLanguageNativeName(Language::Russian), 5);
+        languageSelector_.addItem(getLanguageNativeName(Language::Spanish), 6);
         languageSelector_.setSelectedId(static_cast<int>(state.shared.language) + 1, juce::dontSendNotification);
         languageSelector_.onChange = [this] {
             appPreferences_.setLanguage(static_cast<Language>(languageSelector_.getSelectedId() - 1));
@@ -161,7 +162,8 @@ public:
                     std::function<void(VocoderModelWeight)> onVocoderModelWeightChanged,
                     std::function<bool(F0ModelType)> onF0ModelChanged,
                     std::function<void(bool)> onLightPitchCorrectionChanged,
-                    bool isVst3Plugin)
+                    bool isVst3Plugin,
+                    std::function<void()> onModelsDirectoryChanged = {})
         : appPreferences_(appPreferences)
         , onPreferencesChanged_(std::move(onPreferencesChanged))
         , onRenderingPriorityChanged_(std::move(onRenderingPriorityChanged))
@@ -169,6 +171,7 @@ public:
         , onF0ModelChanged_(std::move(onF0ModelChanged))
         , onLightPitchCorrectionChanged_(std::move(onLightPitchCorrectionChanged))
         , isVst3Plugin_(isVst3Plugin)
+        , onModelsDirectoryChanged_(std::move(onModelsDirectoryChanged))
     {
         auto state = appPreferences_.getState();
 
@@ -195,27 +198,6 @@ public:
         initialiseLabel(vocoderWeightLabel_, LOC(kVocoderWeight));
         addAndMakeVisible(vocoderWeightLabel_);
 
-        vocoderWeights_ = ModelFactory::getAvailableVocoderWeights(
-            ModelPathResolver::getModelsDirectory());
-        for (size_t i = 0; i < vocoderWeights_.size(); ++i)
-            vocoderWeightSelector_.addItem(juce::String(vocoderWeights_[i].displayName),
-                                           static_cast<int>(i) + 1);
-
-        // 选择当前权重；已持久化的权重文件缺失时回退第一项
-        const auto& currentWeight = state.shared.vocoderModelWeight;
-        int selectedWeightId = 0;
-        for (size_t i = 0; i < vocoderWeights_.size(); ++i) {
-            if (vocoderWeights_[i].fileName == currentWeight) {
-                selectedWeightId = static_cast<int>(i) + 1;
-                break;
-            }
-        }
-        if (selectedWeightId == 0 && !vocoderWeights_.empty())
-            selectedWeightId = 1;
-        vocoderWeightSelector_.setSelectedId(selectedWeightId, juce::dontSendNotification);
-        initialiseComboBox(vocoderWeightSelector_);
-        addAndMakeVisible(vocoderWeightSelector_);
-
         vocoderWeightSelector_.onChange = [this] {
             const int id = vocoderWeightSelector_.getSelectedId();
             if (id <= 0 || id > static_cast<int>(vocoderWeights_.size()))
@@ -227,33 +209,11 @@ public:
             if (onPreferencesChanged_)
                 onPreferencesChanged_();
         };
+        initialiseComboBox(vocoderWeightSelector_);
+        addAndMakeVisible(vocoderWeightSelector_);
 
         initialiseLabel(f0ModelLabel_, juce::String::fromUTF8(u8"音高检测模型"));
         addAndMakeVisible(f0ModelLabel_);
-
-        const auto f0Models = ModelFactory::getAvailableF0Models(
-            ModelPathResolver::getModelsDirectory());
-        for (const auto& model : f0Models) {
-            const int itemId = static_cast<int>(model.type) + 1;
-            f0ModelSelector_.addItem(model.displayName, itemId);
-            f0ModelSelector_.setItemEnabled(itemId, model.isAvailable);
-        }
-        // Ensure selected model is available; fallback to FCPE if not (e.g., old RMVPE config)
-        auto selectedType = state.shared.f0ModelType;
-        bool found = false;
-        for (const auto& model : f0Models) {
-            if (model.type == selectedType && model.isAvailable) {
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-            selectedType = F0ModelType::FCPE;
-        f0ModelSelector_.setSelectedId(
-            static_cast<int>(selectedType) + 1,
-            juce::dontSendNotification);
-        initialiseComboBox(f0ModelSelector_);
-        addAndMakeVisible(f0ModelSelector_);
 
         f0ModelSelector_.onChange = [this] {
             const auto type = static_cast<F0ModelType>(f0ModelSelector_.getSelectedId() - 1);
@@ -266,6 +226,31 @@ public:
             appPreferences_.setF0ModelType(type);
             notifyChanged();
         };
+        initialiseComboBox(f0ModelSelector_);
+        addAndMakeVisible(f0ModelSelector_);
+
+        // ── 模型目录（用户自选）────────────────────────────────────────
+        initialiseLabel(modelsDirectoryLabel_, juce::String::fromUTF8(u8"模型目录"));
+        addAndMakeVisible(modelsDirectoryLabel_);
+
+        modelsDirectoryPathLabel_.setColour(juce::Label::textColourId, UIColors::textSecondary);
+        modelsDirectoryPathLabel_.setJustificationType(juce::Justification::centredLeft);
+        addAndMakeVisible(modelsDirectoryPathLabel_);
+
+        chooseModelsDirectoryButton_.setButtonText(juce::String::fromUTF8(u8"选择..."));
+        chooseModelsDirectoryButton_.setColour(juce::TextButton::buttonColourId, UIColors::buttonNormal);
+        chooseModelsDirectoryButton_.setColour(juce::TextButton::textColourOffId, UIColors::textPrimary);
+        chooseModelsDirectoryButton_.onClick = [this] { chooseModelsDirectory(); };
+        addAndMakeVisible(chooseModelsDirectoryButton_);
+
+        autoDetectModelsDirectoryButton_.setButtonText(juce::String::fromUTF8(u8"自动侦测"));
+        autoDetectModelsDirectoryButton_.setColour(juce::TextButton::buttonColourId, UIColors::buttonNormal);
+        autoDetectModelsDirectoryButton_.setColour(juce::TextButton::textColourOffId, UIColors::textPrimary);
+        autoDetectModelsDirectoryButton_.onClick = [this] { applyModelsDirectory({}); };
+        addAndMakeVisible(autoDetectModelsDirectoryButton_);
+
+        refreshModelsDirectoryRow();
+        rebuildModelSelectors();
 
         if (!isVst3Plugin_) {
             initialiseToggleButton(experimentalFeaturesToggle_);
@@ -318,7 +303,7 @@ public:
         // 供父容器布局使用的确定内容高度
         {
             const int vPad = 4 * 2; // reduced(10, 4) vertical
-            const int rows = isVst3Plugin_ ? 4 : 6; // 插件隐藏实验控件
+            const int rows = isVst3Plugin_ ? 5 : 7; // 插件隐藏实验控件
             const int rowH = 34;
             const int gaps = 8 * (rows - 1) + (isVst3Plugin_ ? 0 : 4); // 行间 8px；实验模式下额外 hint 前 4px
             const int hintHeight = isVst3Plugin_ ? 0 : 42;
@@ -354,6 +339,17 @@ public:
         f0ModelLabel_.setBounds(row.removeFromLeft(labelWidth));
         f0ModelSelector_.setBounds(row.removeFromLeft(selectorWidth).reduced(0, 4));
 
+        bounds.removeFromTop(8);
+        row = bounds.removeFromTop(rowHeight);
+        modelsDirectoryLabel_.setBounds(row.removeFromLeft(labelWidth));
+        {
+            const int buttonWidth = 84;
+            auto buttonArea = row.removeFromRight(buttonWidth * 2 + 8);
+            autoDetectModelsDirectoryButton_.setBounds(buttonArea.removeFromRight(buttonWidth).reduced(0, 4));
+            chooseModelsDirectoryButton_.setBounds(buttonArea.removeFromRight(buttonWidth).reduced(0, 4));
+        }
+        modelsDirectoryPathLabel_.setBounds(row.reduced(0, 4));
+
         if (!isVst3Plugin_) {
             bounds.removeFromTop(8);
             row = bounds.removeFromTop(rowHeight);
@@ -381,6 +377,92 @@ private:
         }
     }
 
+    void refreshModelsDirectoryRow()
+    {
+        const auto dir = ModelPathResolver::getModelsDirectory();
+        modelsDirectoryPathLabel_.setText(juce::File(dir).getFullPathName(), juce::dontSendNotification);
+        autoDetectModelsDirectoryButton_.setEnabled(!appPreferences_.getCustomModelsDirectory().isEmpty());
+    }
+
+    void chooseModelsDirectory()
+    {
+        if (modelsDirectoryChooser_)
+            return;
+
+        const auto startDirectory = appPreferences_.getCustomModelsDirectory().isEmpty()
+            ? juce::File(ModelPathResolver::getModelsDirectory())
+            : juce::File(appPreferences_.getCustomModelsDirectory());
+        modelsDirectoryChooser_ = std::make_shared<juce::FileChooser>(
+            juce::String::fromUTF8(u8"选择模型目录"),
+            startDirectory,
+            "*");
+        const auto flags = juce::FileBrowserComponent::openMode
+                         | juce::FileBrowserComponent::canSelectDirectories;
+        const juce::Component::SafePointer<SharedAudioPage> safeThis(this);
+        modelsDirectoryChooser_->launchAsync(flags,
+            [safeThis, chooser = modelsDirectoryChooser_](const juce::FileChooser& fc)
+            {
+                if (safeThis == nullptr)
+                    return;
+                safeThis->modelsDirectoryChooser_.reset();
+                const auto result = fc.getResult();
+                if (result != juce::File())
+                    safeThis->applyModelsDirectory(result.getFullPathName());
+            });
+    }
+
+    void applyModelsDirectory(const juce::String& directory)
+    {
+        appPreferences_.setCustomModelsDirectory(directory);
+        refreshModelsDirectoryRow();
+        rebuildModelSelectors();
+        if (onModelsDirectoryChanged_)
+            onModelsDirectoryChanged_();
+        notifyChanged();
+    }
+
+    void rebuildModelSelectors()
+    {
+        const auto modelDir = ModelPathResolver::getModelsDirectory();
+
+        // 重新扫描当前模型目录下的声码器权重，保留已持久化的选择
+        const auto currentWeight = appPreferences_.getState().shared.vocoderModelWeight;
+        vocoderWeights_ = ModelFactory::getAvailableVocoderWeights(modelDir);
+        vocoderWeightSelector_.clear(juce::dontSendNotification);
+        int selectedWeightId = 0;
+        for (size_t i = 0; i < vocoderWeights_.size(); ++i) {
+            const auto& weight = vocoderWeights_[i];
+            vocoderWeightSelector_.addItem(weight.displayName, static_cast<int>(i) + 1);
+            if (weight.fileName == currentWeight)
+                selectedWeightId = static_cast<int>(i) + 1;
+        }
+        if (selectedWeightId == 0 && !vocoderWeights_.empty())
+            selectedWeightId = 1;
+        vocoderWeightSelector_.setSelectedId(selectedWeightId, juce::dontSendNotification);
+
+        // 重新扫描 F0 模型；已持久化的模型缺失时回退到第一个可用项
+        const auto f0Models = ModelFactory::getAvailableF0Models(modelDir);
+        auto selectedType = appPreferences_.getF0ModelType();
+        bool found = false;
+        f0ModelSelector_.clear(juce::dontSendNotification);
+        for (const auto& model : f0Models) {
+            const int itemId = static_cast<int>(model.type) + 1;
+            f0ModelSelector_.addItem(model.displayName, itemId);
+            f0ModelSelector_.setItemEnabled(itemId, model.isAvailable);
+            if (model.type == selectedType && model.isAvailable)
+                found = true;
+        }
+        if (!found) {
+            for (const auto& model : f0Models) {
+                if (model.isAvailable) {
+                    selectedType = model.type;
+                    break;
+                }
+            }
+        }
+        f0ModelSelector_.setSelectedId(static_cast<int>(selectedType) + 1, juce::dontSendNotification);
+    }
+
     AppPreferences& appPreferences_;
     std::function<void()> onPreferencesChanged_;
     std::function<void(bool)> onRenderingPriorityChanged_;
@@ -396,6 +478,12 @@ private:
     juce::ComboBox vocoderWeightSelector_;
     juce::Label f0ModelLabel_;
     juce::ComboBox f0ModelSelector_;
+    juce::Label modelsDirectoryLabel_;
+    juce::Label modelsDirectoryPathLabel_;
+    juce::TextButton chooseModelsDirectoryButton_;
+    juce::TextButton autoDetectModelsDirectoryButton_;
+    std::shared_ptr<juce::FileChooser> modelsDirectoryChooser_;
+    std::function<void()> onModelsDirectoryChanged_;
     juce::ToggleButton experimentalFeaturesToggle_;
     juce::Label experimentalFeaturesHintLabel_;
     juce::Label experimentalReferenceAlignModeLabel_;
@@ -1037,7 +1125,8 @@ RenderingPriorityPage SharedPreferencePages::createRenderingPriorityComponent(
     std::function<void(VocoderModelWeight)> onVocoderModelWeightChanged,
     std::function<bool(F0ModelType)> onF0ModelChanged,
     std::function<void(bool)> onLightPitchCorrectionChanged,
-    bool isVst3Plugin)
+    bool isVst3Plugin,
+    std::function<void()> onModelsDirectoryChanged)
 {
     auto component = std::make_unique<SharedAudioPage>(appPreferences,
                                                        std::move(onPreferencesChanged),
@@ -1045,7 +1134,8 @@ RenderingPriorityPage SharedPreferencePages::createRenderingPriorityComponent(
                                                        std::move(onVocoderModelWeightChanged),
                                                        std::move(onF0ModelChanged),
                                                        std::move(onLightPitchCorrectionChanged),
-                                                       isVst3Plugin);
+                                                       isVst3Plugin,
+                                                       std::move(onModelsDirectoryChanged));
     const int height = component->getContentHeight();
     return { std::move(component), height };
 }

@@ -952,7 +952,8 @@ void OpenTuneAudioProcessorEditor::showPreferencesDialog()
         std::move(onVocoderModelWeightChanged),
         std::move(onF0ModelChanged),
         std::move(onLightPitchCorrectionChanged),
-        true);
+        true,
+        [this] { processorRef_.resetInferenceBackend(false); });
     pages.insert(pages.begin(), { LOC(kAudio), std::move(audioPage.component), audioPage.height });
 
     auto* dialogContent = new TabbedPreferencesDialog(std::move(pages));

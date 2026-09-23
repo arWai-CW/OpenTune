@@ -2,6 +2,7 @@
 #include "ModelFactory.h"
 #include "../DSP/ResamplingManager.h"
 #include "../Utils/AppLogger.h"
+#include "../Utils/ModelPathResolver.h"
 #include <onnxruntime_cxx_api.h>
 #include <shared_mutex>
 #include <algorithm>
@@ -118,7 +119,9 @@ public:
                     ErrorCode::NotInitialized, "F0InferenceService not configured");
             }
             config.modelType = currentModelType_;
-            config.modelDir = modelDir_;
+            // 每次提取实时解析模型目录：用户自选目录变更后下一次提取即生效，
+            // 无需重启（进程内缓存，无磁盘 I/O）。
+            config.modelDir = ModelPathResolver::getModelsDirectory();
             config.confidence = confidenceThreshold_;
             config.f0Min = f0Min_;
             config.f0Max = f0Max_;

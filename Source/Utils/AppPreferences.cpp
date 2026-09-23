@@ -1,5 +1,7 @@
 #include "AppPreferences.h"
 
+#include "ModelPathResolver.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -23,6 +25,7 @@ constexpr const char* kStandaloneMouseTrailThemeKey = "standalone.mouseTrail.the
 constexpr const char* kStandaloneCursorStyleKey = "standalone.cursorStyle";
 constexpr const char* kSharedRenderingPriorityKey = "shared.rendering.priority";
 constexpr const char* kSharedVocoderWeightKey = "shared.rendering.vocoderWeight";
+constexpr const char* kSharedCustomModelsDirectoryKey = "shared.models.customDirectory";
 constexpr const char* kSharedExperimentalFeaturesEnabledKey = "shared.features.experimentalEnabled";
 constexpr const char* kSharedExperimentalReferenceAlignKey = "shared.align.experimental";
 constexpr const char* kSharedRecentProjectsKey = "shared.recentProjects";
@@ -87,6 +90,7 @@ const char* toLanguageToken(Language language)
     switch (language) {
         case Language::English: return "english";
         case Language::Chinese: return "chinese";
+        case Language::TraditionalChinese: return "traditional-chinese";
         case Language::Japanese: return "japanese";
         case Language::Russian: return "russian";
         case Language::Spanish: return "spanish";
@@ -100,6 +104,7 @@ Language languageFromToken(const juce::String& token)
 {
     if (token == "english") return Language::English;
     if (token == "chinese") return Language::Chinese;
+    if (token == "traditional-chinese") return Language::TraditionalChinese;
     if (token == "japanese") return Language::Japanese;
     if (token == "russian") return Language::Russian;
     if (token == "spanish") return Language::Spanish;
@@ -328,6 +333,7 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     state.shared.vocoderModelWeight = fromVocoderWeightToken(
         properties.getValue(kSharedVocoderWeightKey,
                             toVocoderWeightToken(state.shared.vocoderModelWeight)));
+    state.shared.customModelsDirectory = properties.getValue(kSharedCustomModelsDirectoryKey, {});
     state.shared.experimentalFeaturesEnabled = properties.getBoolValue(
         kSharedExperimentalFeaturesEnabledKey,
         state.shared.experimentalFeaturesEnabled);
@@ -396,6 +402,8 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
                         toRenderingPriorityToken(state.shared.renderingPriority));
     properties.setValue(kSharedVocoderWeightKey,
                         toVocoderWeightToken(state.shared.vocoderModelWeight));
+    properties.setValue(kSharedCustomModelsDirectoryKey,
+                        state.shared.customModelsDirectory);
     properties.setValue(kSharedExperimentalFeaturesEnabledKey,
                         state.shared.experimentalFeaturesEnabled);
     properties.setValue(kSharedLightPitchCorrectionEnabledKey,
@@ -457,6 +465,8 @@ void AppPreferences::load()
 
     const bool hasLegacyVisualPreference = userSettings->containsKey(kSharedPitchLaneVisualModeKey);
     state_ = loadStateFromProperties(*userSettings);
+    // 用户自选模型目录缓存与磁盘状态同步，getModelsDirectory() 之后只读缓存。
+    ModelPathResolver::setUserConfiguredModelsDirectory(state_.shared.customModelsDirectory);
     if (hasLegacyVisualPreference) {
         const bool needsVisualPreferenceMigration =
             !userSettings->containsKey(kSharedPianoRollShowPianoKeyboardKey)
@@ -577,6 +587,21 @@ void AppPreferences::setVocoderModelWeight(const VocoderModelWeight& weight)
     const std::lock_guard<std::mutex> lock(mutex_);
     state_.shared.vocoderModelWeight = weight;
     saveLocked();
+}
+
+void AppPreferences::setCustomModelsDirectory(const juce::String& customModelsDirectory)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    state_.shared.customModelsDirectory = customModelsDirectory;
+    // 同步进程内缓存：getModelsDirectory() 可能在推理线程被频繁调用，不触碰磁盘。
+    ModelPathResolver::setUserConfiguredModelsDirectory(customModelsDirectory);
+    saveLocked();
+}
+
+juce::String AppPreferences::getCustomModelsDirectory() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return state_.shared.customModelsDirectory;
 }
 
 void AppPreferences::setExperimentalFeaturesEnabled(bool enabled)

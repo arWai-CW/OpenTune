@@ -40,3 +40,5 @@ OpenTune/
 └── docs/
     └── UserGuide.html
 ```
+
+> The model directory can be customized at Settings → Audio → Model Directory (supported in both VST3 and Standalone, persisted automatically). The user-chosen directory takes precedence over automatic detection (program directory → Program Files → ProgramData → models/ next to the module → Resources → registry → current working directory); selecting "Auto Detect" restores the default behavior.

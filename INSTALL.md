@@ -40,3 +40,5 @@ OpenTune/
 └── docs/
     └── UserGuide.html
 ```
+
+> 模型目录可在「设置 → 音频 → 模型目录」中自定义（VST3 与 Standalone 均支持，自动持久化）。用户自选目录优先于自动侦测（程序目录 → Program Files → ProgramData → 模块旁 models/ → Resources → 注册表 → 当前工作目录）；设为「自动侦测」后恢复默认行为。

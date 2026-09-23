@@ -685,6 +685,7 @@ set(OPENTUNE_COMMON_SOURCES
         Source/Utils/NoteEqSettings.h
         Source/Utils/SpectrumDisplayData.h
         Source/Utils/OnnxRuntimeDelayLoadHook.cpp
+        Source/Utils/ModelPathResolver.cpp
         Source/Utils/ModelPathResolver.h
         Source/Utils/CpuBudgetManager.cpp
         Source/Utils/CpuBudgetManager.h
