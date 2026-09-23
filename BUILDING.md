@@ -239,6 +239,25 @@ cmake --build --preset macos-intel-release
 ./scripts/package-macos.sh --arch intel
 ```
 
+### macOS 本地测试（推荐：符号链接 VST3）
+
+构建产物路径固定（`build-silicon-ninja/...`），推荐把 VST3 bundle **符号链接**到宿主的扫描目录。链接始终指向固定产物路径，每次重新 `cmake --build` 后只需在宿主里重新扫描即可加载最新版本（ONNX Runtime dylib 与模型随 bundle 自带），无需手动复制：
+
+```bash
+# 在仓库根目录执行
+mkdir -p ~/Library/Audio/Plug-Ins/VST3
+# 若该目录已存在旧版 OpenTune.vst3（真实目录），先移走再建立链接
+# mv ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3 ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3.old
+ln -s "$(pwd)/build-silicon-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3" ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3
+```
+
+**注意：**
+
+- 建立链接后，在支持 ARA2 的宿主（如 Studio One、Cubase）中重新扫描 VST3 即可测试 ARA 整合；非 ARA 宿主会自动回退到 Capture 流程。
+- 若宿主不识别符号链接，改用 `cp -R` 复制 bundle，但每次重新构建后需重新复制。
+- Standalone 版本直接运行 `build-silicon-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app`。
+- 本地构建为 ad-hoc 签名，Gatekeeper 不会拦截；若宿主报告未签名，可用 `xattr -dr com.apple.quarantine <vst3>` 清除隔离标记。
+
 ## 构建产物
 
 | 格式 | Windows | macOS |

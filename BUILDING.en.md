@@ -226,7 +226,7 @@ cmake --build --preset macos-silicon-release
 
 # Intel (x86_64)
 cmake --preset macos-intel-ara-ninja
-cmake --build --preset macos-intel-ara-release
+cmake --build --preset macos-intel-release
 ```
 
 Packaging commands:
@@ -237,6 +237,25 @@ Packaging commands:
 # Intel
 ./scripts/package-macos.sh --arch intel
 ```
+
+### macOS local testing (recommended: symlink the VST3)
+
+The build artifact path is stable (`build-silicon-ninja/...`), so it is recommended to **symlink** the VST3 bundle into the host's scan directory. A symlink always points at the fixed artifact path — after each `cmake --build`, simply rescan the plugin in your host to load the latest version (the ONNX Runtime dylib and models ship inside the bundle), with no manual copying:
+
+```bash
+# Run from the repository root
+mkdir -p ~/Library/Audio/Plug-Ins/VST3
+# If an old OpenTune.vst3 (a real directory) already exists there, move it aside first
+# mv ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3 ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3.old
+ln -s "$(pwd)/build-silicon-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3" ~/Library/Audio/Plug-Ins/VST3/OpenTune.vst3
+```
+
+**Notes:**
+
+- After linking, rescan VST3 plugins in an ARA2-capable host (e.g., Studio One, Cubase) to test ARA integration; non-ARA hosts automatically fall back to the Capture flow.
+- If a host does not follow symlinks, copy the bundle instead with `cp -R`, but re-copy after every rebuild.
+- For the standalone app, run `build-silicon-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app` directly.
+- Local builds are ad-hoc signed, so Gatekeeper won't block them; if a host reports an unsigned plugin, clear the quarantine flag with `xattr -dr com.apple.quarantine <vst3>`.
 
 ## Build Artifacts
 
