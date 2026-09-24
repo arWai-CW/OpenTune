@@ -587,6 +587,8 @@ set(OPENTUNE_COMMON_SOURCES
         Source/Inference/F0InferenceService.cpp
         Source/Runtime/ProcessF0Runtime.cpp
         Source/Runtime/ProcessRenderRuntime.cpp
+        Source/Runtime/VocoderExecutionCoordinator.cpp
+        Source/Runtime/VocoderExecutionCoordinator.h
         Source/Inference/VocoderDomain.cpp
         Source/Inference/VocoderInferenceService.cpp
         Source/Inference/VocoderRenderScheduler.cpp
@@ -1525,4 +1527,22 @@ if(OPENTUNE_BUILD_TESTS)
         target_compile_options(OpenTuneContentRenderServiceTests PRIVATE /utf-8 /EHsc)
     endif()
     add_test(NAME ContentRenderServiceTests COMMAND OpenTuneContentRenderServiceTests)
+
+    # VocoderExecutionCoordinator 的 generation/reconfigure seam；使用 fake domain，
+    # 不依賴實際 ONNX model。
+    add_executable(OpenTuneVocoderExecutionCoordinatorTests
+        Tests/VocoderExecutionCoordinatorTests.cpp
+    )
+    target_include_directories(OpenTuneVocoderExecutionCoordinatorTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    target_link_libraries(OpenTuneVocoderExecutionCoordinatorTests PRIVATE
+        OpenTune
+        juce::juce_audio_basics
+        juce::juce_core
+    )
+    if(MSVC)
+        target_compile_options(OpenTuneVocoderExecutionCoordinatorTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME VocoderExecutionCoordinatorTests
+        COMMAND OpenTuneVocoderExecutionCoordinatorTests)
 endif()

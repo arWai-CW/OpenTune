@@ -33,7 +33,8 @@ VST3 和 Standalone 使用各自的 SharedCode target。公共源码分别编译
 | `ContentSnapshotProjection` | 集中完成 `ContentState` 與 snapshot 的雙向純資料投影 |
 | `ContentRenderService` | owner mutation 後的單一 render interface；吸收 playback publication、local/full/TimeGrid invalidation、Stage1 planning、canonical settlement 與 Stage2 gate，caller 不再建立 `RenderJob` |
 | `RenderWorker` | 執行 Stage1 identity queue 與 Stage2 queue；Stage1 以 `(RenderCache, chunk start)` index 做 O(log n) 查找與去重，adapter 仍由外部注入 |
-| `ProcessF0Runtime` / `ProcessRenderRuntime` | 进程级 F0 和 render 执行资源 |
+| `ProcessF0Runtime` / `ProcessRenderRuntime` | 进程级 F0 与 render DSP orchestration；`ProcessRenderRuntime` 不再擁有 vocoder domain、generation 或 control worker |
+| `VocoderExecutionCoordinator` | 可注入的 vocoder execution module；擁有 model/backend lifecycle、lazy initialization、generation-safe submit 與 reconfigure control worker，不處理 PCM 或 RenderCache |
 | `OpenTuneDocumentController` | ARA document-scoped content、宿主通知、ARA mutation、CRS 和 ARA F0 生命周期 |
 | `ReferenceTrackRegistry` | 进程级单例；跨 document 的 ARA instance 參考軌發布與群組偵測（共享任一 audio source persistent ID 的 owner 連通分量）。同 document 內的參考軌不走此路徑，見 §2.6 |
 | `ContentRenderRouting` | 纯函数；把鋼琴卷簾的 content items 分流為「正在處理」與「唯讀參考軌」，並套用參考軌選單的隱藏集合。不得在此引入任何繪製或 ARA 依賴 |
@@ -179,7 +180,7 @@ PianoRoll 的 source、output、timeline、pixel 映射集中在 `PianoRollTimeM
 
 Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容字段都恢复到对应 owner 的 `ContentState`。`contentRevision` 和 `audioRevision` 不从归档恢复，新内容身份从 1 开始；ARA 另外保存并恢复 `notesRevision`、`pitchRevision`、`timeGridRevision` 及分析相关 revision，Standalone 也恢复 `referenceFeatures.analysisRevision`。不额外生成运行时 revision 账本。跨采样率 buffer 长度由源 sample 数和源/目标采样率一次投影得到；不得从投影后的 buffer 长度反算源内容秒数。
 
-當前啟用測試預設關閉；打開 `OPENTUNE_BUILD_TESTS` 後有 10 個測試目標：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests`、`ContentRenderRoutingTests` 和 `ContentRenderServiceTests`。`ContentRenderServiceTests` 覆蓋無 usable F0 時只發布 playback source、playback-only republish 不啟動 Stage1、TimeGrid derived-output invalidation、local invalidation 的實體 queue 邊界、canonical settlement、只有非 ARA content 會啟動 Stage2、stale generation/blank completion、TimeStretch clear ABA，以及 service shutdown wakeup；`ReferenceTrackRegistryTests` 與 `ContentRenderRoutingTests` 維持既有 reference routing 契約。最近一次 CMake/Ninja 建置中，VST3/Standalone target 和 10/10 CTest 均通過。
+當前啟用測試預設關閉；打開 `OPENTUNE_BUILD_TESTS` 後有 11 個測試目標：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests`、`ContentRenderRoutingTests`、`ContentRenderServiceTests` 和 `VocoderExecutionCoordinatorTests`。`ContentRenderServiceTests` 覆蓋無 usable F0 時只發布 playback source、playback-only republish 不啟動 Stage1、TimeGrid derived-output invalidation、local invalidation 的實體 queue 邊界、canonical settlement、只有非 ARA content 會啟動 Stage2、stale generation/blank completion、TimeStretch clear ABA，以及 service shutdown wakeup；`VocoderExecutionCoordinatorTests` 使用 fake domain 覆蓋 generation-safe submit 與 model creation failure 後同 weight retry；`ReferenceTrackRegistryTests` 與 `ContentRenderRoutingTests` 維持既有 reference routing 契約。最近一次 CMake/Ninja 建置中，VST3/Standalone target 和 11/11 CTest 均通過。
 
 ## 3. 已完成的边界收敛
 
@@ -222,7 +223,7 @@ Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容�
 
 1. **离散投影与绝对时间的边界合同仍需宿主和数据回归。** placement fade、RenderCache 跨率长度、TimeGrid spacing、F0 区间投影已分别使用明确的 seconds/point/interval 语义；剩余问题集中在 ARA source window 的 fractional sample 对齐和模型输入边界，不能凭经验改绝对时间公式。
 2. **F0 frame 与模型窗中心的合同未锁定。** FCPE padding、F0Timeline 和 mel/F0 插值需要训练侧定义和回归样本确认。
-3. **旧 cache 拒绝、非恒等 TimeGrid 的 cache miss、F0Timeline/SourceWindow 采样网格与 split 边界数学、AutomationLane slice/merge、跨 instance 群組偵測、钢琴卷帘 active/reference 分流已有纯逻辑测试。** ARA 非零 source window、局部渲染 revision、导出一致性、placement fractional sample 边界以及 `splitPlacementAtSeconds` 端到端集成目前只有代码合同；相关 ARA/Capture 行为仍缺宿主级验证。當前啟用測試目標為 10 個，CTest 全部通過。
+3. **舊 cache 拒絕、非恒等 TimeGrid 的 cache miss、F0Timeline/SourceWindow 採樣網格與 split 邊界數學、AutomationLane slice/merge、跨 instance 群組偵測、鋼琴卷帘 active/reference 分流已有純邏輯測試。** ARA 非零 source window、局部渲染 revision、導出一致性、placement fractional sample 邊界以及 `splitPlacementAtSeconds` 端到端集成目前只有代碼合同；相關 ARA/Capture 行為仍缺宿主級驗證。當前啟用測試目標為 11 個，CTest 全部通過。
 
 ### P2：维护成本
 
@@ -230,7 +231,7 @@ Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容�
 2. F0/Reference 使用 detached worker，RenderWorker 使用可 join 的常驻线程，Vocoder control worker 依附进程寿命单例；各自拥有去重、shutdown 和 completion 机制。业务不能强行合并，但关闭、generation 和 completion gate 应建立共同测试合同。
 3. 三种持久化容器仍各自解释 EQ/Note migration；格式边界应保留，纯数据迁移规则可以共享。
 4. Beat 计算、MIDI/Hz 与 lane-center 转换、cents math 等仍有重复或同名 API，后续应在纯数学边界单点化，不能把 UI 坐标规则混入音高真相。
-5. 測試預設仍為關閉選項；本次驗證顯式打開 `OPENTUNE_BUILD_TESTS` 後，VST3/Standalone target 和 10/10 CTest 均通過。
+5. 測試預設仍為關閉選項；本次驗證顯式打開 `OPENTUNE_BUILD_TESTS` 後，VST3/Standalone target 和 11/11 CTest 均通過。
 
 ### 不属于当前架构问题的事项
 

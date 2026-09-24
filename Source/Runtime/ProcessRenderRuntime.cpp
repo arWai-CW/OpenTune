@@ -6,16 +6,13 @@
 #include "../DSP/NoteEqProcessor.h"
 #include "../Inference/ChunkRenderStrategy.h"
 #include "../Inference/RenderCache.h"
-#include "../Inference/VocoderDomain.h"
 #include "../Render/RenderChunkPlanner.h"
-#include "../Utils/AccelerationDetector.h"
 #include "../Utils/AppLogger.h"
 #include "../Utils/AppPreferences.h"
 #include "../Utils/ChannelLayoutLogger.h"
 #include "../Utils/ModelPathResolver.h"
 #include "../Utils/PitchCurve.h"
 #include "../Utils/TimeCoordinate.h"
-#include "ProcessF0Runtime.h"
 
 #include <juce_events/juce_events.h>
 
@@ -374,126 +371,87 @@ ProcessRenderRuntime::ProcessRenderRuntime()
     // 实际选择的权重（而非硬编码默认值）。
     const auto prefs = AppPreferences().getState().shared.vocoderModelWeight;
     const auto modelsDir = ModelPathResolver::getModelsDirectory();
-    currentVocoderModelWeight_ = prefs;
+    auto initialWeight = prefs;
 
     // 持久化权重可能已被新版本停止打包；只回退到项目保证提供的内置默认权重。
-    // 默认权重也缺失时保留原值，让后续 createVocoderDomain 报出真实错误。
-    const auto resolvedPath = modelPathForWeight(modelsDir, prefs);
+    // 默认权重也缺失时保留原值，让 coordinator 报出真实错误。
+    const auto weightPath = [&modelsDir](const VocoderModelWeight& weight)
+    {
+        const juce::File preferred = juce::File(modelsDir)
+            .getChildFile("vocoder_weights")
+            .getChildFile(juce::String(weight));
+        if (preferred.existsAsFile())
+            return preferred.getFullPathName().toStdString();
+        return modelsDir + "/" + weight;
+    };
+
+    const auto resolvedPath = weightPath(initialWeight);
     if (!juce::File(resolvedPath).existsAsFile()) {
         AppLogger::warn("[ProcessRenderRuntime] Persisted vocoder weight not found: "
-            + juce::String(prefs) + " (" + resolvedPath + ")");
+            + juce::String(initialWeight) + " (" + resolvedPath + ")");
 
-        if (prefs != kDefaultVocoderWeight) {
-            const auto defaultPath = modelPathForWeight(modelsDir, kDefaultVocoderWeight);
+        if (initialWeight != kDefaultVocoderWeight) {
+            const auto defaultPath = weightPath(kDefaultVocoderWeight);
             if (juce::File(defaultPath).existsAsFile()) {
                 AppLogger::warn("[ProcessRenderRuntime] Falling back to default weight: "
                     + juce::String(kDefaultVocoderWeight));
-                currentVocoderModelWeight_ = kDefaultVocoderWeight;
+                initialWeight = kDefaultVocoderWeight;
             }
         }
     }
 
-    // 进程寿命 control worker：模型切换/后端重置的耗时 Session 销毁、按当前
-    // 配置重建与 AccelerationDetector resetAndDetect 全部在此串行执行；UI 线程
-    // 只投递命令并立即返回。单例永不析构，线程随进程退出回收，绝不在实例
-    // 卸载路径 join。
-    controlWorker_ = std::thread([this]() { controlWorkerLoop(); });
+    // Domain lifecycle、generation 與 control worker 由 coordinator 擁有；
+    // ProcessRenderRuntime 只在 reconfigure 完成時接收 retry flush callback。
+    vocoderExecution_ = std::make_unique<VocoderExecutionCoordinator>(
+        std::move(initialWeight), modelsDir);
+    vocoderExecution_->setReconfigureObserver(
+        [this](bool domainAvailable)
+        {
+            flushDeferredRetries(domainAvailable);
+        });
 }
 
-std::string ProcessRenderRuntime::modelPathForWeight(const std::string& modelDir, const VocoderModelWeight& weight)
+void ProcessRenderRuntime::setVocoderModelWeight(
+    const VocoderModelWeight& weight, std::function<void()> completion)
 {
-    // 权重标识即文件名：vocoder_weights/ 优先（用户放置的可切换权重），
-    // 未命中时回退 models/ 根目录（内置权重）。
-    const juce::File dirWeight = juce::File(modelDir)
-        .getChildFile("vocoder_weights")
-        .getChildFile(juce::String(weight));
-    if (dirWeight.existsAsFile())
-        return dirWeight.getFullPathName().toStdString();
-
-    return modelDir + "/" + weight;
+    vocoderExecution_->setVocoderModelWeight(weight, std::move(completion));
 }
 
-std::unique_ptr<VocoderDomain> ProcessRenderRuntime::createVocoderDomain(const VocoderModelWeight& weight)
+void ProcessRenderRuntime::resetVocoder(std::function<void()> completion)
 {
-    // 该函数始终在 vocoderMutex_ 外执行。ORT Env 初始化、模型加载、Session
-    // 创建和失败清理都可能耗时，绝不能阻塞 UI 的 detach/isVocoderReady。
-    const auto modelsDir = ModelPathResolver::getModelsDirectory();
-    if (!ProcessF0Runtime::getInstance().initialize(modelsDir))
-        return nullptr;
-
-    auto env = ProcessF0Runtime::getInstance().getOrtEnv();
-    if (env == nullptr)
-        return nullptr;
-
-    auto domain = std::make_unique<VocoderDomain>(env);
-    const auto modelPath = modelPathForWeight(modelsDir, weight);
-    AppLogger::info("VocoderDomain: loading weight=" + juce::String(weight)
-        + " modelPath=" + modelPath);
-    if (!domain->initialize(modelPath))
-        return nullptr;
-
-    return domain;
+    vocoderExecution_->resetVocoder(std::move(completion));
 }
 
-void ProcessRenderRuntime::reconfigureVocoder(const ControlCommand& command)
+void ProcessRenderRuntime::resetInferenceBackend(
+    bool forceCpu, std::function<void()> completion)
 {
-    std::unique_ptr<VocoderDomain> retiredDomain;
-    VocoderModelWeight targetWeight;
+    vocoderExecution_->resetInferenceBackend(forceCpu, std::move(completion));
+}
 
-    {
-        std::unique_lock<std::mutex> lock(vocoderMutex_);
 
-        if (command.type == ControlCommand::Type::SetVocoderWeight
-            && currentVocoderModelWeight_ == command.weight
-            && vocoderDomain_ != nullptr
-            && !vocoderReconfiguring_)
-            return;
+bool ProcessRenderRuntime::submitVocoderJob(
+    VocoderExecutionJob job, uint64_t expectedGeneration)
+{
+    return vocoderExecution_->submit(std::move(job), expectedGeneration);
+}
 
-        if (command.type == ControlCommand::Type::SetVocoderWeight)
-            currentVocoderModelWeight_ = command.weight;
+bool ProcessRenderRuntime::isVocoderReady() const noexcept
+{
+    return vocoderExecution_->isReady();
+}
 
-        targetWeight = currentVocoderModelWeight_;
-        vocoderReconfiguring_ = true;
-        retiredDomain = std::move(vocoderDomain_); // O(1)：锁内只摘除所有权
-        ++vocoderGeneration_;                      // 立即拒绝全部旧配置快照
+bool ProcessRenderRuntime::isVocoderReconfiguring() const noexcept
+{
+    return vocoderExecution_->isReconfiguring();
+}
 
-        vocoderStateCv_.wait(lock, [this] { return !vocoderInitializing_; });
-    }
-
-    // 唯一可能无界的路径：只阻塞进程寿命 control worker，不持任何 runtime 锁。
-    retiredDomain.reset();
-
-    if (command.type == ControlCommand::Type::ResetInferenceBackend)
-    {
-        auto& detector = AccelerationDetector::getInstance();
-        detector.resetAndDetect(command.forceCpu);
-    }
-
-    // 严格先销毁旧 Session，再创建新 Session；新旧显存不并存。
-    auto newDomain = createVocoderDomain(targetWeight);
-
+void ProcessRenderRuntime::flushDeferredRetries(bool domainAvailable)
+{
     std::vector<DeferredRetry> readyRetries;
     {
-        std::lock_guard<std::mutex> lock(vocoderMutex_);
-        if (currentVocoderModelWeight_ == targetWeight)
-        {
-            vocoderDomain_ = std::move(newDomain);
-            if (vocoderDomain_ != nullptr)
-                ++vocoderGeneration_; // 新 domain 获得独立代际
-        }
-        vocoderReconfiguring_ = false;
-        readyRetries = std::move(deferredRetries_);
+        std::lock_guard<std::mutex> lock(deferredRetryMutex_);
+        readyRetries.swap(deferredRetries_);
     }
-    vocoderStateCv_.notify_all();
-
-    // Flush deferred retries outside vocoderMutex_: new domain is already
-    // published (or creation failed and vocoderDomain_ remains null).
-    // Directly check domain presence — never call acquireVocoderConfig here
-    // which would trigger recursive domain creation.
-    const bool domainAvailable = [&]() {
-        std::lock_guard<std::mutex> lk(vocoderMutex_);
-        return vocoderDomain_ != nullptr;
-    }();
 
     for (auto& retry : readyRetries)
     {
@@ -502,165 +460,16 @@ void ProcessRenderRuntime::reconfigureVocoder(const ControlCommand& command)
             continue;
 
         if (domainAvailable)
+        {
             crsShared->requeueRenderChunk(retry.job);
-        else
+        }
+        else if (retry.job.renderCache != nullptr)
+        {
             retry.job.renderCache->completeChunkRenderFailure(
                 retry.job.startSample, retry.job.targetRevision,
                 retry.job.cacheGeneration);
-    }
-}
-
-void ProcessRenderRuntime::postControlCommand(ControlCommand command)
-{
-    {
-        std::lock_guard<std::mutex> lock(controlMutex_);
-        controlQueue_.push_back(std::move(command));
-    }
-    controlCv_.notify_one();
-}
-
-void ProcessRenderRuntime::controlWorkerLoop()
-{
-    while (true)
-    {
-        ControlCommand command;
-        {
-            std::unique_lock<std::mutex> lock(controlMutex_);
-            controlCv_.wait(lock, [this]() { return !controlQueue_.empty(); });
-            command = std::move(controlQueue_.front());
-            controlQueue_.pop_front();
-        }
-
-        reconfigureVocoder(command);
-
-        if (command.completion)
-            juce::MessageManager::callAsync(std::move(command.completion));
-    }
-}
-
-void ProcessRenderRuntime::setVocoderModelWeight(const VocoderModelWeight& weight, std::function<void()> completion)
-{
-    // UI 线程只投递命令并立即返回；Session 销毁与重建由 control worker 串行执行。
-    ControlCommand command;
-    command.type = ControlCommand::Type::SetVocoderWeight;
-    command.weight = weight;
-    command.completion = std::move(completion);
-    postControlCommand(std::move(command));
-}
-
-void ProcessRenderRuntime::resetVocoder(std::function<void()> completion)
-{
-    ControlCommand command;
-    command.type = ControlCommand::Type::ResetVocoder;
-    command.completion = std::move(completion);
-    postControlCommand(std::move(command));
-}
-
-void ProcessRenderRuntime::resetInferenceBackend(bool forceCpu, std::function<void()> completion)
-{
-    ControlCommand command;
-    command.type = ControlCommand::Type::ResetInferenceBackend;
-    command.forceCpu = forceCpu;
-    command.completion = std::move(completion);
-    postControlCommand(std::move(command));
-}
-
-bool ProcessRenderRuntime::submitVocoderJob(VocoderDomain::Job job, uint64_t expectedGeneration)
-{
-    std::lock_guard<std::mutex> lock(vocoderMutex_);
-    if (vocoderDomain_ == nullptr)
-        return false;
-    if (vocoderGeneration_ != expectedGeneration)
-        return false;   // domain 已重建：job 配置过期，拒绝提交
-    return vocoderDomain_->submit(std::move(job));
-}
-
-bool ProcessRenderRuntime::acquireVocoderConfig(VocoderConfig& out)
-{
-    VocoderModelWeight targetWeight;
-    uint64_t creationGeneration = 0;
-
-    {
-        std::unique_lock<std::mutex> lock(vocoderMutex_);
-        if (vocoderDomain_ != nullptr)
-        {
-            out.generation = vocoderGeneration_;
-            out.conditioningBins = vocoderDomain_->getConditioningBins();
-            out.conditioningType = vocoderDomain_->getConditioningType();
-            out.fMax = vocoderDomain_->getFMax();
-            return true;
-        }
-
-        if (vocoderInitializing_)
-        {
-            vocoderStateCv_.wait(lock, [this] {
-                return !vocoderInitializing_ || vocoderReconfiguring_;
-            });
-
-            if (vocoderDomain_ != nullptr)
-            {
-                out.generation = vocoderGeneration_;
-                out.conditioningBins = vocoderDomain_->getConditioningBins();
-                out.conditioningType = vocoderDomain_->getConditioningType();
-                out.fMax = vocoderDomain_->getFMax();
-                return true;
-            }
-        }
-
-        if (vocoderReconfiguring_)
-            return false;
-
-        vocoderInitializing_ = true;
-        targetWeight = currentVocoderModelWeight_;
-        creationGeneration = vocoderGeneration_;
-    }
-
-    // 首次模型加载在 RenderWorker 上锁外执行；UI 查询仍可取得短锁并立即返回。
-    auto newDomain = createVocoderDomain(targetWeight);
-
-    bool mayPublish = false;
-    bool published = false;
-    {
-        std::lock_guard<std::mutex> lock(vocoderMutex_);
-        mayPublish = !vocoderReconfiguring_
-            && vocoderInitializing_
-            && vocoderGeneration_ == creationGeneration
-            && currentVocoderModelWeight_ == targetWeight
-            && vocoderDomain_ == nullptr;
-
-        if (mayPublish && newDomain != nullptr)
-        {
-            vocoderDomain_ = std::move(newDomain);
-            ++vocoderGeneration_;
-            out.generation = vocoderGeneration_;
-            out.conditioningBins = vocoderDomain_->getConditioningBins();
-            out.conditioningType = vocoderDomain_->getConditioningType();
-            out.fMax = vocoderDomain_->getFMax();
-            published = true;
         }
     }
-
-    // 发布失败的新 domain 也必须在锁外销毁。保持 initializing=true 直到其清理
-    // 完成，防止 control worker 在旧初始化对象仍存在时创建第二个 Session。
-    newDomain.reset();
-    {
-        std::lock_guard<std::mutex> lock(vocoderMutex_);
-        vocoderInitializing_ = false;
-    }
-    vocoderStateCv_.notify_all();
-    return published;
-}
-
-bool ProcessRenderRuntime::isVocoderReady() const noexcept
-{
-    std::lock_guard<std::mutex> lock(vocoderMutex_);
-    return vocoderDomain_ != nullptr;
-}
-
-bool ProcessRenderRuntime::isVocoderReconfiguring() const noexcept
-{
-    std::lock_guard<std::mutex> lock(vocoderMutex_);
-    return vocoderReconfiguring_;
 }
 
 void ProcessRenderRuntime::deferOrRequeue(
@@ -668,8 +477,8 @@ void ProcessRenderRuntime::deferOrRequeue(
 {
     bool shouldDefer = false;
     {
-        std::lock_guard<std::mutex> lock(vocoderMutex_);
-        shouldDefer = vocoderReconfiguring_;
+        std::lock_guard<std::mutex> lock(deferredRetryMutex_);
+        shouldDefer = vocoderExecution_->isReconfiguring();
         if (shouldDefer)
             deferredRetries_.push_back({crs, std::move(job)});
     }
@@ -705,7 +514,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     int numFrames = 0;
     bool clipFound = false;
     bool boundariesFrozen = false;
-    VocoderConfig vocoderCfg;
+    VocoderExecutionCoordinator::Config vocoderCfg;
 
     if (coreJob.audioBuffer != nullptr)
     {
@@ -992,7 +801,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     // （generation/conditioningBins/conditioningType/fMax）：raw 四分支与 light
     // 路径已在上方早退，绝不触发模型加载。配置与提交校验的 generation 同属一个
     // domain，不存在跨域混用。
-    if (!acquireVocoderConfig(vocoderCfg))
+    if (!vocoderExecution_->acquireConfig(vocoderCfg))
     {
         if (isVocoderReconfiguring())
         {
@@ -1099,7 +908,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
         vocoderUv[static_cast<size_t>(i)] = (voiced0 || voiced1) ? 1.0f : 0.0f;
     }
 
-    VocoderDomain::Job vocoderJob;
+    VocoderExecutionJob vocoderJob;
     vocoderJob.f0 = std::move(vocoderF0);
     vocoderJob.uv = std::move(vocoderUv);
     vocoderJob.conditioning = std::move(conditioning);
@@ -1119,7 +928,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                              captureContentKey, chunkObjId,
                              jobStartSample, frozenBoundaries, contentSnap,
                              completion](
-                                 VocoderRenderScheduler::JobResult result,
+                                 VocoderExecutionJobResult result,
                                  const juce::String& error,
                                  const std::vector<float>& audio)
     {
@@ -1131,7 +940,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
 
         const auto& boundaries = frozenBoundaries;
 
-        if (result == VocoderRenderScheduler::JobResult::Succeeded)
+        if (result == VocoderExecutionJobResult::Succeeded)
         {
             std::vector<float> publishedAudio;
             if (!preparePublishedAudioFromSynthesis(boundaries, audio, publishedAudio))
@@ -1165,7 +974,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                                requeueAudioBuffer,
                                requeueAudioSampleRate);
         }
-        else if (result == VocoderRenderScheduler::JobResult::Cancelled)
+        else if (result == VocoderExecutionJobResult::Cancelled)
         {
             // Cancelled (scheduler shutdown, superseded, queue overflow): requeue or defer
             RenderJob requeueJob;

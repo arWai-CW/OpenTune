@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../Content/EditableContentSnapshot.h"
-#include "../Inference/VocoderDomain.h"
 #include "../Render/ContentRenderService.h"
+#include "VocoderExecutionCoordinator.h"
 #include "../Render/RenderJob.h"
 #include "../Utils/VocoderModelWeight.h"
 #include <condition_variable>
@@ -65,7 +65,7 @@ public:
      * snapshot via acquireVocoderConfig(), so a job is never submitted to a
      * domain rebuilt since then with stale configuration.
      */
-    bool submitVocoderJob(VocoderDomain::Job job, uint64_t expectedGeneration);
+    bool submitVocoderJob(VocoderExecutionJob job, uint64_t expectedGeneration);
     bool isVocoderReady() const noexcept;
     bool isVocoderReconfiguring() const noexcept;
 
@@ -75,68 +75,18 @@ private:
     ProcessRenderRuntime();
     ~ProcessRenderRuntime() = default;
 
-    static std::string modelPathForWeight(const std::string& modelDir, const VocoderModelWeight& weight);
-
-    // 在锁外创建并初始化完整 domain。模型加载、Session 创建和失败清理均不得
-    // 持有 vocoderMutex_，保证 UI 查询与实例 detach 永远只经历短临界区。
-    std::unique_ptr<VocoderDomain> createVocoderDomain(const VocoderModelWeight& weight);
-
-    // 一次锁内“确保 domain 并返回 generation/conditioningBins/fMax”：配置与
-    // domain 同代生成，杜绝跨域混用（旧 generation 配置配新 domain 等）。
-    struct VocoderConfig
-    {
-        uint64_t generation{0};
-        int conditioningBins{0};
-        VocoderConditioningType conditioningType{VocoderConditioningType::LogMel};
-        float fMax{16000.0f};
-    };
-    bool acquireVocoderConfig(VocoderConfig& out);
-
-    // ---- 进程寿命 control worker：模型切换/后端重置的唯一执行者 ----
-    struct ControlCommand
-    {
-        enum class Type : uint8_t
-        {
-            SetVocoderWeight,
-            ResetVocoder,
-            ResetInferenceBackend
-        };
-
-        Type type{Type::ResetVocoder};
-        VocoderModelWeight weight{kDefaultVocoderWeight};
-        bool forceCpu{false};
-        std::function<void()> completion;
-    };
-
-    // control worker 唯一重配入口：短锁内摘除旧 domain 并推进 generation，
-    // 锁外销毁旧 Session，随后锁外创建新 Session，最后短锁发布。
-    void reconfigureVocoder(const ControlCommand& command);
-
-    void controlWorkerLoop();
-    void postControlCommand(ControlCommand command);
-
-    std::thread controlWorker_;
-    std::mutex controlMutex_;
-    std::condition_variable controlCv_;
-    std::deque<ControlCommand> controlQueue_;
-
-    std::unique_ptr<VocoderDomain> vocoderDomain_;
-    VocoderModelWeight currentVocoderModelWeight_{kDefaultVocoderWeight};
-    mutable std::mutex vocoderMutex_;
-    std::condition_variable vocoderStateCv_;
-    bool vocoderReconfiguring_{false}; // vocoderMutex_ 保护：control worker 已摘除旧 domain
-    bool vocoderInitializing_{false};  // vocoderMutex_ 保护：RenderWorker 正在锁外首次创建
-    uint64_t vocoderGeneration_{0};  // vocoderMutex_ 保护
-
-    // Deferred retry list: jobs that failed with generation mismatch or cancelled
-    // during reconfigureVocoder. Flushed after new domain is published and
-    // reconfiguring_ is cleared.
+    // Deferred retry list 只處理 render transaction；vocoder domain 的
+    // generation 與 reconfigure lifecycle 由 VocoderExecutionCoordinator 擁有。
     struct DeferredRetry {
         std::weak_ptr<ContentRenderService> crs;
         RenderJob job;
     };
-    std::vector<DeferredRetry> deferredRetries_; // vocoderMutex_ protected
+    mutable std::mutex deferredRetryMutex_;
+    std::vector<DeferredRetry> deferredRetries_;
 
+    std::unique_ptr<VocoderExecutionCoordinator> vocoderExecution_;
+
+    void flushDeferredRetries(bool domainAvailable);
     void deferOrRequeue(std::shared_ptr<ContentRenderService> crs, RenderJob job);
 
     ProcessRenderRuntime(const ProcessRenderRuntime&) = delete;
