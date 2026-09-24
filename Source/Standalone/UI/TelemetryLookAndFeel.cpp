@@ -1,6 +1,7 @@
 #include "TelemetryLookAndFeel.h"
 #include "TelemetryTheme.h"
 #include "UIColors.h"
+#include "UiAssets.h"
 #include "../../Utils/CursorTheme.h"
 
 namespace OpenTune {
@@ -590,7 +591,10 @@ juce::Font TelemetryLookAndFeel::getComboBoxFont(juce::ComboBox& box)
 
 juce::Font TelemetryLookAndFeel::getPopupMenuFont()
 {
-    return Telemetry::monoFont(kMonoDataSize);
+    // 選單會顯示本地化字串（含中文）；等寬 ASCII 字型無 CJK 字形會渲染成方框。
+    // 選單文字改用內嵌的 Honor Sans CN；等寬字型保留給數值/程式碼類面板。
+    return juce::Font(juce::FontOptions(UiAssets::createHonorSansTypeface())
+                          .withHeight(FontScale::scale(kMonoDataSize)));
 }
 
 juce::Label* TelemetryLookAndFeel::createComboBoxTextBox(juce::ComboBox& box)

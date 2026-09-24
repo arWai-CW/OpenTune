@@ -84,6 +84,14 @@ public:
     void detachDocumentController(OpenTuneDocumentController& owner);
 
     void refreshRenderPlanFromDocument();
+
+    /**
+     * host 指派給本 instance 的 playback region（ARA ARAPlaybackRenderer 的
+     * region assignment 集合）。這是「哪一條 track 屬於本 instance」的權威訊號：
+     * audio 渲染與 editor 顯示都應以它為範圍。
+     * 執行緒安全（讀取 atomic plan 的快照）。
+     */
+    std::vector<juce::ARAPlaybackRegion*> getAssignedPlaybackRegions() const;
     
     void prepareToPlay(double sampleRate,
                        int maximumSamplesPerBlock,

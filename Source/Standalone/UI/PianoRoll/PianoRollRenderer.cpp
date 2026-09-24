@@ -1411,6 +1411,84 @@ void PianoRollRenderer::drawGhostNotes(juce::Graphics& g, const RenderContext& c
 }
 
 // ============================================================================
+// 跨軌參考曲線疊加（registry 來源：同群組其他 instance 發布的 modification）
+//
+// 外觀與 drawReferenceF0Curve（同 document 非焦點 track）刻意一致：
+// 統一灰、Original 為粗半透明「帶」、Corrected 為細實線、無 glow。
+// 顏色由 renderer 層強制（UIColors::referenceCurve），呼叫端無法再引入
+// per-source 配色，以維持「參考軌恆為灰色」的視覺契約。
+// ============================================================================
+void PianoRollRenderer::drawReferenceTrackCurves(juce::Graphics& g,
+                                                 const RenderContext& ctx,
+                                                 const std::vector<ReferenceTrackCurve>& curves)
+{
+    if (curves.empty())
+        return;
+
+    const juce::Colour grey = UIColors::referenceCurve;
+    const juce::PathStrokeType bandStroke(3.2f, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::rounded);
+    const juce::PathStrokeType lineStroke(1.15f, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::rounded);
+
+    for (const auto& curve : curves)
+    {
+        if (!curve.isValid())
+            continue;
+
+        const size_t frameCount = curve.originalHz.size();
+
+        // 逐幀連線：遇到無效幀（無 region 對映 / 無聲）就斷開 subpath。
+        const auto buildPath = [&](const std::vector<float>& times,
+                                   const std::vector<float>& values) {
+            juce::Path path;
+            bool penDown = false;
+            for (size_t i = 0; i < frameCount; ++i)
+            {
+                if (times[i] < 0.0f || values[i] <= 0.0f)
+                {
+                    penDown = false;
+                    continue;
+                }
+                const float x = static_cast<float>(ctx.coords.timeToX(times[i]));
+                const float y = ctx.coords.freqToY(values[i]);
+                if (!penDown)
+                {
+                    path.startNewSubPath(x, y);
+                    penDown = true;
+                }
+                else
+                {
+                    path.lineTo(x, y);
+                }
+            }
+            return path;
+        };
+
+        // 1) Original F0：粗半透明帶（基準）
+        {
+            const auto path = buildPath(curve.playbackTimes, curve.originalHz);
+            if (!path.isEmpty())
+            {
+                g.setColour(grey.withAlpha(0.30f));
+                g.strokePath(path, bandStroke);
+            }
+        }
+
+        // 2) Corrected F0：細實線疊在帶上（顯示參考轨的修正結果）
+        if (curve.hasCorrections)
+        {
+            const auto path = buildPath(curve.playbackTimes, curve.correctedHz);
+            if (!path.isEmpty())
+            {
+                g.setColour(grey.withAlpha(0.85f));
+                g.strokePath(path, lineStroke);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // TimeGrid Anchors (cached slot — neutral lines, no interaction)
 // ============================================================================
 void PianoRollRenderer::drawTimeGridAnchors(juce::Graphics& g, const RenderContext& ctx, const ContentRenderItem& item)
@@ -1957,6 +2035,131 @@ void PianoRollRenderer::drawF0Curve(juce::Graphics& g,
                 }
             }
         }
+        }
+    }
+}
+
+// ============================================================================
+// 參考軌（同一 ARA document 內的非焦點 track）— 僅灰色 F0 曲線
+//
+// 與 drawF0Curve 共用時間對映 / unvoiced 切段邏輯，但刻意改掉外觀：
+//   - 統一灰（UIColors::referenceCurve），不用紅/藍主動配色
+//   - 無 glow / innerGlow / gradient，單純線條以免搶走主動曲線焦點
+//   - Original 畫成粗半透明「帶」、Corrected 畫成細實線疊在帶上；
+//     同色之下仍能看出參考轨是否已被校正（線偏離帶）
+// ============================================================================
+void PianoRollRenderer::drawReferenceF0Curve(juce::Graphics& g,
+                                            const RenderContext& ctx,
+                                            const ContentRenderItem& item)
+{
+    if (item.f0Timeline.isEmpty())
+        return;
+    if (item.pitchSnapshot == nullptr || item.pitchSnapshot->size() == 0)
+        return;
+    if (!ctx.showOriginalF0 && !ctx.showCorrectedF0)
+        return;
+
+    const auto visibleWindow = computeFullViewportTimeWindow(ctx, item);
+    if (!visibleWindow.isValid())
+        return;
+
+    const int marginFrames = 10;
+    const auto visibleFrames = item.f0Timeline.rangeForTimesWithMargin(
+        visibleWindow.visibleContentStartTime,
+        visibleWindow.visibleContentEndTime,
+        marginFrames);
+    const int startFrame = static_cast<int>(std::min(static_cast<std::size_t>(visibleFrames.startFrame),
+                                                     item.pitchSnapshot->size()));
+    const int endFrame = static_cast<int>(std::min(static_cast<std::size_t>(
+        std::max(visibleFrames.startFrame, visibleFrames.endFrameExclusive)),
+        item.pitchSnapshot->size()));
+    if (endFrame <= startFrame)
+        return;
+
+    double secondsPerFrame = 0.01;
+    if (item.f0Timeline.endFrameExclusive() > 1) {
+        secondsPerFrame = item.f0Timeline.timeAtFrame(1) - item.f0Timeline.timeAtFrame(0);
+    }
+
+    F0VisualBuildOptions visualOptions;
+    visualOptions.pixelsPerSecond = ctx.pixelsPerSecond;
+    visualOptions.secondsPerFrame = secondsPerFrame;
+
+    const std::vector<float>* originalEnergy = &item.pitchSnapshot->getOriginalEnergy();
+    if (originalEnergy->empty()) originalEnergy = nullptr;
+
+    auto makeFrameToX = [&](int frame) -> float {
+        return static_cast<float>(sourceTimeToScreenX(
+            item.f0Timeline.timeAtFrame(frame), ctx, item));
+    };
+    auto makeFrameToY = [&](int, float frequency) -> float {
+        return ctx.coords.freqToY(frequency);
+    };
+
+    const juce::Colour grey = UIColors::referenceCurve;
+    const juce::PathStrokeType bandStroke(3.2f, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::rounded);
+    const juce::PathStrokeType lineStroke(1.15f, juce::PathStrokeType::curved,
+                                          juce::PathStrokeType::rounded);
+
+    const auto strokeSegments = [&](const std::vector<F0VisualSegment>& segments,
+                                    juce::Colour colour, const juce::PathStrokeType& stroke) {
+        for (const auto& segment : segments) {
+            if (segment.points.empty())
+                continue;
+
+            juce::Path path;
+            if (segment.points.size() == 1) {
+                // 單點：畫一個極短橫線，否則 rounded stroke 無可見輸出
+                const auto& p = segment.points.front();
+                path.startNewSubPath(p.x - 0.01f, p.y);
+                path.lineTo(p.x + 0.01f, p.y);
+            }
+            else if (segment.useLinearPath) {
+                appendLinearF0Path(path, segment.points, 0, segment.points.size() - 1);
+            }
+            else {
+                appendSmoothedF0Path(path, segment.points, 0, segment.points.size() - 1);
+            }
+
+            g.setColour(colour);
+            g.strokePath(path, stroke);
+        }
+    };
+
+    // 1) Original F0：粗半透明帶（基準）
+    if (ctx.showOriginalF0) {
+        const auto& originalF0 = item.pitchSnapshot->getOriginalF0();
+        const int origStart = startFrame;
+        const int origEnd = std::min(endFrame, static_cast<int>(originalF0.size()));
+        if (origStart < origEnd) {
+            auto originalProducer = [&](auto&& sink) {
+                sink(origStart, originalF0.data() + origStart, origEnd - origStart, 1.0f);
+            };
+            strokeSegments(buildF0VisualSegments(originalEnergy, origEnd, visualOptions,
+                                                 makeFrameToX, makeFrameToY, originalProducer),
+                           grey.withAlpha(0.30f), bandStroke);
+        }
+    }
+
+    // 2) Corrected F0：細實線疊在帶上（顯示參考轨的修正結果）
+    if (ctx.showCorrectedF0 && item.ownerSnapshot != nullptr) {
+        const bool shouldDrawCorrected = item.notesPrimaryScheme
+            ? item.pitchSnapshot->hasOriginalF0Data()
+            : item.pitchSnapshot->hasCorrectionLayer();
+        if (shouldDrawCorrected) {
+            auto correctedProducer = [&](auto&& sink) {
+                if (item.notesPrimaryScheme)
+                    item.ownerSnapshot->forEachEffectiveF0Span(startFrame, endFrame, sink);
+                else
+                    item.pitchSnapshot->forEachCorrectionF0Span(startFrame, endFrame,
+                        [&](int spanStartFrame, const float* values, int count) {
+                            sink(spanStartFrame, values, count, 1.0f);
+                        });
+            };
+            strokeSegments(buildF0VisualSegments(originalEnergy, endFrame, visualOptions,
+                                                 makeFrameToX, makeFrameToY, correctedProducer),
+                           grey.withAlpha(0.85f), lineStroke);
         }
     }
 }

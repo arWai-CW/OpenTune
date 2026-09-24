@@ -56,12 +56,14 @@ ContentTimelineProjection makeCaptureSegmentProjection(const Capture::SegmentInf
 
 TimelineContentPlacement makePlacement(ContentKey contentKey,
                                                 const ContentTimelineProjection& projection,
-                                                juce::Colour displayColour)
+                                                juce::Colour displayColour,
+                                                const juce::String& sequenceName = {})
 {
     TimelineContentPlacement placement;
     placement.contentKey = contentKey;
     placement.projection = projection;
     placement.displayColour = displayColour;
+    placement.sequenceName = sequenceName;
     return placement;
 }
 
@@ -229,6 +231,16 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     contentRoot_.addAndMakeVisible(renderBadge_);
     renderBadge_.setVisible(false);
 
+    // 參考軌（跨 instance reference）選單按鈕：點擊列出同群組的可參考 track。
+    referenceTrackButton_.setButtonText(LOC(kReferenceTracks));
+    referenceTrackButton_.onClick = [this]() { showReferenceTrackMenu(); };
+    contentRoot_.addAndMakeVisible(referenceTrackButton_);
+    referenceTrackButton_.setVisible(false); // 有可參考內容時才顯示
+
+#if JucePlugin_Enable_ARA
+    referenceTrackButton_.setVisible(processorRef_.getDocumentController() != nullptr);
+#endif
+
     contentCommands_ = processorRef_.getContentCommands();
     pianoRoll_.setContentCommands(contentCommands_);
     pianoRoll_.setReadContentSnapshot([this](ContentKey key) {
@@ -336,6 +348,21 @@ void OpenTuneAudioProcessorEditor::resized()
 
     renderBadge_.setBounds(pianoRoll_.getRight() - 148, pianoRoll_.getY() + 8, 140, 28);
     renderBadge_.toFront(false);
+
+    // 參考軌按鈕：置於 renderBadge 左側，夾在 PianoRoll 範圍內避免窄視窗時
+    // x 座標為負而被裁切（renderBadge 寬 140 + 間距 8）。
+    {
+        constexpr int refButtonWidth = 140;
+        constexpr int badgeWidth = 140;
+        constexpr int buttonGap = 8;
+        const int badgeX = pianoRoll_.getRight() - badgeWidth;
+        const int desiredX = badgeX - buttonGap - refButtonWidth;
+        const int minX = pianoRoll_.getX() + 8;
+        // 空間不足時退到 PianoRoll 左上角（寧可遮擋也不消失在視野外）
+        const int x = desiredX >= minX ? desiredX : minX;
+        referenceTrackButton_.setBounds(x, pianoRoll_.getY() + 8, refButtonWidth, 28);
+        referenceTrackButton_.toFront(false);
+    }
 }
 
 void OpenTuneAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
@@ -465,6 +492,9 @@ void OpenTuneAudioProcessorEditor::timerCallback()
             transportBar_.setRecordButtonEnabled(
                 !dc->getEditorSelectionPlaybackRegionProjections().empty());
     }
+
+    // 參考軌輪詢：偵測 registry 發布戳記變化 → 重建曲線疊加（30Hz 心跳，代價可控）
+    pollReferenceTracks(sync);
 
     // Overview update: regular capture uses multi-segment overview path;
     // ARA/other paths continue using the single-content onHeartbeatTick.
@@ -731,7 +761,6 @@ OpenTuneAudioProcessorEditor::resolveCurrentContentSync()
 
 #if JucePlugin_Enable_ARA
     if (const auto* dc = processorRef_.getDocumentController()) {
-        // Build identity+placement pairs from all valid regions.
         const auto allRegions = dc->getPlaybackRegionProjections();
         std::vector<TimelineContentPlacement> allPlacements;
         for (const auto& region : allRegions) {
@@ -741,7 +770,7 @@ OpenTuneAudioProcessorEditor::resolveCurrentContentSync()
             if (!projection.isValid())
                 continue;
             allPlacements.push_back(makePlacement(region.contentKey, projection,
-                region.displayColour.value_or(UIColors::noteBlock)));
+                region.displayColour.value_or(UIColors::noteBlock), region.sequenceName));
         }
 
         if (allPlacements.empty())
@@ -1153,6 +1182,306 @@ void OpenTuneAudioProcessorEditor::surfaceRegularVst3HostControlledTransport(con
     const juce::String message = "Regular VST3 " + action + " requested: host-controlled transport";
     AppLogger::log("VST3Editor: " + message);
     transportBar_.setRenderStatusText("Host-controlled transport");
+}
+
+// =========================================================================
+// 參考軌（跨 instance reference）
+// =========================================================================
+
+void OpenTuneAudioProcessorEditor::pollReferenceTracks(const PianoRollContentSync& sync)
+{
+#if JucePlugin_Enable_ARA
+    auto* dc = processorRef_.getDocumentController();
+    if (dc == nullptr)
+    {
+        if (!referenceTracks_.empty())
+        {
+            referenceTracks_.clear();
+            pushReferenceTrackCurvesToPianoRoll();
+        }
+        referenceTrackButton_.setVisible(false);
+        return;
+    }
+
+    // ── 來源 1：同一份 ARA document 內的非焦點 track ──────────────────
+    // REAPER 讓同 project 的多個 instance 共用一份 document，因此「其他軌」
+    // 已經直接出現在本 DC 的 placements 裡（由 PianoRoll 以灰色曲線呈現）。
+    // 這一類不需要 registry 資料，只需要在選單裡可見、可切換顯示。
+    std::set<std::string> sameDocumentIds;
+
+    for (const auto& placement : sync.placements)
+    {
+        if (isActiveContentItem(placement.contentKey, sync.activeContentKey))
+            continue; // 正在處理的 track 自己不是參考軌
+
+        const auto modId = dc->findModificationPersistentId(placement.contentKey);
+        if (modId.isEmpty())
+            continue;
+
+        const auto id = modId.toStdString();
+        sameDocumentIds.insert(id);
+
+        auto& entry = referenceTracks_[id];
+        // 已存在且來源未變 → 保留使用者的 enabled 選擇，只更新顯示資訊。
+        entry.sameDocument = true;
+        entry.contentKey = placement.contentKey;
+        entry.sequenceName = placement.sequenceName.toStdString();
+        if (entry.sequenceName.empty())
+            entry.sourceName = dc->findSourceNameForContent(placement.contentKey)
+                                   .toStdString();
+    }
+
+    // ── 來源 2：registry 群組內其他 instance ─────────────────────────
+    // 排除主軌自己，以及已被來源 1 收錄的 modification —— 同一條 modification
+    // 不可同時出現在兩個來源，否則會被重複繪製（錯位重影曲線）。
+    // 典型情境：複製一軌改成和聲，該軌會同時符合兩個來源。
+    const juce::String excludeId = sync.activeContentKey.isValid()
+        ? dc->findModificationPersistentId(sync.activeContentKey)
+        : juce::String();
+    const auto summaries = dc->getReferenceTrackSummaries(excludeId);
+
+    std::set<std::string> seenIds = sameDocumentIds;
+    bool changed = false;
+
+    for (const auto& summary : summaries)
+    {
+        const auto& modId = summary.modificationPersistentId;
+        if (sameDocumentIds.count(modId) != 0)
+            continue; // 去重：已由來源 1 以灰色曲線呈現
+        seenIds.insert(modId);
+
+        auto& entry = referenceTracks_[modId];
+        entry.sameDocument = false;
+        entry.contentKey = {};
+
+        if (entry.publishStamp == summary.publishStamp)
+            continue; // 未變化 → 沿用 cache
+
+        entry.publishStamp = summary.publishStamp;
+        entry.sourceName = summary.sourceName;
+        entry.sequenceName = summary.sequenceName;
+        entry.hasCurve = summary.hasCurve;
+
+        if (summary.hasCurve)
+        {
+            auto record = dc->queryReferenceTrack(juce::String(modId));
+            if (record != nullptr && record->curve != nullptr)
+            {
+                buildReferenceTrackCurve(*record, entry);
+            }
+            else
+            {
+                // 防禦：list 與 query 間記錄被撤（罕見 race）→ 清空避免殘留舊曲線
+                entry.curve = {};
+            }
+            changed = true;
+        }
+        else
+        {
+            // 未分析/佔位：清除曲線但保留列表項目（佔位提示）
+            entry.curve = {};
+            changed = true;
+        }
+    }
+
+    // 移除已不存在的 track
+    for (auto it = referenceTracks_.begin(); it != referenceTracks_.end();)
+    {
+        if (!seenIds.count(it->first))
+        {
+            it = referenceTracks_.erase(it);
+            changed = true;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // ARA 綁定後按鈕就恆常可見：參考軌是「自動偵測」而非手動新增，
+    // 若等到有內容才顯示，使用者永遠找不到功能入口。
+    referenceTrackButton_.setVisible(true);
+
+    if (changed)
+        pushReferenceTrackCurvesToPianoRoll();
+    else
+        pianoRoll_.setHiddenReferenceContentKeys(collectHiddenReferenceContentKeys());
+#endif
+}
+
+void OpenTuneAudioProcessorEditor::buildReferenceTrackCurve(
+    const PublishedReferenceRecord& record,
+    ReferenceTrackUiEntry& entry)
+{
+    PianoRollRenderer::ReferenceTrackCurve out;
+    out.name = referenceTrackDisplayName(entry);
+
+    const auto* curve = record.curve.get();
+    if (curve == nullptr || curve->isEmpty() || !curve->hasOriginalF0Data())
+    {
+        entry.curve = {};
+        return;
+    }
+
+    const auto& f0 = curve->getOriginalF0();
+    const size_t frameCount = f0.size();
+    if (frameCount == 0)
+    {
+        entry.curve = {};
+        return;
+    }
+
+    const double sampleRate = curve->getSampleRate();
+    const int hopSize = curve->getHopSize();
+    const double secondsPerFrame = sampleRate > 0.0
+        ? static_cast<double>(hopSize) / sampleRate
+        : 0.01;
+
+    // 把校正段展開成每幀陣列（無校正覆蓋幀 = 0）。
+    // forEachCorrectionF0Span 的無覆蓋 gap 段會以 values==nullptr 呼叫，需防護。
+    std::vector<float> corrected(frameCount, 0.0f);
+    curve->forEachCorrectionF0Span(0, static_cast<int>(frameCount),
+        [&corrected](int spanStartFrame, const float* values, int count) {
+            if (values == nullptr)
+                return;
+            for (int i = 0; i < count; ++i)
+                corrected[static_cast<std::size_t>(spanStartFrame) + static_cast<std::size_t>(i)] = values[i];
+        });
+    out.hasCorrections = curve->hasCorrectionLayer();
+
+    out.playbackTimes.resize(frameCount);
+    out.originalHz = f0;
+    out.correctedHz = std::move(corrected);
+
+    for (size_t i = 0; i < frameCount; ++i)
+    {
+        const double modTime = static_cast<double>(i) * secondsPerFrame;
+        out.playbackTimes[i] = static_cast<float>(
+            mapReferenceModificationTimeToPlayback(record.regionMappings, modTime));
+    }
+
+    // 顏色由 renderer 層統一指定灰色（UIColors::referenceCurve），此處不設定。
+    entry.curve = std::move(out);
+}
+
+HiddenReferenceSet OpenTuneAudioProcessorEditor::collectHiddenReferenceContentKeys() const
+{
+    // 參考軌選單關閉的「同 document 參考軌」→ 交給 PianoRoll 在分流時跳過。
+    // registry 來源的曲線則在 pushReferenceTrackCurvesToPianoRoll 過濾。
+    HiddenReferenceSet hidden;
+    for (const auto& [id, entry] : referenceTracks_)
+    {
+        if (entry.sameDocument && !entry.enabled && entry.contentKey.isValid())
+            hidden.insert(entry.contentKey);
+    }
+    return hidden;
+}
+
+void OpenTuneAudioProcessorEditor::pushReferenceTrackCurvesToPianoRoll()
+{
+    // registry 來源的參考曲線：只送啟用中且曲線有效的。
+    std::vector<PianoRollRenderer::ReferenceTrackCurve> enabledCurves;
+    for (const auto& [id, entry] : referenceTracks_)
+    {
+        if (entry.sameDocument)
+            continue; // 同 document 來源由 PianoRoll 直接以灰色曲線畫
+        if (entry.enabled && entry.curve.isValid())
+            enabledCurves.push_back(entry.curve);
+    }
+    pianoRoll_.setReferenceTrackCurves(std::move(enabledCurves));
+    pianoRoll_.setHiddenReferenceContentKeys(collectHiddenReferenceContentKeys());
+}
+
+void OpenTuneAudioProcessorEditor::showReferenceTrackMenu()
+{
+    juce::PopupMenu menu;
+
+    if (referenceTracks_.empty())
+    {
+        // 參考軌是自動偵測（同一 ARA document 中共享任一 audio source 的其他
+        // instance），不是手動新增。此處說明出現條件，避免使用者找不到功能。
+        menu.addSectionHeader(LOC(kReferenceReadOnly));
+        menu.addItem(1, LOC(kReferenceNone), false, false);
+        menu.addSeparator();
+        menu.addItem(4, LOC(kReferenceHint), false, false);
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&referenceTrackButton_)
+                               .withParentComponent(&contentRoot_),
+                           [this](int) {});
+        return;
+    }
+
+    menu.addSectionHeader(LOC(kReferenceReadOnly));
+
+    // 統一列出兩種來源（已去重，不會重複）：
+    //   - 同一份 ARA document 內的其他 track
+    //   - registry 群組內其他 instance 發布的 modification
+    int itemId = 100;
+    for (const auto& kv : referenceTracks_)
+    {
+        auto label = referenceTrackDisplayName(kv.second);
+        // 同 document 來源由 PianoRoll 直接畫灰色曲線，因此不能用 registry 的
+        // hasCurve 判斷可用性；未解析出 content 就顯示為未分析。
+        if (!kv.second.sameDocument && !kv.second.hasCurve)
+            label += "  " + LOC(kReferenceUnanalyzed);
+        menu.addItem(itemId, label, true, kv.second.enabled);
+        ++itemId;
+    }
+
+    menu.addSeparator();
+    menu.addItem(2, LOC(kReferenceShowAll));
+    menu.addItem(3, LOC(kReferenceHideAll));
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&referenceTrackButton_)
+                           .withParentComponent(&contentRoot_),
+                       [this](int result) {
+        if (result >= 100)
+        {
+            const size_t index = static_cast<size_t>(result - 100);
+            if (index < referenceTracks_.size())
+            {
+                auto it = referenceTracks_.begin();
+                std::advance(it, index);
+                it->second.enabled = !it->second.enabled;
+                pushReferenceTrackCurvesToPianoRoll();
+            }
+        }
+        else if (result == 2 || result == 3)
+        {
+            const bool enable = (result == 2);
+            for (auto& kv : referenceTracks_)
+                kv.second.enabled = enable;
+            pushReferenceTrackCurvesToPianoRoll();
+        }
+    });
+}
+
+juce::String OpenTuneAudioProcessorEditor::referenceTrackDisplayName(
+    const ReferenceTrackUiEntry& entry) const
+{
+    if (!entry.sequenceName.empty())
+        return juce::String(entry.sequenceName);
+    if (!entry.sourceName.empty())
+        return juce::String(entry.sourceName);
+    return LOC(kReferenceUnnamed);
+}
+
+double OpenTuneAudioProcessorEditor::mapReferenceModificationTimeToPlayback(
+    const std::vector<ReferenceRegionMapping>& mappings,
+    double modTime)
+{
+    for (const auto& mapping : mappings)
+    {
+        if (modTime >= mapping.startModificationTime && modTime < mapping.endModificationTime)
+        {
+            const double durationMod = mapping.endModificationTime - mapping.startModificationTime;
+            const double durationPlayback = mapping.endPlaybackTime - mapping.startPlaybackTime;
+            if (durationMod <= 0.0)
+                return -1.0;
+            return mapping.startPlaybackTime
+                + (modTime - mapping.startModificationTime) * (durationPlayback / durationMod);
+        }
+    }
+    return -1.0;
 }
 
 void OpenTuneAudioProcessorEditor::timelineDisplayModeChanged(TimelineDisplayMode mode)

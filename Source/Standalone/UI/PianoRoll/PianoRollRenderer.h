@@ -28,6 +28,9 @@ struct TimelineContentPlacement
     ContentKey contentKey;
     ContentTimelineProjection projection;
     juce::Colour displayColour{0xFF4A90D9}; // 轨道主题色/音符主色
+    /// 所屬 Region Sequence 名（≈ host track 名），僅供 editor 的參考軌選單顯示。
+    /// 不參與任何繪製或命中測試；Standalone 恆為空。
+    juce::String sequenceName;
 
     bool isValid() const noexcept
     {
@@ -86,6 +89,29 @@ public:
         std::shared_ptr<const TimeGridSnapshot> timeGrid;
     };
 
+    /// 跨軌參考曲線疊加（Melodyne-style reference）：由 VST3 editor 從
+    /// ReferenceTrackRegistry 的發布記錄建構。所有時間皆為 playback-time 秒數
+    /// （已透過 RegionMapping 由 modification-time 轉換），可直接投入時間軸繪製。
+    ///
+    /// 顏色刻意不由呼叫端指定：renderer 一律使用 UIColors::referenceCurve 統一灰，
+    /// 確保參考軌與主動 track（紅/藍）視覺上明確區隔。
+    struct ReferenceTrackCurve
+    {
+        juce::String name;                   // 顯示標籤（Region Sequence / source name）
+        // 平行陣列（按 F0 frame 逐幀）：
+        std::vector<float> playbackTimes;    // 秒；< 0 表示對不到任何 region（無效幀）
+        std::vector<float> originalHz;       // Original F0（Hz）；<= 0 為無聲/無效幀
+        std::vector<float> correctedHz;      // 校正 F0（Hz）；<= 0 表示該幀無校正覆蓋
+        bool hasCorrections{false};
+
+        bool isValid() const noexcept
+        {
+            return !name.isEmpty()
+                && playbackTimes.size() == originalHz.size()
+                && originalHz.size() == correctedHz.size();
+        }
+    };
+
     /// Render context — includes stable content state and transient UI fields.
     struct RenderContext
     {
@@ -142,6 +168,25 @@ public:
     void drawTimeGridHandles(juce::Graphics& g, const RenderContext& ctx, const ContentRenderItem& item);
 
     void drawGhostNotes(juce::Graphics& g, const RenderContext& ctx, const ReferenceOverlay& overlay);
+
+    /** 跨軌參考曲線疊加：半透明薄線畫在主動內容曲線之下。 */
+    void drawReferenceTrackCurves(juce::Graphics& g,
+                                  const RenderContext& ctx,
+                                  const std::vector<ReferenceTrackCurve>& curves);
+
+    /**
+     * 參考軌（同一 ARA document 內的非焦點 track）只畫 F0 曲線，且統一灰色。
+     *
+     * 與 drawF0Curve 的差異（刻意為之）：
+     *  - 不畫音符方塊、波形、unvoiced band、time grid anchor（由 drawContent 跳過）
+     *  - 不使用 originalF0 紅 / correctedF0 藍，改用 UIColors::referenceCurve 統一灰
+     *  - 無 glow / innerGlow，僅單純線條，避免與主動曲線搶視覺
+     *  - Original 以粗半透明「帶」呈現、Corrected 以細實線疊在其上，
+     *    如此即使同色仍可看出參考轨是否已被校正（線偏離帶）
+     */
+    void drawReferenceF0Curve(juce::Graphics& g,
+                              const RenderContext& ctx,
+                              const ContentRenderItem& item);
 
 
 };

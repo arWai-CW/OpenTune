@@ -95,6 +95,13 @@ void OpenTunePlaybackRenderer::refreshRenderPlanFromDocument()
                                          : std::vector<juce::ARAPlaybackRegion*>{});
 }
 
+std::vector<juce::ARAPlaybackRegion*> OpenTunePlaybackRenderer::getAssignedPlaybackRegions() const
+{
+    const auto plan = currentPlan_.load(std::memory_order_acquire);
+    return plan != nullptr ? plan->playbackRegions
+                           : std::vector<juce::ARAPlaybackRegion*>{};
+}
+
 std::shared_ptr<const OpenTunePlaybackRenderer::RenderPlan> OpenTunePlaybackRenderer::buildRenderPlan(
     std::vector<juce::ARAPlaybackRegion*> playbackRegions) const
 {

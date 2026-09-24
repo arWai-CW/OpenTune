@@ -1,6 +1,7 @@
 #include "AuroraLookAndFeel.h"
 #include "AuroraTheme.h"
 #include "UIColors.h"
+#include "UiAssets.h"
 #include "../../Utils/CursorTheme.h"
 
 namespace OpenTune {
@@ -389,7 +390,10 @@ juce::Font AuroraLookAndFeel::getComboBoxFont(juce::ComboBox& box)
 
 juce::Font AuroraLookAndFeel::getPopupMenuFont()
 {
-    return UIColors::getUIFont(14.0f);
+    // PopupMenu 會顯示本地化字串（含中文）；Roboto 無 CJK 字形會渲染成方框。
+    // 改用內嵌的 Honor Sans CN（UiAssets 已封裝），確保 CJK 正確顯示。
+    return juce::Font(juce::FontOptions(UiAssets::createHonorSansTypeface())
+                          .withHeight(FontScale::scale(14.0f)));
 }
 
 juce::Label* AuroraLookAndFeel::createComboBoxTextBox(juce::ComboBox& box)

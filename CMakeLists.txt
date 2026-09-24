@@ -624,6 +624,8 @@ set(OPENTUNE_COMMON_SOURCES
         Source/Standalone/UI/ToolbarIcons.h
         Source/Standalone/UI/ParameterPanel.cpp
         Source/Standalone/UI/ParameterPanel.h
+        Source/Standalone/UI/ContentRenderRouting.cpp
+        Source/Standalone/UI/ContentRenderRouting.h
         Source/Standalone/UI/PianoRollComponent.cpp
         Source/Standalone/UI/PianoRollComponent.h
         Source/Standalone/UI/PianoRoll/PianoRollOverlayComponent.cpp
@@ -845,6 +847,8 @@ target_sources(OpenTune PRIVATE
     Source/ARA/AudioModification.h
     Source/ARA/PlaybackRegion.cpp
     Source/ARA/PlaybackRegion.h
+    Source/ARA/ReferenceTrackRegistry.cpp
+    Source/ARA/ReferenceTrackRegistry.h
     Source/ARA/OpenTuneDocumentController.cpp
     Source/ARA/OpenTuneDocumentController.h
     Source/ARA/OpenTuneEditorView.cpp
@@ -1476,4 +1480,32 @@ if(OPENTUNE_BUILD_TESTS)
         target_compile_options(OpenTuneContentSnapshotProjectionTests PRIVATE /utf-8 /EHsc)
     endif()
     add_test(NAME ContentSnapshotProjectionTests COMMAND OpenTuneContentSnapshotProjectionTests)
+
+    # ReferenceTrackRegistry pure-logic tests — no ARA host, no JUCE GUI.
+    add_executable(OpenTuneReferenceTrackRegistryTests
+        Tests/ReferenceTrackRegistryTests.cpp
+        Source/ARA/ReferenceTrackRegistry.cpp
+    )
+    target_include_directories(OpenTuneReferenceTrackRegistryTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    target_link_libraries(OpenTuneReferenceTrackRegistryTests PRIVATE
+        juce::juce_core
+    )
+    if(MSVC)
+        target_compile_options(OpenTuneReferenceTrackRegistryTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME ReferenceTrackRegistryTests COMMAND OpenTuneReferenceTrackRegistryTests)
+
+    # ContentRenderRouting pure-logic tests — active / reference 分流決策。
+    # 保護「同 document 其他 track 降級為唯讀灰色曲線」不被無聲退化。
+    add_executable(OpenTuneContentRenderRoutingTests
+        Tests/ContentRenderRoutingTests.cpp
+        Source/Standalone/UI/ContentRenderRouting.cpp
+    )
+    target_include_directories(OpenTuneContentRenderRoutingTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    if(MSVC)
+        target_compile_options(OpenTuneContentRenderRoutingTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME ContentRenderRoutingTests COMMAND OpenTuneContentRenderRoutingTests)
 endif()

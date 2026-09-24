@@ -21,6 +21,7 @@
 
 #include "Content/ContentKey.h"
 #include "PluginProcessor.h"
+#include "ARA/ReferenceTrackRegistry.h"
 #include "Utils/AppPreferences.h"
 #include "Utils/CursorTheme.h"
 #include "Utils/ContentTimelineProjection.h"
@@ -150,6 +151,31 @@ private:
     bool handleEditorShortcut(const juce::KeyPress& key);
     void surfaceRegularVst3HostControlledTransport(const char* actionName);
 
+    // ============================================================
+    // 參考軌（跨 instance reference，VST3/ARA 專用）
+    // ============================================================
+    struct ReferenceTrackUiEntry
+    {
+        uint64_t publishStamp{0};   // registry 發布戳記；變化時重建 curve
+        bool enabled{true};         // per-track 顯示開關（參考軌選單）
+        bool hasCurve{false};       // 未分析 → 佔位列
+        bool sameDocument{false};   // true = 來自本 DC 的 region（非 registry）
+        ContentKey contentKey;      // sameDocument 有效；隱藏集合的 key
+        std::string sourceName;
+        std::string sequenceName;
+        PianoRollRenderer::ReferenceTrackCurve curve; // 僅 registry 來源需要
+    };
+
+    void pollReferenceTracks(const PianoRollContentSync& sync);
+    void buildReferenceTrackCurve(const PublishedReferenceRecord& record,
+                                  ReferenceTrackUiEntry& entry);
+    void pushReferenceTrackCurvesToPianoRoll();
+    HiddenReferenceSet collectHiddenReferenceContentKeys() const;
+    void showReferenceTrackMenu();
+    juce::String referenceTrackDisplayName(const ReferenceTrackUiEntry& entry) const;
+    static double mapReferenceModificationTimeToPlayback(
+        const std::vector<ReferenceRegionMapping>& mappings, double modTime);
+
     OpenTuneAudioProcessor& processorRef_;
 
     std::shared_ptr<ContentEditCommands> contentCommands_;
@@ -217,6 +243,10 @@ private:
     std::shared_ptr<const juce::AudioBuffer<float>> lastPianoRollBuffer_;
     int lastPianoRollSampleRate_{0};
     PitchShiftSettings lastPitchShiftIndicatorSettings_;
+
+    // 參考軌 cache（key = modification persistent id）＋選單按鈕
+    std::map<std::string, ReferenceTrackUiEntry> referenceTracks_;
+    juce::TextButton referenceTrackButton_;
 
     static constexpr int TOP_BAR_HEIGHT = 88;
     static constexpr int PARAMETER_PANEL_WIDTH = 240;

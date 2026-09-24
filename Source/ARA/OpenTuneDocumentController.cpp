@@ -70,6 +70,12 @@ OpenTuneDocumentController::OpenTuneDocumentController(const ARA::PlugIn::PlugIn
     AppLogger::logNoThrow("ARA-DIAG: DocumentController created dc="
         + juce::String::toHexString(reinterpret_cast<uintptr_t>(this)));
 
+    // 參考軌 registry：註冊本 DC 為獨立 owner（初始空 source 集合，
+    // 群組隨 didAddAudioSourceToDocument 到達而重算）。owner id 配全 process 唯一計數器。
+    static std::atomic<uint64_t> nextReferenceOwnerId{1};
+    referenceOwnerId_ = "dc-" + std::to_string(nextReferenceOwnerId.fetch_add(1));
+    ReferenceTrackRegistry::getInstance().registerOwner(referenceOwnerId_, {});
+
 }
 
 OpenTuneDocumentController::~OpenTuneDocumentController()
@@ -98,6 +104,15 @@ OpenTuneDocumentController::~OpenTuneDocumentController()
             renderer->detachDocumentController(*this);
     }
     playbackRenderers_.clear();
+
+    // 退出 registry：撤下本 DC 發布的全部參考記錄並註銷 owner。
+    if (!referenceOwnerId_.empty())
+    {
+        auto& registry = ReferenceTrackRegistry::getInstance();
+        registry.clearOwnerRecords(referenceOwnerId_);
+        registry.unregisterOwner(referenceOwnerId_);
+        referenceOwnerId_.clear();
+    }
 }
 
 namespace {
@@ -1077,6 +1092,7 @@ void OpenTuneDocumentController::didEndEditing(juce::ARADocument* document)
 {
     juce::ignoreUnused(document);
     readRestoredAudio(nullptr);
+    republishReferenceRecords();
     refreshRegisteredRenderers(publishModelChange());
 }
 
@@ -1091,6 +1107,13 @@ void OpenTuneDocumentController::didUpdateAudioModificationProperties(juce::ARAA
         modification.attachSource(*source);
     // Note: birthContentForModification() called lazily on read request, not here
 
+    // persistent id 可能在此取得/變更 → 清掉舊 key 後重發布全部記錄
+    if (!referenceOwnerId_.empty())
+    {
+        ReferenceTrackRegistry::getInstance().clearOwnerRecords(referenceOwnerId_);
+        republishReferenceRecords();
+    }
+
     refreshRegisteredRenderers(publishModelChange());
 }
 
@@ -1099,6 +1122,11 @@ void OpenTuneDocumentController::willDestroyAudioModification(juce::ARAAudioModi
     auto* mod = findAudioModification(audioModification);
     if (mod == nullptr)
         return;
+
+    // 撤下該 modification 發布的參考記錄（記錄 key = modification persistent id）
+    if (!referenceOwnerId_.empty())
+        ReferenceTrackRegistry::getInstance().removeRecord(
+            referenceOwnerId_, mod->persistentId.toStdString());
 
     // 清理 CRS derived artifacts
     removeCRSArtifactsForModification(*mod);
@@ -1129,6 +1157,8 @@ void OpenTuneDocumentController::willDestroyAudioModification(juce::ARAAudioModi
 void OpenTuneDocumentController::didUpdatePlaybackRegionProperties(juce::ARAPlaybackRegion* playbackRegion)
 {
     ensurePlaybackRegion(playbackRegion);
+    // placement 時間/顏色可能變更 → 參考記錄的 region 對映需重發布
+    republishReferenceRecords();
     refreshRegisteredRenderers(publishModelChange());
 }
 
@@ -1136,6 +1166,7 @@ void OpenTuneDocumentController::willDestroyPlaybackRegion(juce::ARAPlaybackRegi
 {
     removePlaybackRegion(playbackRegion);
     reconcileEditorSelectionPlaybackRegions();
+    republishReferenceRecords();
     refreshRegisteredRenderers(publishModelChange());
 }
 
@@ -1146,18 +1177,24 @@ void OpenTuneDocumentController::didAddPlaybackRegionToAudioModification(
     // 归属 relationship 由 SDK object 持有，不再写 wrapper 缓存字段；
     // 只保留 host pointer 生命周期索引。
     ensurePlaybackRegion(playbackRegion);
+    republishReferenceRecords();
     refreshRegisteredRenderers(publishModelChange());
 }
 
 void OpenTuneDocumentController::didAddAudioSourceToDocument(juce::ARADocument* /*document*/, juce::ARAAudioSource* audioSource)
 {
     ensureAudioSource(audioSource);
+    refreshReferenceOwnerSources();
 }
 
 void OpenTuneDocumentController::didUpdateAudioSourceProperties(juce::ARAAudioSource* audioSource)
 {
     auto& source = ensureAudioSource(audioSource);
     source.updateFrom(audioSource);
+    // source name 可能變更 → 同步 registry（名稱是顯示標籤，記錄內快照名稱需重發布）
+    refreshReferenceOwnerSources();
+    republishReferenceRecords();
+
     for (auto& modification : audioModifications_)
         if (modification.audioModification != nullptr && modification.audioModification->getAudioSource() == audioSource)
             modification.attachSource(source);
@@ -1259,6 +1296,8 @@ void OpenTuneDocumentController::willDestroyAudioSource(juce::ARAAudioSource* au
         }
     }
 
+    refreshReferenceOwnerSources();
+    republishReferenceRecords();
     refreshRegisteredRenderers(publishModelChange());
 }
 
@@ -1710,6 +1749,10 @@ OpenTuneDocumentController::makeProjection(const PlaybackRegion& placement) cons
     projection.startInModificationTime = playbackRegion->getStartInAudioModificationTime();
     projection.durationInPlaybackTime = playbackRegion->getDurationInPlaybackTime();
     projection.durationInModificationTime = playbackRegion->getDurationInAudioModificationTime();
+
+    // Region Sequence 名稱（≈ track 名）：參考軌選單的顯示標籤。
+    if (auto* sequence = playbackRegion->getRegionSequence())
+        projection.sequenceName = juce::String(sequence->getName());
 
     // ARA 标准有效颜色：getEffectiveColor 回退链仅为 region 自身 color →
     // RegionSequence color（ARA_Library/PlugIn/ARAPlug.cpp:588-594），无 musical
@@ -2191,6 +2234,9 @@ bool OpenTuneDocumentController::scheduleAsyncF0Extraction(
                         mod->audioModification->notifyContentChanged(
                             juce::ARAContentUpdateScopes::tuningIsAffected(), true);
 
+                    // Failed → 參考軌顯示佔位（無可用 curve）
+                    republishReferenceRecordForModification(*mod);
+
                     // Log the failure reason (result.errorMessage carries the worker-side failure cause)
                     AppLogger::error("ARA-F0: extraction failed key="
                         + juce::String::toHexString(reinterpret_cast<uintptr_t>(this))
@@ -2229,6 +2275,8 @@ bool OpenTuneDocumentController::scheduleAsyncF0Extraction(
                         true);
 
                 // F0 commit → form "committed data → request current version render" transaction
+                // F0 就緒 → 參考軌即可用（同時讓其他 instance 的編輯器輪詢到變化）
+                republishReferenceRecordForModification(*mod);
                 requestFullModificationRender(key);
             }
         });
@@ -2663,6 +2711,164 @@ OpenTuneDocumentController::readContentSnapshot(ContentKey key) const
     return mod->snapshotContent();
 }
 
+// =========================================================================
+// 參考軌（跨 instance reference）— registry 讀寫 + 私有輔助
+// =========================================================================
+
+std::vector<ReferenceTrackSummary> OpenTuneDocumentController::getReferenceTrackSummaries(
+    const juce::String& excludeModificationPersistentId) const
+{
+    if (referenceOwnerId_.empty())
+        return {};
+    return ReferenceTrackRegistry::getInstance().listReferenceTracks(
+        referenceOwnerId_, excludeModificationPersistentId.toStdString());
+}
+
+std::shared_ptr<const PublishedReferenceRecord> OpenTuneDocumentController::queryReferenceTrack(
+    const juce::String& modificationPersistentId) const
+{
+    if (referenceOwnerId_.empty())
+        return nullptr;
+    return ReferenceTrackRegistry::getInstance().queryRecord(
+        referenceOwnerId_, modificationPersistentId.toStdString());
+}
+
+juce::String OpenTuneDocumentController::findModificationPersistentId(const ContentKey& key) const
+{
+    const auto* id = findPersistentIdForAudioModificationKey(key);
+    return id != nullptr ? *id : juce::String();
+}
+
+juce::String OpenTuneDocumentController::findSourceNameForContent(const ContentKey& key) const
+{
+    const auto* modification = findAudioModificationByContentKey(key);
+    if (modification == nullptr || !modification->hasContentState())
+        return {};
+
+    const auto& sourcePersistentId = modification->content->sourceWindow.sourcePersistentId;
+    const auto* source = findAudioSource(sourcePersistentId);
+    return source != nullptr ? source->getShape().sourceName : juce::String();
+}
+
+std::set<std::string> OpenTuneDocumentController::collectReferenceOwnerSourceIds() const
+{
+    std::set<std::string> result;
+    for (const auto& source : audioSources_)
+    {
+        const auto& persistentId = source.getIdentity().persistentId;
+        if (persistentId.isNotEmpty())
+            result.insert(persistentId.toStdString());
+    }
+    return result;
+}
+
+void OpenTuneDocumentController::refreshReferenceOwnerSources()
+{
+    if (referenceOwnerId_.empty())
+        return;
+    ReferenceTrackRegistry::getInstance().updateOwnerSources(
+        referenceOwnerId_, collectReferenceOwnerSourceIds());
+}
+
+uint64_t OpenTuneDocumentController::computeReferenceRecordVersion(const AudioModification& mod) const
+{
+    if (!mod.hasContentState())
+        return 0;
+
+    const auto& content = *mod.content;
+    uint64_t version = 0;
+    const auto mix = [&version](uint64_t x) { version = version * 131u + x; };
+
+    mix(content.contentRevision);
+    mix(content.pitchRevision);
+    mix(content.notesRevision);
+    mix(content.timeGridRevision);
+    mix(content.analysis.analysisRevision);
+    mix(static_cast<uint64_t>(content.analysis.originalF0State));
+
+    if (content.analysis.pitchCurve != nullptr)
+    {
+        const auto snapshot = content.analysis.pitchCurve->getSnapshot();
+        if (snapshot != nullptr)
+        {
+            mix(snapshot->getRenderGeneration());
+            mix(static_cast<uint64_t>(snapshot->size()));
+        }
+    }
+
+    return version;
+}
+
+void OpenTuneDocumentController::republishReferenceRecordForModification(
+    const AudioModification& modification)
+{
+    if (referenceOwnerId_.empty())
+        return;
+
+    auto& registry = ReferenceTrackRegistry::getInstance();
+
+    if (!modification.hasContentState())
+    {
+        // 無內容（未 birth / 已失效）→ 撤下既有記錄，避免殘留過期 curve。
+        registry.removeRecord(referenceOwnerId_, modification.persistentId.toStdString());
+        return;
+    }
+
+    PublishedReferenceRecord record;
+    record.modificationPersistentId = modification.persistentId.toStdString();
+    record.sourcePersistentId = modification.content->sourceWindow.sourcePersistentId.toStdString();
+
+    // 顯示標籤：source name 是「群組身份」之外的純顯示資訊。
+    if (const auto* source = findAudioSource(record.sourcePersistentId))
+        record.sourceName = source->getShape().sourceName.toStdString();
+
+    // Region Sequence（≈track）名稱 + 每個 region 的 mod↔playback 時間對映。
+    juce::String sequenceName;
+    for (const auto& region : playbackRegions_)
+    {
+        auto* playbackRegion = region.playbackRegion;
+        if (playbackRegion == nullptr
+            || playbackRegion->getAudioModification() != modification.audioModification)
+            continue;
+
+        ReferenceRegionMapping mapping;
+        mapping.startModificationTime = playbackRegion->getStartInAudioModificationTime();
+        mapping.endModificationTime = mapping.startModificationTime
+            + playbackRegion->getDurationInAudioModificationTime();
+        mapping.startPlaybackTime = playbackRegion->getStartInPlaybackTime();
+        mapping.endPlaybackTime = mapping.startPlaybackTime
+            + playbackRegion->getDurationInPlaybackTime();
+        if (mapping.isValid())
+            record.regionMappings.push_back(std::move(mapping));
+
+        if (sequenceName.isEmpty())
+        {
+            if (auto* sequence = playbackRegion->getRegionSequence())
+            {
+                const auto name = juce::String(sequence->getName());
+                if (name.isNotEmpty())
+                    sequenceName = name;
+            }
+        }
+    }
+    record.sequenceName = sequenceName.toStdString();
+
+    // 曲線（immutable snapshot 共享）＋版本戳記。
+    if (modification.content->analysis.pitchCurve != nullptr)
+        record.curve = modification.content->analysis.pitchCurve->getSnapshot();
+    record.contentVersion = computeReferenceRecordVersion(modification);
+
+    registry.publishRecord(referenceOwnerId_, std::move(record));
+}
+
+void OpenTuneDocumentController::republishReferenceRecords()
+{
+    if (referenceOwnerId_.empty())
+        return;
+    for (const auto& modification : audioModifications_)
+        republishReferenceRecordForModification(modification);
+}
+
 // ARA mutation API implementations — Processor delegates ARA writes here
 
 bool OpenTuneDocumentController::applyNotesToModification(const ContentKey& key, std::vector<Note> notes)
@@ -2678,6 +2884,8 @@ bool OpenTuneDocumentController::applyNotesToModification(const ContentKey& key,
                 + juce::ARAContentUpdateScopes::notesAreAffected(),
             true);
     
+    // 音符變更 → 校正曲線可能隨 render 更新 → 重發布參考記錄
+    republishReferenceRecordForModification(*mod);
     refreshRegisteredRenderers(publishModelChange());
     return true;
 }
@@ -2722,6 +2930,7 @@ bool OpenTuneDocumentController::applyPitchCurveToModification(const ContentKey&
                 + juce::ARAContentUpdateScopes::tuningIsAffected(),
             true);
     
+    republishReferenceRecordForModification(*mod);
     refreshRegisteredRenderers(publishModelChange());
     return true;
 }
@@ -2737,6 +2946,7 @@ bool OpenTuneDocumentController::applyOriginalF0ToModification(const ContentKey&
         mod->audioModification->notifyContentChanged(
             juce::ARAContentUpdateScopes::tuningIsAffected(), true);
 
+    republishReferenceRecordForModification(*mod);
     // OriginalF0 只更新分析数据，不触发音频渲染，所以不调用 refreshRegisteredRenderers
     return true;
 }
@@ -2774,6 +2984,7 @@ bool OpenTuneDocumentController::applyPitchShiftStateToModification(const Conten
                 + juce::ARAContentUpdateScopes::tuningIsAffected(),
             true);
     
+    republishReferenceRecordForModification(*mod);
     refreshRegisteredRenderers(publishModelChange());
     return true;
 }
@@ -2821,6 +3032,8 @@ bool OpenTuneDocumentController::applyOriginalF0StateToModification(const Conten
         mod->audioModification->notifyContentChanged(
             juce::ARAContentUpdateScopes::tuningIsAffected(), true);
     
+    // Extracting/Failed/Ready 狀態切換影響參考軌的可用性（佔位提示）→ 重發布
+    republishReferenceRecordForModification(*mod);
     refreshRegisteredRenderers(publishModelChange());
     return true;
 }

@@ -60,6 +60,10 @@ struct UIColors
     static inline juce::Colour correctedF0 { 0xFF196FC4 };  // Piano Roll reference blue
     static inline juce::Colour shadowTrack { 0x30196FC4 };
 
+    // 跨軌參考軌（唯讀疊加）統一灰色：不參與主題 token，固定中灰以在
+    // 明暗兩種背景皆可辨識，且與紅/藍的主動曲線明確區隔。
+    static inline juce::Colour referenceCurve { 0xFF9AA0A6 };
+
     // Note Block Colors
     static inline juce::Colour noteBlock { 0xFF235AA8 };
     static inline juce::Colour noteBlockBorder { 0xFF3A69A2 };

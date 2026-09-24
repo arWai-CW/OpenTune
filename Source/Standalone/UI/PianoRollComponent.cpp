@@ -2320,33 +2320,62 @@ void PianoRollComponent::drawContent(juce::Graphics& g, const ViewportState& vie
 
     const bool notesPrimary = isOpenDyne();
 
+    // 區分「正在處理的 track」與「同 document 的其他 track（參考軌）」：
+    //   - active   → 完整內容（波形 / unvoiced / 音符方塊 / 彩色 F0 / time grid）
+    //   - 參考軌    → 僅灰色 F0 曲線（唯讀疊加，見 drawReferenceF0Curve），
+    //                 且可由 editor 的參考軌選單逐軌關閉（hiddenReference 不畫）
+    // 分流決策抽在 ContentRenderRouting（純函式 + 單元測試）以免無聲退化。
+    std::vector<ContentKey> contentKeys;
+    contentKeys.reserve(renderCtx.contents.size());
+    for (const auto& item : renderCtx.contents)
+        contentKeys.push_back(item.contentKey);
+
+    const auto routing = routeContentRenderItems(
+        contentKeys, editedContentKey_, hiddenReferenceContentKeys_);
+
+    std::vector<const PianoRollRenderer::ContentRenderItem*> activeItems;
+    activeItems.reserve(routing.active.size());
+    for (std::size_t i : routing.active)
+        activeItems.push_back(&renderCtx.contents[i]);
+
     // 背景波形：OpenDyne 模式下 blob 即波形表达，不叠加背景 PCM
     if (showWaveform_ && !notesPrimary) {
-        for (const auto& item : renderCtx.contents) {
-            const auto* mipmap = waveformMipmapCache_.get(item.contentKey);
+        for (const auto* item : activeItems) {
+            const auto* mipmap = waveformMipmapCache_.get(item->contentKey);
             if (mipmap == nullptr || !mipmap->hasSource())
                 continue;
             const int bestLevel = mipmap->selectBestLevelIndex(pps);
             if (bestLevel < 0)
                 continue;
             const auto& level = mipmap->getLevel(bestLevel);
-            renderer_->drawWaveform(g, renderCtx, item, level, bestLevel);
+            renderer_->drawWaveform(g, renderCtx, *item, level, bestLevel);
         }
     }
 
     // unvoiced bands 与 F0 curve 由 RenderContext 显示开关
     // （showUnvoicedFrames_/showOriginalF0_/showCorrectedF0_）决定，与 scheme 无关
-    for (const auto& item : renderCtx.contents)
-        renderer_->drawUnvoicedFrameBands(g, renderCtx, item);
+    for (const auto* item : activeItems)
+        renderer_->drawUnvoicedFrameBands(g, renderCtx, *item);
 
-    for (const auto& item : renderCtx.contents)
-        renderer_->drawNotes(g, renderCtx, item);
+    for (const auto* item : activeItems)
+        renderer_->drawNotes(g, renderCtx, *item);
 
-    for (const auto& item : renderCtx.contents)
-        renderer_->drawF0Curve(g, renderCtx, item);
+    for (const auto* item : activeItems)
+        renderer_->drawTimeGridAnchors(g, renderCtx, *item);
 
-    for (const auto& item : renderCtx.contents)
-        renderer_->drawTimeGridAnchors(g, renderCtx, item);
+    // 跨軌參考曲線疊加在主動內容曲線之下（半透明、唯讀、統一灰）。
+    // 兩種來源共用同一灰階外觀：
+    //   1) 同 ARA document 內的非焦點 track（本迴圈，選單可逐軌關閉）
+    //   2) registry 群組內其他 instance 發布的 modification（下方呼叫）
+    // 注意：editor 端已做去重 —— 同一 modification 不會同時出現在兩者，
+    // 因此不會重複繪製（例如「複製一軌做和聲」：該軌只會以灰色畫一次）。
+    for (std::size_t i : routing.visibleReference)
+        renderer_->drawReferenceF0Curve(g, renderCtx, renderCtx.contents[i]);
+
+    renderer_->drawReferenceTrackCurves(g, renderCtx, referenceTrackCurves_);
+
+    for (const auto* item : activeItems)
+        renderer_->drawF0Curve(g, renderCtx, *item);
 
     if (referenceOverlay_.has_value() && referenceOverlay_->enabled) {
         renderer_->drawGhostNotes(g, renderCtx, *referenceOverlay_);
@@ -4930,6 +4959,46 @@ void PianoRollComponent::setReferenceOverlay(std::optional<PianoRollRenderer::Re
     repaint();
 }
 
+void PianoRollComponent::setHiddenReferenceContentKeys(HiddenReferenceSet hiddenKeys)
+{
+    if (hiddenKeys == hiddenReferenceContentKeys_)
+        return;
+
+    hiddenReferenceContentKeys_ = std::move(hiddenKeys);
+    contentDirty_ = true;
+    rasterizeDirtySurfaces();
+    repaint();
+}
+
+void PianoRollComponent::setReferenceTrackCurves(
+    std::vector<PianoRollRenderer::ReferenceTrackCurve> curves)
+{
+    // 逐幀比對：完全相同（含順序）時不重啟 content raster。
+    if (curves.size() == referenceTrackCurves_.size())
+    {
+        bool same = true;
+        for (size_t i = 0; i < curves.size(); ++i)
+        {
+            if (curves[i].name != referenceTrackCurves_[i].name
+                || curves[i].playbackTimes != referenceTrackCurves_[i].playbackTimes
+                || curves[i].originalHz != referenceTrackCurves_[i].originalHz
+                || curves[i].correctedHz != referenceTrackCurves_[i].correctedHz
+                || curves[i].hasCorrections != referenceTrackCurves_[i].hasCorrections)
+            {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+            return;
+    }
+
+    referenceTrackCurves_ = std::move(curves);
+    contentDirty_ = true;
+    rasterizeDirtySurfaces();
+    repaint();
+}
+
 int PianoRollComponent::getTimelineContentViewportWidth() const
 {
     return juce::jmax(0, getTimelineViewportBounds().getWidth() - getTimelineContentStartX());
@@ -5160,7 +5229,15 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::applyAutoTuneToSelec
     const int startFrame = targetRange.startFrame;
     const int endFrame = targetRange.endFrameExclusive - 1;
 
-    const std::optional<ScaleSnapConfig> postSnapCfg = makeScaleSnapConfigFromUi(scaleRootNote_, scaleType_);
+    // OpenTune 的 AUTO 遵循「吸附到音階」開關：
+    //  - 開啟：依目前 root / scale 吸附，維持調內修正。
+    //  - 關閉：不做音階投影；LegacyNoteGenerator 已將代表音高量化到最近半音，
+    //    因此可保留經過音、和弦外音等需要人工處理的音。
+    const bool snapToScale = toolHandler_ != nullptr
+        && toolHandler_->isDragSnapToScaleEnabled();
+    const std::optional<ScaleSnapConfig> postSnapCfg = snapToScale
+        ? makeScaleSnapConfigFromUi(scaleRootNote_, scaleType_)
+        : std::nullopt;
 
     captureBeforeUndoSnapshot();
     pendingUndoDescription_ = TRANS("自动调音");

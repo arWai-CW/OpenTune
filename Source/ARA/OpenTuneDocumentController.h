@@ -12,6 +12,7 @@
 
 #include "AudioModification.h"
 #include "AudioSource.h"
+#include "ReferenceTrackRegistry.h"
 #include "../Render/ContentRenderService.h"
 #include "../Services/F0ExtractionService.h"
 #include "../Content/ContentKey.h"
@@ -38,6 +39,10 @@ public:
         double durationInModificationTime{0.0};
 
         ContentKey contentKey;
+
+        /// 所屬 Region Sequence 名稱（≈ host 的 track 名）。參考軌選單的顯示標籤；
+        /// host 未提供時為空字串（呼叫端退回 source name）。
+        juce::String sequenceName;
 
         double endInPlaybackTime() const noexcept { return startInPlaybackTime + durationInPlaybackTime; }
         bool isPlaybackRenderable() const noexcept;
@@ -86,7 +91,32 @@ public:
     /** Phase 4: 返回 EditableContentSnapshot — 唯一的跨域 snapshot 类型 */
     std::shared_ptr<const EditableContentSnapshot> readContentSnapshot(ContentKey key) const;
 
+    // ============================================================
+    // 參考軌（跨 instance reference）— 供 VST3 editor UI 查詢。
+    // 資料來自 ReferenceTrackRegistry（同 group 的 ARA instance 發布），
+    // 群組 = 共享任一 audio source persistent ID 的 instance 連通分量。
+    // ============================================================
+
+    /** 列舉同 group（含自己）可供參考的 modification 摘要；可排除主軌自己的 id。 */
+    std::vector<ReferenceTrackSummary> getReferenceTrackSummaries(
+        const juce::String& excludeModificationPersistentId = {}) const;
+
+    /** 取完整參考記錄（含 curve 與 region 對映）；查無回傳 nullptr。 */
+    std::shared_ptr<const PublishedReferenceRecord> queryReferenceTrack(
+        const juce::String& modificationPersistentId) const;
+
+    /** 本 DC 在 registry 的 owner id（editor 輪詢時作為查詢 scope）。 */
+    const std::string& getReferenceOwnerId() const noexcept { return referenceOwnerId_; }
+
+    /** ContentKey → modification persistent id（供 editor 排除主軌自己）。 */
+    juce::String findModificationPersistentId(const ContentKey& key) const;
+
+    /** ContentKey → audio source 顯示名稱（參考軌選單在 Region Sequence
+     *  名稱缺失時的 fallback 標籤）。查無回傳空字串。 */
+    juce::String findSourceNameForContent(const ContentKey& key) const;
+
     std::vector<PlaybackRegionProjection> getPlaybackRegionProjections() const;
+
     std::vector<PlaybackRegionProjection> getPlaybackRegionProjectionsFor(
         const std::vector<juce::ARAPlaybackRegion*>& playbackRegions) const;
     std::vector<PlaybackRegionProjection> getEditorSelectionPlaybackRegionProjections() const;
@@ -206,6 +236,9 @@ private:
     // UI (PluginEditor) reads via getSharedPlayHeadState().
     PlayHeadState sharedPlayHeadState_;
 
+    // 參考軌 registry owner id（本 DC instance 專屬，跨 instance 群組偵測依此註冊）。
+    std::string referenceOwnerId_;
+
     AudioSource* findAudioSource(juce::ARAAudioSource* audioSource);
     AudioSource* findAudioSource(const juce::String& persistentId);
     const AudioSource* findAudioSource(const juce::String& persistentId) const;
@@ -252,6 +285,11 @@ private:
     std::vector<OpenTunePlaybackRenderer*> publishModelChange();
     static void refreshRegisteredRenderers(const std::vector<OpenTunePlaybackRenderer*>& renderers);
     void reconcileEditorSelectionPlaybackRegions();
+    std::set<std::string> collectReferenceOwnerSourceIds() const;
+    void refreshReferenceOwnerSources();
+    uint64_t computeReferenceRecordVersion(const AudioModification& mod) const;
+    void republishReferenceRecordForModification(const AudioModification& modification);
+    void republishReferenceRecords();
     bool publishPlaybackReadSourceForModification(
         AudioModification& modification,
         std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer);

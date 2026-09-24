@@ -21,6 +21,7 @@
 #include "ViewMapper.h"
 #include "ToolIds.h"
 #include "UIColors.h"
+#include "ContentRenderRouting.h"
 #include "Utils/F0Timeline.h"
 #include "Utils/AudioEditingScheme.h"
 #include "Utils/ContentTimelineProjection.h"
@@ -260,6 +261,14 @@ public:
     /** 设置 reference overlay 数据（ghost notes + anchors）。
      *  传入 std::nullopt 清除 overlay。 */
     void setReferenceOverlay(std::optional<PianoRollRenderer::ReferenceOverlay> overlay);
+
+    /** 設置跨軌參考曲線疊加（Melodyne-style reference）。
+     *  資料已由呼叫方轉換為 playback-time；空向量清除疊加。 */
+    void setReferenceTrackCurves(std::vector<PianoRollRenderer::ReferenceTrackCurve> curves);
+
+    /** 設置由「參考軌選單」關閉的同 document 參考軌（不畫任何內容）。
+     *  正在處理的 track 不受此集合影響（見 ContentRenderRouting）。 */
+    void setHiddenReferenceContentKeys(HiddenReferenceSet hiddenKeys);
 
     void setPlayheadColour(juce::Colour colour) {
         playheadColour_ = colour;
@@ -622,6 +631,11 @@ private:
     std::vector<Note> notesClipboard_;   // Note Copy/Paste 剪贴板
 
     std::optional<PianoRollRenderer::ReferenceOverlay> referenceOverlay_;
+
+    // 跨軌參考曲線疊加（VST3/ARA 專用；Standalone 恆為空）
+    std::vector<PianoRollRenderer::ReferenceTrackCurve> referenceTrackCurves_;
+    // 由參考軌選單關閉的同 document 參考軌（Standalone 恆為空）
+    HiddenReferenceSet hiddenReferenceContentKeys_;
 
     // Undo support
     juce::String pendingUndoDescription_;
