@@ -366,6 +366,12 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     if (appliedThemeId_ != sharedPreferences.theme)
         applyThemeToEditor(sharedPreferences.theme);
 
+    if (appliedFontSizePercent_ != sharedPreferences.fontSizePercent) {
+        appliedFontSizePercent_ = sharedPreferences.fontSizePercent;
+        FontScale::setPercent(appliedFontSizePercent_);
+        refreshFontScale();
+    }
+
     pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
     pianoRoll_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
     parameterPanel_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
@@ -1047,6 +1053,8 @@ void OpenTuneAudioProcessorEditor::applyThemeToEditor(ThemeId themeId)
 
     if (themeId == ThemeId::Aurora) {
         setLookAndFeel(&auroraLookAndFeel_);
+    } else if (themeId == ThemeId::Telemetry) {
+        setLookAndFeel(&telemetryLookAndFeel_);
     } else {
         setLookAndFeel(&openTuneLookAndFeel_);
         openTuneLookAndFeel_.setColour(juce::TextButton::buttonColourId, UIColors::buttonNormal);
@@ -1057,13 +1065,26 @@ void OpenTuneAudioProcessorEditor::applyThemeToEditor(ThemeId themeId)
 
     // Install process-wide default so independent DialogWindow title bars and
     // ordinary JUCE controls use the project theme.
-    AuroraLookAndFeel::installAsDefault();
+    if (themeId == ThemeId::Telemetry)
+        TelemetryLookAndFeel::installAsDefault();
+    else
+        AuroraLookAndFeel::installAsDefault();
 
     topBar_.applyTheme();
     parameterPanel_.applyTheme();
     pianoRoll_.setPlayheadColour(UIColors::playhead);
     sendLookAndFeelChange();
     pianoRoll_.requestThemeRedraw();
+    repaint();
+}
+
+// 字級變更：FontScale 已更新，這裡負責讓元件重取字型、重排版面，並重繪烘進快取的畫布。
+void OpenTuneAudioProcessorEditor::refreshFontScale()
+{
+    sendLookAndFeelChange();
+    resized(); // 字高變了，重新跑一次版面計算，避免文字被裁切
+    pianoRoll_.requestThemeRedraw();
+    overviewStrip_.repaint();
     repaint();
 }
 

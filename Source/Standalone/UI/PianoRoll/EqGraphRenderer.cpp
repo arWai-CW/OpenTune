@@ -7,6 +7,7 @@
 
 #include "EqGraphRenderer.h"
 #include "../AuroraTheme.h"
+#include "../FontScale.h"
 
 #include <cmath>
 #include <algorithm>
@@ -725,13 +726,13 @@ void EqGraphRenderer::drawGrid(juce::Graphics& g) const
 void EqGraphRenderer::drawAxisLabels(juce::Graphics& g) const
 {
     g.setColour(axisLabelColor());
-    g.setFont(juce::FontOptions(9.0f));
+    g.setFont(juce::FontOptions(FontScale::scale(9.0f)));
 
     const float gx = graphBounds_.getX();
     const float gy = graphBounds_.getY();
     const float gw = graphBounds_.getWidth();
     const float gh = graphBounds_.getHeight();
-    const float labelH = 12.0f;
+    const float labelH = FontScale::scale(12.0f);
     const float labelW = 24.0f;
     const float padBottom = 2.0f;
     const float padRight = 30.0f;
@@ -874,7 +875,7 @@ void EqGraphRenderer::drawAnchors(juce::Graphics& g, int hoveredBand, bool showN
             const float numOffsetY = -radius - 2.0f;
 
             g.setColour(juce::Colours::black.withAlpha(0.65f));
-            g.setFont(juce::FontOptions(8.0f));
+            g.setFont(juce::FontOptions(FontScale::scale(8.0f)));
             g.drawText(juce::String(i + 1),
                        juce::Rectangle<float>(pos.x + numOffsetX - 0.5f, pos.y + numOffsetY - 0.5f,
                                               10.0f, 10.0f),
@@ -910,14 +911,14 @@ void EqGraphRenderer::drawCrosshairAndHud(juce::Graphics& g, juce::Point<float> 
 
     if (!hudText.isEmpty())
     {
-        g.setFont(juce::FontOptions(10.0f));
+        g.setFont(juce::FontOptions(FontScale::scale(10.0f)));
         juce::GlyphArrangement hudGa;
-        hudGa.addLineOfText(juce::Font(juce::FontOptions(10.0f)), hudText, 0.0f, 0.0f);
+        hudGa.addLineOfText(juce::Font(juce::FontOptions(FontScale::scale(10.0f))), hudText, 0.0f, 0.0f);
         const auto textWidth = (hudGa.getNumGlyphs() > 0
             ? hudGa.getBoundingBox(0, hudGa.getNumGlyphs(), false).getWidth()
             : 0.0f) + 10.0f;
         const float hudW = textWidth + 8.0f;
-        const float hudH = 18.0f;
+        const float hudH = FontScale::scale(18.0f);
         float hudX = pos.x + 12.0f;
         float hudY = pos.y - hudH - 4.0f;
         if (hudX + hudW > graphBounds_.getRight())
@@ -940,7 +941,7 @@ void EqGraphRenderer::drawCrosshairAndHud(juce::Graphics& g, juce::Point<float> 
 float EqGraphRenderer::measureLegendItemWidth(const juce::String& label) const
 {
     juce::GlyphArrangement ga;
-    ga.addLineOfText(juce::Font(juce::FontOptions(9.0f)), label, 0.0f, 0.0f);
+    ga.addLineOfText(juce::Font(juce::FontOptions(FontScale::scale(9.0f))), label, 0.0f, 0.0f);
     return ga.getNumGlyphs() > 0
         ? ga.getBoundingBox(0, ga.getNumGlyphs(), false).getWidth()
         : 0.0f;
@@ -987,7 +988,7 @@ std::vector<EqGraphRenderer::LegendItem> EqGraphRenderer::buildLegendItems() con
 juce::Rectangle<float> EqGraphRenderer::legendBounds(const std::vector<LegendItem>& items) const
 {
     float totalWidth = 0.0f;
-    const float itemHeight = 12.0f;
+    const float itemHeight = FontScale::scale(12.0f);
     const float gap = 8.0f;
     const float swatchW = 14.0f;
 
@@ -1000,10 +1001,10 @@ juce::Rectangle<float> EqGraphRenderer::legendBounds(const std::vector<LegendIte
 void EqGraphRenderer::drawLegend(juce::Graphics& g, const std::vector<LegendItem>& items,
                                  int hoveredLegendIndex) const
 {
-    g.setFont(juce::FontOptions(9.0f));
+    g.setFont(juce::FontOptions(FontScale::scale(9.0f)));
     const float swatchW = 14.0f;
     const float gap = 8.0f;
-    const float itemH = 12.0f;
+    const float itemH = FontScale::scale(12.0f);
 
     float totalWidth = 0.0f;
     for (const auto& item : items)
@@ -1048,7 +1049,7 @@ int EqGraphRenderer::hitTestLegend(juce::Point<float> pos,
 {
     const float swatchW = 14.0f;
     const float gap = 8.0f;
-    const float itemH = 12.0f;
+    const float itemH = FontScale::scale(12.0f);
 
     float totalWidth = 0.0f;
     for (const auto& item : items)

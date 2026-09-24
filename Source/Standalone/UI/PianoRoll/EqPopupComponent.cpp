@@ -83,7 +83,7 @@ EqPopupComponent::~EqPopupComponent()
 juce::Rectangle<float> EqPopupComponent::floatingCardBounds() const
 {
     const float cardH = kCardPadding + kCardTypeRowH + 3.0f
-                        + kCardLabelHeight + kCardSliderHeight + kCardPadding;
+                        + FontScale::scale(kCardLabelHeight) + kCardSliderHeight + kCardPadding;
     const float compW = static_cast<float>(getWidth());
     const float compH = static_cast<float>(getHeight());
     float x = (compW - kCardWidth) * 0.5f;
@@ -140,8 +140,8 @@ void EqPopupComponent::paintFloatingCard(juce::Graphics& g, int filterIndex) con
         {
             const float x = card.getX() + kCardPadding + static_cast<float>(i) * kCardColumnWidth;
             g.setColour(EqGraphRenderer::axisLabelColor().withAlpha(0.6f));
-            g.setFont(juce::FontOptions(10.0f));
-            g.drawText(labels[i], juce::Rectangle<float>(x, labelY, kCardColumnWidth, kCardLabelHeight),
+            g.setFont(juce::FontOptions(FontScale::scale(10.0f)));
+            g.drawText(labels[i], juce::Rectangle<float>(x, labelY, kCardColumnWidth, FontScale::scale(kCardLabelHeight)),
                        juce::Justification::centred, false);
         }
     }
@@ -335,7 +335,7 @@ void EqPopupComponent::layoutCardControls()
         return;
 
     const auto card = floatingCardBounds();
-    const float sliderY = card.getY() + kCardPadding + kCardTypeRowH + 3.0f + kCardLabelHeight;
+    const float sliderY = card.getY() + kCardPadding + kCardTypeRowH + 3.0f + FontScale::scale(kCardLabelHeight);
 
     for (int i = 0; i < 3; ++i)
     {
@@ -523,13 +523,13 @@ void EqPopupComponent::paint(juce::Graphics& g)
         if (tooltipText.isNotEmpty())
         {
             const auto btnRect = buttonBounds(id);
-            const float tooltipH = 16.0f;
+            const float tooltipH = FontScale::scale(16.0f);
             const float tooltipY = btnRect.getBottom() + 3.0f;
             const float maxY = static_cast<float>(getHeight()) - tooltipH - 2.0f;
             const float finalY = juce::jmin(tooltipY, maxY);
 
             g.setColour(EqGraphRenderer::hudBgColor().withAlpha(0.92f));
-            const auto font = juce::Font(juce::FontOptions(10.0f));
+            const auto font = juce::Font(juce::FontOptions(FontScale::scale(10.0f)));
             const auto textW = juce::TextLayout::getStringWidth(font, tooltipText) + 8.0f;
             const float tooltipX = juce::jmax(2.0f, juce::jmin(btnRect.getX(),
                                                                 static_cast<float>(getWidth()) - textW - 2.0f));
@@ -562,13 +562,13 @@ void EqPopupComponent::paint(juce::Graphics& g)
 
         if (tooltipText.isNotEmpty())
         {
-            const float tooltipH = 16.0f;
+            const float tooltipH = FontScale::scale(16.0f);
             const float tooltipY = btnRect.getBottom() + 3.0f;
             const float maxY = static_cast<float>(getHeight()) - tooltipH - 2.0f;
             const float finalY = juce::jmin(tooltipY, maxY);
 
             g.setColour(EqGraphRenderer::hudBgColor().withAlpha(0.92f));
-            const auto font = juce::Font(juce::FontOptions(10.0f));
+            const auto font = juce::Font(juce::FontOptions(FontScale::scale(10.0f)));
             const auto textW = juce::TextLayout::getStringWidth(font, tooltipText) + 8.0f;
             const float tooltipX = juce::jmax(2.0f, juce::jmin(btnRect.getX(),
                                                                  static_cast<float>(getWidth()) - textW - 2.0f));
@@ -595,7 +595,7 @@ void EqPopupComponent::paint(juce::Graphics& g)
         g.setColour(EqGraphRenderer::hudBgColor());
         g.fillRoundedRectangle(dialogX, dialogY, dialogW, dialogH, 4.0f);
         g.setColour(EqGraphRenderer::hudTextColor());
-        g.setFont(juce::FontOptions(11.0f));
+        g.setFont(juce::FontOptions(FontScale::scale(11.0f)));
         g.drawText(juce::String::fromUTF8(u8"确认移除 EQ?"),
                    juce::Rectangle<float>(dialogX, dialogY + 6.0f, dialogW, 18.0f),
                    juce::Justification::centred, false);
@@ -613,7 +613,7 @@ void EqPopupComponent::paint(juce::Graphics& g)
                        checkRect.getX() + 14.0f, checkRect.getY() + 4.0f, 1.5f);
         }
         g.setColour(EqGraphRenderer::axisLabelColor());
-        g.setFont(juce::FontOptions(9.0f));
+        g.setFont(juce::FontOptions(FontScale::scale(9.0f)));
         g.drawText(juce::String::fromUTF8(u8"不再提示"), checkRect.translated(16.0f, 0.0f),
                    juce::Justification::centredLeft, false);
 
@@ -621,7 +621,7 @@ void EqPopupComponent::paint(juce::Graphics& g)
         g.setColour(EqGraphRenderer::combinedCurveColor().withAlpha(0.6f));
         g.fillRoundedRectangle(okRect, 3.0f);
         g.setColour(juce::Colours::black);
-        g.setFont(juce::FontOptions(10.0f));
+        g.setFont(juce::FontOptions(FontScale::scale(10.0f)));
         g.drawText(juce::String::fromUTF8(u8"确认"), okRect, juce::Justification::centred, false);
 
         const auto cancelRect = juce::Rectangle<float>(dialogX + dialogW - 90.0f, dialogY + dialogH - 24.0f, 80.0f, 18.0f);

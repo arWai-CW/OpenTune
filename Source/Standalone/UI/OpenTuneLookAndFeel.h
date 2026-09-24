@@ -462,7 +462,8 @@ public:
                                 bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
     {
         // Minimalist Checkbox/Radio
-        auto fontSize = juce::jmin(15.0f, (float)button.getHeight() * 0.75f);
+        // 字級先乘使用者字級係數，再以控件高度做上限（避免文字溢出控件）
+        auto fontSize = juce::jmin(FontScale::scale(15.0f), (float)button.getHeight() * 0.75f);
         auto tickWidth = fontSize * 1.1f;
 
         drawTickBox(g, button, 4.0f, ((float)button.getHeight() - tickWidth) * 0.5f,
@@ -657,7 +658,7 @@ public:
     juce::Font getPopupMenuFont() override
     {
         // 显式使用 Noto Sans SC Medium 确保 CJK 字符正确渲染
-        return juce::Font(juce::FontOptions("Noto Sans SC", "Medium", 16.0f));
+        return juce::Font(juce::FontOptions("Noto Sans SC", "Medium", FontScale::scale(16.0f)));
     }
 
     juce::Font getLabelFont(juce::Label&) override

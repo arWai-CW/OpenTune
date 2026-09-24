@@ -438,6 +438,37 @@ void TrackPanelComponent::paint(juce::Graphics& g)
             g.setColour(UIColors::panelBorder.withAlpha(0.55f));
             g.drawRoundedRectangle(cardBounds, style.controlRadius, 1.0f);
         }
+        else if (themeId == ThemeId::Telemetry)
+        {
+            // Telemetry：儀表機櫃。純平面、無漸層、無陰影、半徑 = 0。
+            // 舊版本沒有這個分支 → 軌道卡片與通道色整個沒被畫出來。
+            const auto active = tracks_[i].isActive;
+            const auto trackColour = trackColors_[i];
+
+            // 卡片底：作用中 = 抬升面，非作用中 = 井底（與面板底 #121212 明顯分層）
+            g.setColour(juce::Colour { active ? Telemetry::Colors::SurfaceRaised
+                                              : Telemetry::Colors::Ink });
+            g.fillRect(cardBounds);
+
+            // 作用中：極淡通道色洗版（平面疊色，非漸層）
+            if (active)
+            {
+                g.setColour(trackColour.withAlpha(0.10f));
+                g.fillRect(cardBounds);
+            }
+
+            // 通道色條：唯一的通道識別訊號（靠左、上下一致內縮）
+            const float stripWidth = active ? 5.0f : 3.0f;
+            auto stripBounds = cardBounds.withWidth(stripWidth)
+                                   .reduced(0.0f, trackAccentVerticalInset);
+            g.setColour(trackColour.withAlpha(active ? 1.0f : 0.60f));
+            g.fillRect(stripBounds);
+
+            // 1px 結構邊框
+            g.setColour(juce::Colour { active ? Telemetry::Colors::Edge
+                                              : Telemetry::Colors::Divider });
+            g.drawRect(cardBounds, 1.0f);
+        }
     }
 }
 

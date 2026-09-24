@@ -8,6 +8,8 @@
 #include "Utils/LocalizationManager.h"
 #include "Utils/ModelPathResolver.h"
 
+#include <array>
+
 namespace OpenTune {
 
 namespace {
@@ -71,7 +73,7 @@ void initialiseToggleButton(juce::ToggleButton& toggleButton)
 class SharedGeneralPage final : public juce::Component
 {
 public:
-    static constexpr int kContentHeight = 120; // 20 + 34 + 12 + 34 + 20
+    static constexpr int kContentHeight = 166; // 20 + 34 + 12 + 34 + 12 + 34 + 20
 
     SharedGeneralPage(AppPreferences& appPreferences,
                       std::function<void()> onPreferencesChanged)
@@ -87,6 +89,7 @@ public:
         // themeSelector_.addItem(LOC(kThemeDarkBlueGrey), 2); // 临时隐藏
         themeSelector_.addItem(LOC(kThemeAurora), 3);
         // themeSelector_.addItem(LOC(kThemeOverdose), 4);  // "升天" 主题暂时隐藏
+        themeSelector_.addItem(LOC(kThemeTelemetry), 5);
         const int themeIdx = static_cast<int>(state.shared.theme);
         // 蓝色清风/深蓝灰临时隐藏，fallback到Aurora
         const int selectedId = (themeIdx <= static_cast<int>(ThemeId::DarkBlueGrey)) ? 3 : themeIdx + 1;
@@ -114,6 +117,45 @@ public:
         };
         initialiseComboBox(languageSelector_);
         addAndMakeVisible(languageSelector_);
+
+        // 字級（font size）：預設檔位，序列化為百分比 token（shared.ui.fontSizePercent）
+        initialiseLabel(fontSizeLabel_, LOC(kFontSize));
+        addAndMakeVisible(fontSizeLabel_);
+
+        // 目前值若不在預設檔位內（舊設定或手改設定檔），補一個項目以免選不到。
+        std::array<int, kFontSizePresetMaxCount> presets {};
+        int presetCount = 0;
+        for (int i = 0; i < kFontSizePresetCount; ++i)
+            presets[static_cast<size_t>(presetCount++)] = kFontSizePresets[i];
+        bool currentIsPreset = false;
+        for (int i = 0; i < presetCount; ++i)
+            if (presets[static_cast<size_t>(i)] == state.shared.fontSizePercent)
+                currentIsPreset = true;
+        if (!currentIsPreset && presetCount < kFontSizePresetMaxCount)
+            presets[static_cast<size_t>(presetCount++)] = state.shared.fontSizePercent;
+
+        for (int i = 0; i < presetCount; ++i)
+            fontSizeSelector_.addItem(juce::String(presets[static_cast<size_t>(i)]) + "%", i + 1);
+        int fontSizeSelectedId = 1;
+        for (int i = 0; i < presetCount; ++i)
+            if (presets[static_cast<size_t>(i)] == state.shared.fontSizePercent)
+                fontSizeSelectedId = i + 1;
+        fontSizeSelector_.setSelectedId(fontSizeSelectedId, juce::dontSendNotification);
+        fontSizeSelector_.onChange = [this, presets, presetCount] {
+            const int index = fontSizeSelector_.getSelectedId() - 1;
+            if (index < 0 || index >= presetCount)
+                return;
+            appPreferences_.setFontSizePercent(presets[static_cast<size_t>(index)]);
+            notifyChanged(); // 觸發 editor 同步 FontScale 並重繪主視窗
+            // 偏好對話框是獨立 top-level 視窗，editor 的 sendLookAndFeelChange
+            // 傳不到這裡，需自行重送一次，ComboBox/Label 才會重建字型。
+            if (auto* top = getTopLevelComponent()) {
+                top->sendLookAndFeelChange();
+                top->repaint();
+            }
+        };
+        initialiseComboBox(fontSizeSelector_);
+        addAndMakeVisible(fontSizeSelector_);
     }
 
     void paint(juce::Graphics& g) override
@@ -135,6 +177,11 @@ public:
         row = bounds.removeFromTop(rowHeight);
         languageLabel_.setBounds(row.removeFromLeft(labelWidth));
         languageSelector_.setBounds(row.removeFromLeft(240).reduced(0, 4));
+
+        bounds.removeFromTop(12);
+        row = bounds.removeFromTop(rowHeight);
+        fontSizeLabel_.setBounds(row.removeFromLeft(labelWidth));
+        fontSizeSelector_.setBounds(row.removeFromLeft(240).reduced(0, 4));
     }
 
 private:
@@ -145,12 +192,17 @@ private:
         }
     }
 
+    static constexpr int kFontSizePresetCount = 6;
+    static constexpr int kFontSizePresetMaxCount = 8;
+    static constexpr int kFontSizePresets[kFontSizePresetCount] = { 80, 90, 100, 112, 125, 150 };
     AppPreferences& appPreferences_;
     std::function<void()> onPreferencesChanged_;
     juce::Label themeLabel_;
     juce::ComboBox themeSelector_;
     juce::Label languageLabel_;
     juce::ComboBox languageSelector_;
+    juce::Label fontSizeLabel_;
+    juce::ComboBox fontSizeSelector_;
 };
 
 class SharedAudioPage final : public juce::Component
@@ -867,7 +919,8 @@ public:
         auto makeSectionHeader = [this](const juce::String& text) {
             auto* label = new juce::Label();
             label->setText(text, juce::dontSendNotification);
-            label->setFont(juce::Font(juce::FontOptions(16.0f, juce::Font::bold)));
+            label->setFont(
+                juce::Font(juce::FontOptions(FontScale::scale(16.0f), juce::Font::bold)));
             label->setColour(juce::Label::textColourId, UIColors::textPrimary);
             label->setJustificationType(juce::Justification::centredLeft);
             sectionHeaders_.add(label);

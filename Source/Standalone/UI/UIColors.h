@@ -2,6 +2,7 @@
 
 #include <juce_graphics/juce_graphics.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "FontScale.h"
 #include "ThemeTokens.h"
 
 namespace OpenTune {
@@ -264,6 +265,11 @@ struct UIColors
     static bool isOverdoseTheme()
     {
         return currentThemeId_ == ThemeId::Overdose;
+    }
+
+    static bool isTelemetryTheme()
+    {
+        return currentThemeId_ == ThemeId::Telemetry;
     }
 
     static juce::Colour auroraTrackAccent(int trackIndex)
@@ -1490,6 +1496,21 @@ struct UIColors
             return;
         }
 
+        if (themeId == ThemeId::Telemetry)
+        {
+            // 粗野主義：純平面面板，禁漸變 / 斜面 / 光暈，層次只由 1px 結構線表達。
+            //
+            // 必須在這裡提前 return——下方通用分支會疊上三層 BlueBreeze 殘留效果：
+            //   1. bevelLight（Telemetry = Clear）經 withAlpha(0.34f) 變成「黑 @34%」壓暗頂部；
+            //   2. SourceLight（白 @18%）在左上打出白光暈；
+            //   3. PanelInset（#90A0AE @34%）在右下染上藍灰。
+            // 結果面板從 #0A0A0A 被洗成 #313640 左右的灰藍色，違反「#0A0A0A 底／禁漸變」。
+            g.setColour(UIColors::backgroundMedium); // = Surface #121212（抬升的面板表面）
+            if (radius > 0.0f) g.fillRoundedRectangle(bounds, radius);
+            else g.fillRect(bounds);
+            return;
+        }
+
         juce::ColourGradient base(UIColors::gradientTop, bounds.getX(), bounds.getY(),
                                   UIColors::gradientBottom, bounds.getRight(), bounds.getBottom(), false);
         base.addColour(0.54, UIColors::backgroundMedium);
@@ -1557,6 +1578,11 @@ struct UIColors
         {
             borderAlpha = 0.26f;
             innerAlpha = 0.08f;
+        }
+        else if (themeId == ThemeId::Telemetry)
+        {
+            borderAlpha = 1.0f;  // 粗野主義：銳利不透明的 1px 結構線
+            innerAlpha = 0.0f;   // 純平面——無內高光
         }
 
         g.setColour(UIColors::panelBorder.withAlpha(borderAlpha));
@@ -2066,24 +2092,30 @@ struct UIColors
     }
 
     // Font Management
+    // 字級一律「先取下限（100% 基準），再乘使用者字級係數」，因此偏好設定的字級
+    // 調整可以放大也可以縮小，不會被 jmax 下限擋掉。見 FontScale.h。
     static juce::Font getUIFont(float height = 16.0f)
     {
-        return juce::Font(juce::FontOptions("Roboto", "Regular", juce::jmax(16.0f, height)));
+        return juce::Font(juce::FontOptions("Roboto", "Regular",
+                                            FontScale::scale(juce::jmax(16.0f, height))));
     }
 
     static juce::Font getHeaderFont(float height = 18.0f)
     {
-        return juce::Font(juce::FontOptions("Roboto", "Semibold", juce::jmax(18.0f, height)));
+        return juce::Font(juce::FontOptions("Roboto", "Semibold",
+                                            FontScale::scale(juce::jmax(18.0f, height))));
     }
 
     static juce::Font getLabelFont(float height = 14.0f)
     {
-        return juce::Font(juce::FontOptions("Roboto", "Regular", juce::jmax(14.0f, height)));
+        return juce::Font(juce::FontOptions("Roboto", "Regular",
+                                            FontScale::scale(juce::jmax(14.0f, height))));
     }
 
     static juce::Font getMonoFont(float height = 20.0f)
     {
-        return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), "Bold", height));
+        return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), "Bold",
+                                            FontScale::scale(height)));
     }
 
     static juce::Colour withAlpha(const juce::Colour& baseColor, float alpha)
@@ -2129,7 +2161,7 @@ public:
         g.fillRoundedRectangle(bounds, 4.0f);
 
         g.setColour(findColour(juce::TextButton::textColourOffId));
-        g.setFont(juce::Font(juce::FontOptions("Noto Sans SC", "Medium", 12.0f)));
+        g.setFont(juce::Font(juce::FontOptions("Noto Sans SC", "Medium", FontScale::scale(12.0f))));
         g.drawText(getButtonText(), bounds, juce::Justification::centred);
     }
 };

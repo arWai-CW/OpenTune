@@ -242,6 +242,13 @@ static void paintHistoricalClipWaveform(juce::Graphics& g,
         g.strokePath(wavePath, glowStroke);
         g.setColour(UIColors::pianoRollWaveform.withAlpha(0.24f));
         g.strokePath(wavePath, mainStroke);
+    } else if (themeId == ThemeId::Telemetry) {
+        // 磷光軌跡：疊在「帶通道色的深色殼」上，用磷光白才有足夠對比。
+        // （舊的 else 分支硬寫 0xFF3E4652 —— DarkBlueGrey 的藍灰，漏進 Telemetry。）
+        g.setColour(juce::Colour { Telemetry::Colors::Phosphor }.withAlpha(0.20f));
+        g.strokePath(wavePath, glowStroke);
+        g.setColour(juce::Colour { Telemetry::Colors::Phosphor }.withAlpha(0.78f));
+        g.strokePath(wavePath, mainStroke);
     } else {
         g.setColour(juce::Colour(0xFF3E4652).withAlpha(0.22f));
         g.strokePath(wavePath, glowStroke);
@@ -304,6 +311,14 @@ static void paintHistoricalClipShellAndWaveform(juce::Graphics& g,
             g.setColour(clip.trackColour.withAlpha(0.6f));
             g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.0f);
         }
+    } else if (themeId == ThemeId::Telemetry) {
+        // 音檔顏色跟隨通道色（資料色，非主題強調色）。方角 = 主題 radius 0 規則。
+        // 舊的 else 分支：選中 = primaryPurple(HazardRed)、未選中 = buttonNormal #141414，
+        // 完全沒用到 trackColour → 紅色被當成「固定色」且不跟通道。
+        g.setColour(clip.trackColour.withAlpha(clip.selected ? 0.34f : 0.18f));
+        g.fillRect(bounds);
+        g.setColour(clip.trackColour.withAlpha(clip.selected ? 1.0f : 0.72f));
+        g.drawRect(bounds, clip.selected ? 1.5f : 1.0f);
     } else {
         juce::Colour fill = clip.selected ? UIColors::primaryPurple : UIColors::buttonNormal;
         g.setColour(fill);
@@ -313,10 +328,17 @@ static void paintHistoricalClipShellAndWaveform(juce::Graphics& g,
     }
 
     if (clip.preview) {
-        g.setColour(UIColors::accent.withAlpha(0.18f));
-        g.fillRoundedRectangle(bounds.reduced(1.0f), 5.0f);
-        g.setColour(UIColors::accent.withAlpha(0.82f));
-        g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.6f);
+        if (themeId == ThemeId::Telemetry) {
+            g.setColour(UIColors::accent.withAlpha(0.18f));
+            g.fillRect(bounds.reduced(1.0f));
+            g.setColour(UIColors::accent.withAlpha(0.82f));
+            g.drawRect(bounds.reduced(0.5f), 1.6f);
+        } else {
+            g.setColour(UIColors::accent.withAlpha(0.18f));
+            g.fillRoundedRectangle(bounds.reduced(1.0f), 5.0f);
+            g.setColour(UIColors::accent.withAlpha(0.82f));
+            g.drawRoundedRectangle(bounds.reduced(0.5f), 6.0f, 1.6f);
+        }
     }
 
     paintHistoricalClipWaveform(g, clip, waveformMipmapCache);
@@ -1598,7 +1620,7 @@ void ArrangementViewComponent::drawImportDropPreview(juce::Graphics& g)
                 g.setColour(UIColors::panelGlow.withAlpha(0.40f));
                 g.drawHorizontalLine(newTrackRect.getY(), 0.0f, static_cast<float>(barWidth));
                 g.setColour(UIColors::panelGlow.withAlpha(0.60f));
-                g.setFont(16.0f);
+                g.setFont(FontScale::scale(16.0f));
                 g.drawText(juce::String::fromUTF8(u8"+ 鏂板缓杞ㄩ亾"),
                            newTrackRect.toFloat(),
                            juce::Justification::centredLeft);
@@ -1653,6 +1675,10 @@ void ArrangementViewComponent::drawMoveDragOverlay(juce::Graphics& g)
         if (paintClip.isEmpty())
             continue;
 
+        auto snapshot = processor_.getContentSnapshot(placement.contentKey);
+        if (snapshot == nullptr)
+            continue;
+
         ArrangementClipPaintInput clip{
             bounds,
             paintClip,
@@ -1668,7 +1694,8 @@ void ArrangementViewComponent::drawMoveDragOverlay(juce::Graphics& g)
             placement.clipInSeconds,
             target.startSeconds,
             state.durationSeconds,
-            camera_.pixelsPerSecond
+            camera_.pixelsPerSecond,
+            snapshot->timeGrid
         };
         paintHistoricalClipShellAndWaveform(g, clip, waveformMipmapCache_);
         paintHistoricalClipTextFadeGain(g, clip);

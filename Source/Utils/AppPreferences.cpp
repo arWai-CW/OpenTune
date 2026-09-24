@@ -1,6 +1,7 @@
 #include "AppPreferences.h"
 
 #include "ModelPathResolver.h"
+#include "../Standalone/UI/FontScale.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,7 @@ namespace {
 
 constexpr const char* kSharedLanguageKey = "shared.language";
 constexpr const char* kSharedThemeKey = "shared.theme.activeTheme";
+constexpr const char* kSharedFontSizePercentKey = "shared.ui.fontSizePercent";
 constexpr const char* kSharedAudioEditingSchemeKey = "shared.audioEditing.scheme";
 constexpr const char* kSharedPianoRollNoteNameModeKey = "shared.pianoRoll.noteNameMode";
 constexpr const char* kSharedPianoRollShowUnvoicedFramesKey = "shared.pianoRoll.showUnvoicedFrames";
@@ -119,6 +121,7 @@ const char* toThemeToken(ThemeId theme)
         case ThemeId::DarkBlueGrey: return "dark-blue-grey";
         case ThemeId::Aurora: return "aurora";
         case ThemeId::Overdose: return "overdose";
+        case ThemeId::Telemetry: return "telemetry";
     }
 
     return "aurora";
@@ -129,6 +132,7 @@ ThemeId themeFromToken(const juce::String& token)
     if (token == "blue-breeze") return ThemeId::BlueBreeze;
     if (token == "dark-blue-grey") return ThemeId::DarkBlueGrey;
     if (token == "overdose") return ThemeId::Overdose;
+    if (token == "telemetry") return ThemeId::Telemetry;
     return ThemeId::Aurora;
 }
 
@@ -298,6 +302,8 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     AppPreferencesState state;
     state.shared.language = languageFromToken(properties.getValue(kSharedLanguageKey, toLanguageToken(state.shared.language)));
     state.shared.theme = themeFromToken(properties.getValue(kSharedThemeKey, toThemeToken(state.shared.theme)));
+    state.shared.fontSizePercent = juce::jlimit(
+        50, 300, properties.getIntValue(kSharedFontSizePercentKey, state.shared.fontSizePercent));
     state.shared.audioEditingScheme = audioEditingSchemeFromToken(
         properties.getValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme)));
     state.shared.pianoRollVisualPreferences.noteNameMode = noteNameModeFromToken(
@@ -386,6 +392,7 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
 {
     properties.setValue(kSharedLanguageKey, toLanguageToken(state.shared.language));
     properties.setValue(kSharedThemeKey, toThemeToken(state.shared.theme));
+    properties.setValue(kSharedFontSizePercentKey, state.shared.fontSizePercent);
     properties.setValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme));
     properties.setValue(kSharedPianoRollNoteNameModeKey,
                         toNoteNameModeToken(state.shared.pianoRollVisualPreferences.noteNameMode));
@@ -483,6 +490,9 @@ void AppPreferences::load()
         userSettings->saveIfNeeded();
     }
     TuningConfig::setCurrentTuningHz(state_.shared.tuning.tuningHz);
+    // 字級是全域繪製狀態：載入後立即寫入 FontScale，確保後續建立的元件與
+    // LookAndFeel 一律取得正確字級（editor 成員中 appPreferences_ 先於 UI 元件建構）。
+    FontScale::setPercent(state_.shared.fontSizePercent);
 }
 
 void AppPreferences::save()
@@ -507,6 +517,16 @@ void AppPreferences::setTheme(ThemeId theme)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     state_.shared.theme = theme;
+    saveLocked();
+}
+
+void AppPreferences::setFontSizePercent(int percent)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const int clamped = juce::jlimit(50, 300, percent);
+    state_.shared.fontSizePercent = clamped;
+    // 立即套用到全域字級，之後建立的字型才會拿到新值。
+    FontScale::setPercent(clamped);
     saveLocked();
 }
 

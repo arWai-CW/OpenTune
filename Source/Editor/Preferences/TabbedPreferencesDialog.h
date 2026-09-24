@@ -9,6 +9,7 @@
 #include "Utils/LocalizationManager.h"
 #include "Standalone/UI/AuroraLookAndFeel.h"
 #include "Standalone/UI/OpenTuneLookAndFeel.h"
+#include "Standalone/UI/TelemetryLookAndFeel.h"
 #include "Standalone/UI/UIColors.h"
 
 namespace OpenTune {
@@ -135,6 +136,11 @@ private:
             return;
         }
 
+        if (UIColors::currentThemeId() == ThemeId::Telemetry) {
+            setLookAndFeel(&telemetryLookAndFeel_);
+            return;
+        }
+
         setLookAndFeel(&openTuneLookAndFeel_);
     }
 
@@ -142,6 +148,7 @@ private:
     juce::TextButton closeButton_;
     OpenTuneLookAndFeel openTuneLookAndFeel_;
     AuroraLookAndFeel auroraLookAndFeel_;
+    TelemetryLookAndFeel telemetryLookAndFeel_;
     juce::Component::SafePointer<juce::Component> dialogParent_;
 
     void componentBeingDeleted(juce::Component&) override

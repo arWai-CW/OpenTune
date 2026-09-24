@@ -30,6 +30,7 @@
 #include "UI/OpenTuneLookAndFeel.h"
 #include "UI/OpenTuneTooltipWindow.h"
 #include "UI/AuroraLookAndFeel.h"
+#include "UI/TelemetryLookAndFeel.h"
 #include "UI/UIColors.h"
 #include "UI/RippleOverlayComponent.h"
 #include "Editor/AutoRenderOverlayComponent.h"
@@ -207,6 +208,7 @@ private:
     void overviewNavigateRequested(double visibleStartSeconds,
                                    double pixelsPerSecond) override;
     void applyThemeToEditor(ThemeId themeId);
+    void refreshFontScale();
     RenderStatusSnapshot getRenderStatusSnapshot() const;
     void setInferenceActive(bool active);
     void syncParameterPanelFromSelection();
@@ -250,6 +252,7 @@ private:
     // Custom LookAndFeel
     OpenTuneLookAndFeel openTuneLookAndFeel_;
     AuroraLookAndFeel auroraLookAndFeel_;
+    TelemetryLookAndFeel telemetryLookAndFeel_;
     juce::MouseCursor techCursor_;
 
     // 唯一 content root，承载全部主 UI；editor 本体绝不 transform（§7.3）。
@@ -301,6 +304,10 @@ private:
 
     ThemeId appliedThemeId_ = ThemeId::Aurora;
     Language appliedLanguage_ = Language::Chinese;
+    /// 已套用的字級百分比；變更時觸發 refreshFontScale()。
+    // appPreferences_ 於此宣告之前建構，其 load() 已寫入 FontScale；這裡同步初值，
+    // 避免首次 sync 誤判為變更而多做一次 refresh。
+    int appliedFontSizePercent_ = appPreferences_.getState().shared.fontSizePercent;
     bool inferenceActive_ = false;
     int inferenceActiveTickCounter_ = 0;
     ContentKey lastPianoRollContentKey_;

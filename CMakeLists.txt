@@ -616,6 +616,10 @@ set(OPENTUNE_COMMON_SOURCES
         Source/Standalone/UI/AuroraTheme.h
         Source/Standalone/UI/AuroraLookAndFeel.h
         Source/Standalone/UI/AuroraLookAndFeel.cpp
+        Source/Standalone/UI/TelemetryTheme.h
+        Source/Standalone/UI/TelemetryLookAndFeel.h
+        Source/Standalone/UI/TelemetryLookAndFeel.cpp
+        Source/Standalone/UI/FontScale.h
         Source/Standalone/UI/ToolIds.h
         Source/Standalone/UI/ToolbarIcons.h
         Source/Standalone/UI/ParameterPanel.cpp

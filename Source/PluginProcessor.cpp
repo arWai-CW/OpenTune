@@ -27,6 +27,7 @@
 #include "Utils/LegacyNoteGenerator.h"
 #include "Utils/PitchControlConfig.h"
 #include "Utils/ScaleUiMapping.h"
+#include "Standalone/UI/FontScale.h"
 #include "Utils/PianoRollEditAction.h"
 #include "Utils/PitchShiftEditAction.h"
 #include "Render/Stage2TimeStretchRebuilder.h"
@@ -2358,7 +2359,7 @@ public:
     {
         g.fillAll(juce::Colours::black);
         g.setColour(juce::Colours::red);
-        g.setFont(14.0f);
+        g.setFont(FontScale::scale(14.0f));
         g.drawText(message_, getLocalBounds().reduced(12),
                    juce::Justification::centredLeft, true);
     }

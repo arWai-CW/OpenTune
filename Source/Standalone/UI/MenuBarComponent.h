@@ -134,6 +134,7 @@ private:
         ThemeDarkBlueGrey,
         ThemeAurora,
         // ThemeOverdose,  // "升天" 主题暂时隐藏，代码保留
+        ThemeTelemetry,
 
         MouseTrailNone = 150,
         MouseTrailClassic,

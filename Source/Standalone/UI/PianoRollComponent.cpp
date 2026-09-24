@@ -1628,7 +1628,7 @@ void PianoRollComponent::drawModDriftDragPreview(juce::Graphics& g)
     const juce::String text = isModulation
         ? juce::String::formatted("%.0f%%", value * 100.0f)
         : juce::String::formatted("%+.0f%%", value * 100.0f);
-    juce::Font font(juce::FontOptions(12.0f));
+    juce::Font font(juce::FontOptions(FontScale::scale(12.0f)));
     const int textWidth = juce::roundToInt(juce::TextLayout::getStringWidth(font, text));
     g.setColour(juce::Colours::black.withAlpha(0.75f));
     g.fillRoundedRectangle(static_cast<float>(mousePos.x + 12), static_cast<float>(mousePos.y + 12),
@@ -1658,7 +1658,7 @@ void PianoRollComponent::drawVolumeDragPreview(juce::Graphics& g)
     const auto mousePos = getLocalPoint(nullptr, juce::Desktop::getInstance().getMousePosition())
         + juce::Point<int>(0, -rulerHeight_);
     const juce::String text = juce::String::formatted("%+.1f dB", static_cast<double>(deltaDb));
-    juce::Font font(juce::FontOptions(12.0f));
+    juce::Font font(juce::FontOptions(FontScale::scale(12.0f)));
     const int textWidth = juce::roundToInt(juce::TextLayout::getStringWidth(font, text));
     g.setColour(juce::Colours::black.withAlpha(0.75f));
     g.fillRoundedRectangle(static_cast<float>(mousePos.x + 12), static_cast<float>(mousePos.y + 12),
@@ -2076,6 +2076,15 @@ void PianoRollComponent::drawFixedChrome(juce::Graphics& g, juce::Rectangle<int>
             case ThemeId::Aurora: g.setColour(UIColors::rollBackground); g.fillPath(chromePath); break;
             case ThemeId::BlueBreeze: UIColors::fillMistedTimelineField(g, juce::Rectangle<float>(0,0,static_cast<float>(imgW),static_cast<float>(imgH)), UIColors::cornerRadius); break;
             case ThemeId::Overdose: UIColors::fillOverdoseEditorBackground(g, juce::Rectangle<float>(0,0,static_cast<float>(imgW),static_cast<float>(imgH)), UIColors::cornerRadius); break;
+            case ThemeId::Telemetry: {
+                // CRT 平面底 + 掃描線（畫進快取影像，成本可控）
+                g.setColour(UIColors::rollBackground);
+                g.fillPath(chromePath);
+                Telemetry::drawScanlines(g, juce::Rectangle<float>(0.0f, 0.0f,
+                                                                   static_cast<float>(imgW),
+                                                                   static_cast<float>(imgH)));
+                break;
+            }
             default: g.setColour(UIColors::rollBackground); g.fillPath(chromePath); break;
         }
     }

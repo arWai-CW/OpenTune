@@ -16,6 +16,7 @@
 #include <cmath>
 #include "../../Utils/AppPreferences.h"
 #include "UIColors.h"
+#include "TelemetryLookAndFeel.h"
 #include "../../Utils/TrackConstants.h"
 
 namespace OpenTune {
@@ -270,6 +271,22 @@ static constexpr int DEFAULT_VISIBLE_TRACKS = 2; // 默认显示轨道数量
                                            slider.isMouseOverOrDragging(),
                                            rotaryStartAngle,
                                            rotaryEndAngle);
+                return;
+            }
+
+            if (UIColors::currentThemeId() == ThemeId::Telemetry)
+            {
+                auto bounds = juce::Rectangle<float>(static_cast<float>(x),
+                                                    static_cast<float>(y),
+                                                    static_cast<float>(width),
+                                                    static_cast<float>(height));
+                TelemetryLookAndFeel::drawDial(g,
+                                               bounds,
+                                               sliderPos,
+                                               slider.isMouseOverOrDragging(),
+                                               rotaryStartAngle,
+                                               rotaryEndAngle,
+                                               &slider);
                 return;
             }
 

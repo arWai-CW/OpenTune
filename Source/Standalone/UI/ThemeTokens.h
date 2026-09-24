@@ -5,6 +5,7 @@
 #include "DarkBlueGreyTheme.h"
 #include "AuroraTheme.h"
 #include "OverdoseTheme.h"
+#include "TelemetryTheme.h"
 
 namespace OpenTune {
 
@@ -13,7 +14,8 @@ enum class ThemeId : int
     BlueBreeze = 0,
     DarkBlueGrey = 1,
     Aurora = 2,
-    Overdose = 3
+    Overdose = 3,
+    Telemetry = 4
 };
 
 struct ThemeTokens
@@ -163,6 +165,8 @@ public:
                 return auroraTokens();
             case ThemeId::Overdose:
                 return overdoseTokens();
+            case ThemeId::Telemetry:
+                return telemetryTokens();
             default:
                 return blueBreezeTokens();
         }
@@ -180,6 +184,8 @@ public:
                 return auroraStyle();
             case ThemeId::Overdose:
                 return overdoseStyle();
+            case ThemeId::Telemetry:
+                return telemetryStyle();
             default:
                 return blueBreezeStyle();
         }
@@ -542,6 +548,44 @@ private:
         return style;
     }
 
+    static const ThemeStyle& telemetryStyle()
+    {
+        static const ThemeStyle style {
+            Telemetry::Style::PanelRadius,
+            Telemetry::Style::ControlRadius,
+            Telemetry::Style::FieldRadius,
+            Telemetry::Style::KnobRadius,
+
+            Telemetry::Style::StrokeThin,
+            Telemetry::Style::StrokeThick,
+            Telemetry::Style::FocusRingThickness,
+
+            Telemetry::Style::ShadowAlpha,
+            Telemetry::Style::ShadowRadius,
+            { Telemetry::Style::ShadowOffsetX, Telemetry::Style::ShadowOffsetY },
+
+            Telemetry::Style::GlowAlpha,
+            Telemetry::Style::GlowRadius,
+
+            Telemetry::Style::BevelWidth,
+            Telemetry::Style::BevelIntensity,
+
+            Telemetry::Style::AnimationDurationMs,
+            Telemetry::Style::HoverGlowIntensity,
+
+            juce::Colour { Telemetry::Colors::PhosphorDim },      // vuLow（磷光灰）
+            juce::Colour { Telemetry::Colors::Phosphor },         // vuMid（白色磷光）
+            juce::Colour { Telemetry::Colors::HazardRed },        // vuHigh（危險紅）
+            juce::Colour { Telemetry::Colors::HazardLift },       // vuClip
+
+            juce::Colour { Telemetry::Colors::HazardRed },        // timeActive
+            juce::Colour { Telemetry::Colors::PhosphorFaint },    // timeInactive
+
+            false // timeSegmentStyle
+        };
+        return style;
+    }
+
     static const ThemeTokens& auroraTokens()
     {
         static const ThemeTokens tokens {
@@ -738,6 +782,106 @@ private:
             juce::Colour { Overdose::Colors::KnobGlow },      // knobGlow
 
             Overdose::Style::PanelRadius
+        };
+        return tokens;
+    }
+
+    static const ThemeTokens& telemetryTokens()
+    {
+        static const ThemeTokens tokens {
+            juce::Colour { Telemetry::Colors::HazardRed },    // primaryPurple（紅是唯一強調色）
+            juce::Colour { Telemetry::Colors::HazardRed },    // accent
+            juce::Colour { Telemetry::Colors::HazardLift },   // lightPurple
+            juce::Colour { Telemetry::Colors::HazardDeep },   // darkPurple
+
+            juce::Colour { Telemetry::Colors::Void },         // backgroundDark
+            juce::Colour { Telemetry::Colors::Surface },      // backgroundMedium
+            juce::Colour { Telemetry::Colors::SurfaceRaised }, // backgroundLight
+
+            juce::Colour { Telemetry::Colors::Void },         // gradientTop（無漸變）
+            juce::Colour { Telemetry::Colors::Void },         // gradientBottom（無漸變）
+
+            juce::Colour { Telemetry::Colors::Divider },      // panelBorder（1px 結構線）
+            juce::Colour { Telemetry::Colors::ButtonFace },   // buttonNormal
+            juce::Colour { Telemetry::Colors::ButtonHover },  // buttonHover
+            juce::Colour { Telemetry::Colors::HazardRed },    // buttonPressed
+
+            juce::Colour { Telemetry::Colors::Clear },         // bevelLight（零斜面）
+            juce::Colour { Telemetry::Colors::Clear },         // bevelDark（零斜面）
+            juce::Colour { Telemetry::Colors::HazardRed },    // glowColor
+
+            juce::Colour { Telemetry::Colors::Phosphor },     // textPrimary
+            juce::Colour { Telemetry::Colors::PhosphorDim },  // textSecondary
+            juce::Colour { Telemetry::Colors::PhosphorFaint }, // textDisabled
+            juce::Colour { Telemetry::Colors::HazardRed },    // textHighlight
+
+            juce::Colour { Telemetry::Colors::Void },         // rollBackground
+            juce::Colour { Telemetry::Colors::LaneLift },     // laneC
+            juce::Colour { Telemetry::Colors::LaneDeep },     // laneOther
+            juce::Colour { Telemetry::Colors::GridGrey },     // gridLine
+
+            juce::Colour { Telemetry::Colors::HazardRed },    // originalF0（源音高=紅）
+            juce::Colour { Telemetry::Colors::Phosphor },     // correctedF0（校正=磷光白）
+            juce::Colour { Telemetry::Colors::PitchShadow },  // shadowTrack
+
+            juce::Colour { Telemetry::Colors::Bone },         // noteBlock（實心骨白塊）
+            juce::Colour { Telemetry::Colors::Phosphor },     // noteBlockBorder
+            juce::Colour { Telemetry::Colors::HazardRed },    // noteBlockSelected（選中=紅實心）
+            juce::Colour { Telemetry::Colors::HazardLift },   // noteBlockHover
+
+            juce::Colour { Telemetry::Colors::HazardRed },    // playhead
+            juce::Colour { Telemetry::Colors::PhosphorDim },  // timelineMarker
+            juce::Colour { Telemetry::Colors::TickGrey },     // beatMarker
+
+            juce::Colour { Telemetry::Colors::HazardRed },    // toolActive
+            juce::Colour { Telemetry::Colors::PhosphorFaint }, // toolInactive
+            juce::Colour { Telemetry::Colors::ButtonOff },    // buttonInactive
+
+            juce::Colour { Telemetry::Colors::Phosphor },     // statusProcessing（白=運轉中）
+            juce::Colour { Telemetry::Colors::SignalGreen },  // statusReady（唯一許可的綠 LED）
+            juce::Colour { Telemetry::Colors::HazardRed },    // statusError
+
+            juce::Colour { Telemetry::Colors::WaveFill },     // waveformFill
+            juce::Colour { Telemetry::Colors::Phosphor },     // waveformOutline
+
+            juce::Colour { Telemetry::Colors::KnobFace },     // knobBody
+            juce::Colour { Telemetry::Colors::HazardRed },    // knobIndicator
+            juce::Colour { Telemetry::Colors::WellTop },      // displayWellTop
+            juce::Colour { Telemetry::Colors::WellBottom },   // displayWellBottom
+            juce::Colour { Telemetry::Colors::Divider },      // displayWellEdge
+            juce::Colour { Telemetry::Colors::Phosphor },     // displayText
+            juce::Colour { Telemetry::Colors::DisplayDim },   // displayTextDim
+            juce::Colour { Telemetry::Colors::Void },         // darkControlFace
+            juce::Colour { Telemetry::Colors::Edge },         // darkControlEdge
+            juce::Colour { Telemetry::Colors::KeyWhite },     // keyBedWhite
+            juce::Colour { Telemetry::Colors::KeyBlack },     // keyBedBlack
+            juce::Colour { Telemetry::Colors::Void },         // keyBedDivider
+
+            juce::Colour { Telemetry::Colors::Surface },      // glassSurface（玻璃→平面）
+            juce::Colour { Telemetry::Colors::ButtonHover },  // glassHighlight
+            juce::Colour { Telemetry::Colors::Edge },         // glassEdge
+            juce::Colour { Telemetry::Colors::Clear },         // panelGlow（零輝光）
+            juce::Colour { Telemetry::Colors::ButtonFace },   // auroraButtonNormal
+            juce::Colour { Telemetry::Colors::ButtonHover },  // auroraButtonHover
+            juce::Colour { Telemetry::Colors::HazardRed },    // auroraButtonActive
+            juce::Colour { Telemetry::Colors::Void },         // pianoRollBackground
+            juce::Colour { Telemetry::Colors::LaneLift },     // pianoRollLane
+            juce::Colour { Telemetry::Colors::GridGrey },     // pianoRollGrid
+            juce::Colour { Telemetry::Colors::Phosphor },     // pianoRollWaveform
+            juce::Colour { Telemetry::Colors::TrackPanel },   // trackPanelBackground
+            juce::Colour { Telemetry::Colors::SurfaceRaised }, // sidebarTrackFade
+            juce::Colour { Telemetry::Colors::ShellTop },     // auroraSidebarShellTop
+            juce::Colour { Telemetry::Colors::ShellMid },     // auroraSidebarShellMid
+            juce::Colour { Telemetry::Colors::ShellBottom },  // auroraSidebarShellBottom
+            juce::Colour { Telemetry::Colors::Edge },         // auroraSidebarTopLip（1px 頂緣線）
+            juce::Colour { Telemetry::Colors::Edge },         // auroraSidebarOuterRim
+            juce::Colour { Telemetry::Colors::GridGrey },     // auroraSidebarInnerRim
+            juce::Colour { Telemetry::Colors::Clear },         // auroraSidebarEdgeAura（零光暈）
+            juce::Colour { Telemetry::Colors::Clear },         // auroraSidebarCornerBloom（零光暈）
+            juce::Colour { Telemetry::Colors::Edge },         // knobRim
+            juce::Colour { Telemetry::Colors::Clear },         // knobGlow（零輝光）
+
+            Telemetry::Style::PanelRadius // cornerRadius = 0（絕對方角）
         };
         return tokens;
     }

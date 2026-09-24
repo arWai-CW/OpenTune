@@ -9,6 +9,17 @@
 
 namespace OpenTune {
 
+// 刻度標籤字型：套用使用者字級，但若放大的字高會超出標籤框（rulerHeight - 12），
+// 則收斂回「原字高或框高」的較大者，避免150% 時文字互相重疊。
+static juce::Font rulerLabelFont(float maxHeight)
+{
+    auto font = UIColors::getUIFont(13.0f);
+    const float base = 16.0f; // getUIFont 的100% 基準下限
+    if (font.getHeight() > maxHeight)
+        font.setHeight(juce::jmax(base, juce::jmax(8.0f, maxHeight)));
+    return font;
+}
+
 // ============================================================================
 // 刻度间隔选择
 // ============================================================================
@@ -193,7 +204,7 @@ void TimelineLayerComposer::drawTimeRuler(juce::Graphics& g, const RenderParams&
         startBeat = (startBeat / beatInterval) * beatInterval;
         int64_t endBeat = static_cast<int64_t>(std::min(rulerClipEndTime, params.visibleEndSeconds) / beatSeconds) + 1;
 
-        g.setFont(UIColors::getUIFont(13.0f));
+        g.setFont(rulerLabelFont(static_cast<float>(rulerHeight - 12)));
 
         for (int64_t beatIndex = startBeat; beatIndex <= endBeat; beatIndex += beatInterval) {
             double time = static_cast<double>(beatIndex) * beatSeconds;
@@ -231,7 +242,7 @@ void TimelineLayerComposer::drawTimeRuler(juce::Graphics& g, const RenderParams&
         startTime = std::floor(startTime / markerInterval) * markerInterval;
         double endTime = std::min(rulerClipEndTime, params.visibleEndSeconds);
 
-        g.setFont(UIColors::getUIFont(13.0f));
+        g.setFont(rulerLabelFont(static_cast<float>(rulerHeight - 12)));
         for (double time = startTime; time < endTime; time += markerInterval) {
             int pixelX = static_cast<int>(std::llround((time - params.visibleStartSeconds) * pps));
 
@@ -293,6 +304,10 @@ void TimelineLayerComposer::drawLaneStripRepeats(juce::Graphics& g, const Render
                 // 暗色 lane（物理键明暗：物理黑键；音阶明暗：调外）
                 if (isAurora) {
                     g.setColour(UIColors::glassSurface.withAlpha(0.075f));
+                } else if (themeId == ThemeId::Telemetry) {
+                    // 調外 = 井底。舊路徑填 backgroundDark(Void #0A0A0A)@30%，
+                    // 而卷軸底色本身就是 Void #0A0A0A → 同色疊同色等於沒畫，毫無區別。
+                    g.setColour(juce::Colour { Telemetry::Colors::Ink });
                 } else {
                     g.setColour((themeId == ThemeId::BlueBreeze || themeId == ThemeId::Overdose)
                         ? UIColors::pianoRollLane.withAlpha(0.16f)
@@ -306,6 +321,13 @@ void TimelineLayerComposer::drawLaneStripRepeats(juce::Graphics& g, const Render
                 if (isAurora) {
                     g.setColour(UIColors::pianoRollLane.withAlpha(0.024f));
                     g.fillRect(0.0f, y, static_cast<float>(w), laneH);
+                } else if (themeId == ThemeId::Telemetry) {
+                    // 調內 = 抬亮列。舊路徑只有 Aurora 會填，Telemetry 整段不畫。
+                    // 只有開音階輔助才畫，否則全部列都是 WhiteKey，卷軸會被無意義洗白。
+                    if (isScaleAssist) {
+                        g.setColour(juce::Colour { Telemetry::Colors::LaneLift });
+                        g.fillRect(0.0f, y, static_cast<float>(w), laneH);
+                    }
                 }
                 break;
         }
@@ -314,7 +336,10 @@ void TimelineLayerComposer::drawLaneStripRepeats(juce::Graphics& g, const Render
         const auto rowLineColour = isAurora
             ? UIColors::pianoRollGrid.withAlpha(0.022f)
             : ((themeId == ThemeId::BlueBreeze || themeId == ThemeId::Overdose)
-                ? UIColors::pianoRollGrid.withAlpha(0.030f) : UIColors::panelBorder.withAlpha(0.25f));
+                ? UIColors::pianoRollGrid.withAlpha(0.030f)
+                : (themeId == ThemeId::Telemetry
+                    ? UIColors::pianoRollGrid.withAlpha(0.90f)   // 1px 結構線，交替填色需要它界定列
+                    : UIColors::panelBorder.withAlpha(0.25f)));
         g.setColour(rowLineColour);
         g.drawLine(0.0f, y, static_cast<float>(w), y,
                    (isAurora || themeId == ThemeId::BlueBreeze || themeId == ThemeId::Overdose) ? 0.55f : 1.0f);

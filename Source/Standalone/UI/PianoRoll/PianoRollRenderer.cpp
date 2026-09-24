@@ -680,8 +680,11 @@ void PianoRollRenderer::drawPianoKeys(juce::Graphics& g, const RenderContext& ct
             && (effectiveNoteNameMode != 1 || noteInOctave != 0))
             return;
 
-        g.setFont(juce::Font(juce::FontOptions(
-            juce::Font::getDefaultSansSerifFontName(), "Bold", kNoteLabelFontSize)));
+        // 套用使用者字級，但若字高超過音名框高（音符列高），收斂回原字高或框高，
+        // 避免縮放後文字溢出音符列、與相鄰音名重疊。
+        auto noteFont = juce::Font(juce::FontOptions(
+            juce::Font::getDefaultSansSerifFontName(), "Bold",
+            FontScale::scale(kNoteLabelFontSize)));
         const int octave = (drawMidi / 12) - 1;
         const char* name = useFlats ? kFlatNames[noteInOctave] : kSharpNames[noteInOctave];
         const juce::String noteName = juce::String(name) + juce::String(octave);
@@ -689,6 +692,10 @@ void PianoRollRenderer::drawPianoKeys(juce::Graphics& g, const RenderContext& ct
         const int ty = static_cast<int>(y);
         const int tw = w - 4;
         const int th = static_cast<int>(h);
+
+        if (noteFont.getHeight() > static_cast<float>(th))
+            noteFont.setHeight(juce::jmax(kNoteLabelFontSize, static_cast<float>(th)));
+        g.setFont(noteFont);
 
         g.setColour(isBlackKey
             ? juce::Colours::white.withAlpha(0.7f)

@@ -70,6 +70,7 @@ ThemeId resolveEffectiveTheme(ThemeId configured)
     if (env == "aurora")       return ThemeId::Aurora;
     if (env == "bluebreeze")   return ThemeId::BlueBreeze;
     if (env == "darkbluegrey") return ThemeId::DarkBlueGrey;
+    if (env == "telemetry")    return ThemeId::Telemetry;
     return configured;
 }
 
@@ -1310,7 +1311,9 @@ void OpenTuneAudioProcessorEditor::resized()
     bounds.reduce(gap, gap); // Global padding
 
 // TopBar: height + shadow margin (12px top and bottom)
-    const int topBarHeight = menuBar_.isVisible() ? (MENU_BAR_HEIGHT + TRANSPORT_BAR_HEIGHT) : TRANSPORT_BAR_HEIGHT;
+    const int topBarHeight = menuBar_.isVisible()
+        ? (FontScale::scaleInt(MENU_BAR_HEIGHT) + TRANSPORT_BAR_HEIGHT)
+        : TRANSPORT_BAR_HEIGHT;
     const int topBarHeightWithShadow = topBarHeight + shadowMargin * 2;
     topBar_.setBounds(bounds.removeFromTop(topBarHeightWithShadow));
 // Visual gap: subtract bottom shadow margin already consumed
@@ -1764,6 +1767,12 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     const auto effectiveTheme = resolveEffectiveTheme(sharedPreferences.theme);
     if (appliedThemeId_ != effectiveTheme)
         applyThemeToEditor(effectiveTheme);
+
+    if (appliedFontSizePercent_ != sharedPreferences.fontSizePercent) {
+        appliedFontSizePercent_ = sharedPreferences.fontSizePercent;
+        FontScale::setPercent(appliedFontSizePercent_);
+        refreshFontScale();
+    }
 
     pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
     pianoRoll_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
@@ -2783,6 +2792,10 @@ void OpenTuneAudioProcessorEditor::applyThemeToEditor(ThemeId themeId)
     {
         setLookAndFeel(&auroraLookAndFeel_);
     }
+    else if (themeId == ThemeId::Telemetry)
+    {
+        setLookAndFeel(&telemetryLookAndFeel_);
+    }
     else
     {
         setLookAndFeel(&openTuneLookAndFeel_);
@@ -2794,7 +2807,10 @@ void OpenTuneAudioProcessorEditor::applyThemeToEditor(ThemeId themeId)
 
     // Install process-wide default so independent DialogWindow title bars and
     // ordinary JUCE controls use the project theme.
-    AuroraLookAndFeel::installAsDefault();
+    if (themeId == ThemeId::Telemetry)
+        TelemetryLookAndFeel::installAsDefault();
+    else
+        AuroraLookAndFeel::installAsDefault();
 
     getLookAndFeel().setColour(juce::ResizableWindow::backgroundColourId, UIColors::backgroundDark);
 
@@ -2814,6 +2830,21 @@ void OpenTuneAudioProcessorEditor::applyThemeToEditor(ThemeId themeId)
     arrangementView_.setPlayheadColour(UIColors::playhead);
 
     sendLookAndFeelChange();
+    pianoRoll_.requestThemeRedraw();
+    arrangementView_.requestThemeRedraw();
+    overviewStrip_.repaint();
+    repaint();
+}
+
+// 字級變更：FontScale 已更新，這裡負責讓所有元件重取字型、重排版面，並重繪把文字
+// 烘進快取影像的畫布（時間軸刻度、音名、安排視圖合成瓦片）。
+void OpenTuneAudioProcessorEditor::refreshFontScale()
+{
+    // Label 文字由 LookAndFeel::getLabelFont()（內含 FontScale）決定，
+    // sendLookAndFeelChange() 會遞迴重繪整棵子樹，字型即刻更新。
+    sendLookAndFeelChange();
+
+    resized(); // 字高變了，重新跑一次版面計算，避免文字被裁切
     pianoRoll_.requestThemeRedraw();
     arrangementView_.requestThemeRedraw();
     overviewStrip_.repaint();

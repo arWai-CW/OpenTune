@@ -36,6 +36,7 @@
 #include "UI/OpenTuneLookAndFeel.h"
 #include "UI/OpenTuneTooltipWindow.h"
 #include "UI/AuroraLookAndFeel.h"
+#include "UI/TelemetryLookAndFeel.h"
 #include "UI/UIColors.h"
 #include "UI/TimelineOverviewComponent.h"
 #include "Editor/AutoRenderOverlayComponent.h"
@@ -139,6 +140,7 @@ private:
                                    double pixelsPerSecond) override;
     void syncSharedAppPreferences();
     void applyThemeToEditor(ThemeId themeId);
+    void refreshFontScale();
     ContentKey resolveCurrentContentKey();
     PianoRollContentSync resolveCurrentContentSync();
     void syncParameterPanelFromSelection();
@@ -160,9 +162,12 @@ private:
     LocalizationManager::ScopedLanguageBinding languageBinding_;
     ThemeId appliedThemeId_ = ThemeId::Aurora;
     Language appliedLanguage_ = Language::Chinese;
+    /// 已套用的字級百分比；變更時觸發 refreshFontScale()。
+    int appliedFontSizePercent_ = appPreferences_.getState().shared.fontSizePercent;
 
     OpenTuneLookAndFeel openTuneLookAndFeel_;
     AuroraLookAndFeel auroraLookAndFeel_;
+    TelemetryLookAndFeel telemetryLookAndFeel_;
 
     // 唯一 content root，承载全部主 UI；editor 本体绝不 transform（§7.3）。
     juce::Component contentRoot_;

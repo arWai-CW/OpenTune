@@ -140,7 +140,8 @@ void AuroraLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& bu
 void AuroraLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
                                        bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
 {
-    auto fontSize = juce::jmin(15.0f, (float)button.getHeight() * 0.75f);
+    // 字級先乘使用者字級係數，再以控件高度做上限（避免文字溢出控件）
+    auto fontSize = juce::jmin(FontScale::scale(15.0f), (float)button.getHeight() * 0.75f);
     auto tickWidth = fontSize * 1.1f;
 
     auto bounds = button.getLocalBounds().toFloat();

@@ -50,6 +50,8 @@ struct SnapSettings {
 struct SharedPreferencesState {
     Language language = Language::Chinese;
     ThemeId theme = ThemeId::Aurora;
+    /// 使用者字級（百分比，100 = 原始字級）。見 Standalone/UI/FontScale.h。
+    int fontSizePercent = 100;
     AudioEditingScheme::Scheme audioEditingScheme = AudioEditingScheme::Scheme::CorrectedF0Primary;
     PianoRollVisualPreferences pianoRollVisualPreferences;
     ZoomSensitivityConfig::ZoomSensitivitySettings zoomSensitivity =
@@ -103,6 +105,8 @@ public:
 
     void setLanguage(Language language);
     void setTheme(ThemeId theme);
+    /// 設定使用者字級（百分比，100 = 原始字級），並立即套用到全域 FontScale。
+    void setFontSizePercent(int percent);
     void setAudioEditingScheme(AudioEditingScheme::Scheme scheme);
     void setNoteNameMode(NoteNameMode noteNameMode);
     void setShowPianoKeyboard(bool shouldShow);

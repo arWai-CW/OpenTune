@@ -185,7 +185,7 @@ void TopBarComponent::resized()
     // 顶部菜单条
 
     if (menuBar_.isVisible())
-        menuBar_.setBounds(bounds.removeFromTop(25));
+        menuBar_.setBounds(bounds.removeFromTop(FontScale::scaleInt(25)));
     else
         menuBar_.setBounds({});
 

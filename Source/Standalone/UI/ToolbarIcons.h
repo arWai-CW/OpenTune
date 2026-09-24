@@ -626,6 +626,7 @@ public:
         juce::Image image(juce::Image::ARGB, 16, 16, true);
         juce::Graphics g(image);
         g.setColour(juce::Colours::white);
+        // 螭標圖示固定 16x16，字級不隨使用者字級縮放（縮放會溢出裁切）
         g.setFont(juce::Font(juce::FontOptions("Roboto", "Bold", 10.0f)));
         g.drawText("EQ", juce::Rectangle<float>(0.0f, 0.0f, 16.0f, 16.0f),
                    juce::Justification::centred);

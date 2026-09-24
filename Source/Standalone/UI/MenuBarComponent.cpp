@@ -152,6 +152,7 @@ juce::PopupMenu MenuBarComponent::getMenuForIndex(int topLevelMenuIndex, const j
             // themeMenu.addItem(ThemeDarkBlueGrey, LOC(kThemeDarkBlueGrey), true, UIColors::currentThemeId() == ThemeId::DarkBlueGrey); // 临时隐藏
             themeMenu.addItem(ThemeAurora, LOC(kThemeAurora), true, UIColors::currentThemeId() == ThemeId::Aurora);
             // themeMenu.addItem(ThemeOverdose, LOC(kThemeOverdose), true, UIColors::currentThemeId() == ThemeId::Overdose);  // "升天" 暂时隐藏
+            themeMenu.addItem(ThemeTelemetry, LOC(kThemeTelemetry), true, UIColors::currentThemeId() == ThemeId::Telemetry);
             menu.addSeparator();
             menu.addSubMenu(LOC(kTheme), themeMenu);
 
@@ -292,6 +293,10 @@ void MenuBarComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
             break;
         case ThemeAurora:
             listeners_.call([](Listener& l) { l.themeChanged(ThemeId::Aurora); });
+            menuItemsChanged();
+            break;
+        case ThemeTelemetry:
+            listeners_.call([](Listener& l) { l.themeChanged(ThemeId::Telemetry); });
             menuItemsChanged();
             break;
         // case ThemeOverdose:  // "升天" 暂时隐藏

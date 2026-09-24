@@ -415,6 +415,18 @@ void BpmValueField::paint(juce::Graphics& g)
         g.drawLine(bounds.getX() + style.fieldRadius, bounds.getY() + 1.0f,
                    bounds.getRight() - style.fieldRadius, bounds.getY() + 1.0f, style.strokeThin);
     }
+    else if (themeId == ThemeId::Telemetry)
+    {
+        // 粗野主義：純平面輸入井（Ink = 井底近黑），禁漸變 / 陰影 / 圓角。
+        // 外框由下方共用段落繪製——Telemetry 不在排除清單內，
+        // 會自動得到 1px Divider 結構線，聚焦時換成 2px HazardRed。
+        //
+        // 注意：不可掉進最後的 else——那會呼叫 drawBlueBreezeSurface 畫出
+        // BlueBreeze 的亮色控件面（#F2F5F8 → #D4DBE2），而 Telemetry 的
+        // textPrimary 是 Phosphor #EAEAEA（近白），白字配亮底會完全看不見。
+        g.setColour(juce::Colour { Telemetry::Colors::Ink });
+        g.fillRect(bounds);
+    }
     else
     {
         OpenTuneLookAndFeel::drawBlueBreezeSurface(g,
