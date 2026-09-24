@@ -353,9 +353,9 @@ public:
         addAndMakeVisible(lightPitchCorrectionToggle_);
 
         initialiseToggleButton(dragSnapToScaleToggle_);
-        dragSnapToScaleToggle_.setButtonText(juce::String::fromUTF8(u8"拖動音符時吸附到音階"));
+        dragSnapToScaleToggle_.setButtonText(juce::String::fromUTF8(u8"吸附到音階"));
         dragSnapToScaleToggle_.setTooltip(juce::String::fromUTF8(
-            u8"OpenTune 修音：拖動音符時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
+            u8"OpenTune 修音：拖動音符或使用 AUTO 時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
             u8"OpenDyne 下 Key Scale 由 Pitch Grid 選擇器直接決定，不受此開關影響"));
         dragSnapToScaleToggle_.setToggleState(state.shared.dragSnapToScaleEnabled,
                                               juce::dontSendNotification);

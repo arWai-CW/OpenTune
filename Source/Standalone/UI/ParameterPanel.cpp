@@ -612,7 +612,7 @@ ParameterPanel::ParameterPanel()
     // ── 拖動吸附到音階開關（OpenTune 專用；OpenDyne 由 Pitch Grid 選擇器直接決定，此開關隱藏） ──
     dragSnapToScaleToggle_.setButtonText(juce::String::fromUTF8(u8"吸附到音階"));
     dragSnapToScaleToggle_.setTooltip(juce::String::fromUTF8(
-        u8"OpenTune 修音：拖動音符時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
+        u8"OpenTune 修音：拖動音符或使用 AUTO 時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
         u8"OpenDyne 下由 Pitch Grid 的 Key Scale 直接控制。"));
     dragSnapToScaleToggle_.setToggleState(dragSnapToScaleEnabled_, juce::dontSendNotification);
     dragSnapToScaleToggle_.onClick = [this] {

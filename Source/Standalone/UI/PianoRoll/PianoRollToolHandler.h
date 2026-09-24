@@ -220,6 +220,7 @@ public:
     void setPitchGridMode(PitchGridMode mode) { pitchGridMode_ = mode; }
     /// 拖動音符時是否吸附到活動音階；關閉時 Pitch Grid KeyScale 退回最近半音吸附
     void setDragSnapToScaleEnabled(bool enabled) { dragSnapToScaleEnabled_ = enabled; }
+    bool isDragSnapToScaleEnabled() const noexcept { return dragSnapToScaleEnabled_; }
     void mouseMove(const juce::MouseEvent& e);
     void mouseDown(const juce::MouseEvent& e);
     void mouseDrag(const juce::MouseEvent& e);
