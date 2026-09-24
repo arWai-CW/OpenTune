@@ -1592,41 +1592,6 @@ public:
         }
     }
 
-    void drawDocumentWindowTitleBar(juce::DocumentWindow& window, juce::Graphics& g,
-                                    int w, int h, int titleSpaceX, int titleSpaceW,
-                                    const juce::Image* icon, bool drawTitleTextOnLeft) override
-    {
-        juce::ignoreUnused(icon, drawTitleTextOnLeft);
-
-        const auto themeId = UIColors::currentThemeId();
-        const auto& style = UIColors::currentThemeStyle();
-
-        auto bounds = juce::Rectangle<int>(0, 0, w, h).toFloat();
-        auto bg = window.findColour(juce::DocumentWindow::backgroundColourId);
-        auto titleBarBg = bg;
-
-        if (themeId == ThemeId::DarkBlueGrey)
-        {
-            auto base = juce::Colour { 0xFF8FA3B5 };
-            titleBarBg = base.darker(0.15f);
-        }
-
-        g.setColour(titleBarBg);
-        g.fillRect(bounds);
-
-        g.setColour(UIColors::panelBorder.withAlpha(themeId == ThemeId::DarkBlueGrey ? 0.55f : 0.9f));
-        g.drawLine(bounds.getX(), bounds.getBottom() - 1.0f, bounds.getRight(), bounds.getBottom() - 1.0f, style.strokeThin);
-
-        auto titleArea = juce::Rectangle<int>(titleSpaceX, 0, titleSpaceW, h);
-        auto titleText = titleBarBg.getPerceivedBrightness() < 0.5f
-            ? juce::Colours::white
-            : UIColors::textPrimary;
-
-        g.setColour(titleText.withAlpha(0.92f));
-        g.setFont(UIColors::getHeaderFont(14.0f));
-        g.drawFittedText(window.getName(), titleArea.reduced(6, 0), juce::Justification::centredLeft, 1);
-    }
-
     // ============================================================================
     // 婊氬姩鏉¤嚜瀹氫箟缁樺埗 - 鐏拌壊纾ㄧ爞璐ㄦ劅
     // ============================================================================

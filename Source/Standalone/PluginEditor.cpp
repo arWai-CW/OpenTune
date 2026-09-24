@@ -1292,7 +1292,11 @@ void OpenTuneAudioProcessorEditor::paint(juce::Graphics& g)
 
 void OpenTuneAudioProcessorEditor::resized()
 {
-    // 外层 editor 绝不 transform；content root 按外窗尺寸/uiZoom 得到逻辑尺寸并整体缩放（§7.3）。
+    /* 原生系統標題列的切換（setUsingNativeTitleBar）會在 timer 首 tick 執行，
+       避免在 StandaloneFilterWindow 建構中段重建桌面 peer（可能破壞既有視窗狀態）；見
+       applyStandaloneNativeTitleBarOnce()。 */
+
+    // 外層 editor 絕不 transform；content root 按外窗尺寸/uiZoom 得到邏輯尺寸並整體縮放（§7.3）。
     const float uiZoomScale = static_cast<float>(appliedUiZoomPercent_) / 100.0f;
     contentRoot_.setBounds(0, 0,
                            static_cast<int>(std::ceil(getWidth() / uiZoomScale)),
@@ -1410,6 +1414,21 @@ void OpenTuneAudioProcessorEditor::syncParameterPanelFromSelection()
     showingSingleNoteParams_ = decision.nextShowingSelectionParameters;
 }
 
+void OpenTuneAudioProcessorEditor::applyStandaloneNativeTitleBarOnce()
+{
+    if (standaloneNativeTitleBarApplied_)
+        return;
+
+    auto* window = dynamic_cast<juce::StandaloneFilterWindow*>(getTopLevelComponent());
+    if (window == nullptr || window->getPeer() == nullptr)
+        return;  // 尚未掛入預設 StandaloneFilterWindow
+
+    // setUsingNativeTitleBar 會重建桌面 peer（macOS NSWindow / 原生 HWND）。在 timer 首 tick
+    // 執行，確保視窗已完整建構且已顯示，避免建構中段重建 desktop 造成 peer 生命週期錯亂。
+    standaloneNativeTitleBarApplied_ = true;
+    window->setUsingNativeTitleBar(true);
+}
+
 void OpenTuneAudioProcessorEditor::restoreStandaloneWindowGeometryOnce()
 {
     if (standaloneWindowGeometryRestored_)
@@ -1475,6 +1494,9 @@ void OpenTuneAudioProcessorEditor::applyUiZoomIfNeeded()
 void OpenTuneAudioProcessorEditor::timerCallback()
 {
     applyUiZoomIfNeeded();
+
+    // 原生系統標題列：視窗已顯示後的首個 heartbeat 即切換（見 applyStandaloneNativeTitleBarOnce）。
+    applyStandaloneNativeTitleBarOnce();
 
     restoreStandaloneWindowGeometryOnce();
 

@@ -442,63 +442,6 @@ AuroraLookAndFeel& AuroraLookAndFeel::getDefaultInstance()
     return instance;
 }
 
-// ============================================================================
-// DocumentWindow title bar — Aurora glass style
-// ============================================================================
-
-void AuroraLookAndFeel::drawDocumentWindowTitleBar(juce::DocumentWindow& window, juce::Graphics& g,
-                                                   int w, int h, int titleSpaceX, int titleSpaceW,
-                                                   const juce::Image* icon, bool drawTitleTextOnLeft)
-{
-    juce::ignoreUnused(drawTitleTextOnLeft);
-
-    if (w * h == 0)
-        return;
-
-    auto bounds = juce::Rectangle<int>(0, 0, w, h).toFloat();
-    auto titleBarBg = window.findColour(juce::DocumentWindow::backgroundColourId);
-
-    g.setColour(titleBarBg);
-    g.fillAll();
-
-    // Bottom separator
-    g.setColour(juce::Colour(Aurora::Colors::BorderLight));
-    g.drawLine(bounds.getX(), bounds.getBottom() - 1.0f,
-               bounds.getRight(), bounds.getBottom() - 1.0f, 1.0f);
-
-    // Title text — always white on dark Aurora background
-    g.setColour(juce::Colour(Aurora::Colors::TextPrimary).withAlpha(0.92f));
-    g.setFont(UIColors::getUIFont(14.0f));
-
-    auto font = g.getCurrentFont();
-    auto textW = juce::GlyphArrangement::getStringWidthInt(font, window.getName());
-    auto iconW = 0;
-    auto iconH = 0;
-
-    if (icon != nullptr)
-    {
-        iconH = static_cast<int>(font.getHeight());
-        iconW = icon->getWidth() * iconH / icon->getHeight() + 4;
-    }
-
-    textW = juce::jmin(titleSpaceW, textW + iconW);
-    auto textX = juce::jmax(titleSpaceX, (w - textW) / 2);
-
-    if (textX + textW > titleSpaceX + titleSpaceW)
-        textX = titleSpaceX + titleSpaceW - textW;
-
-    if (icon != nullptr)
-    {
-        g.setOpacity(window.isActiveWindow() ? 1.0f : 0.6f);
-        g.drawImageWithin(*icon, textX, (h - iconH) / 2, iconW, iconH,
-                          juce::RectanglePlacement::centred, false);
-        textX += iconW;
-        textW -= iconW;
-    }
-
-    g.drawText(window.getName(), textX, 0, textW, h, juce::Justification::centredLeft, true);
-}
-
 juce::MouseCursor AuroraLookAndFeel::getMouseCursorFor(juce::Component& component)
 {
     return CursorThemeManager::getInstance().resolveCursor(LookAndFeel_V4::getMouseCursorFor(component));

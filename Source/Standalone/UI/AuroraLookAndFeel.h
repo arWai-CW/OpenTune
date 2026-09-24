@@ -64,11 +64,6 @@ public:
     // Mouse Cursor Theme
     juce::MouseCursor getMouseCursorFor(juce::Component& component) override;
 
-    // DocumentWindow title bar
-    void drawDocumentWindowTitleBar(juce::DocumentWindow& window, juce::Graphics& g,
-                                    int w, int h, int titleSpaceX, int titleSpaceW,
-                                    const juce::Image* icon, bool drawTitleTextOnLeft) override;
-
     // Font Management
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;
     juce::Font getLabelFont(juce::Label&) override;

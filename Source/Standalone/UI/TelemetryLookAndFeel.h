@@ -78,9 +78,9 @@ public:
     // --- Misc chrome ---
     juce::MouseCursor getMouseCursorFor(juce::Component& component) override;
 
-    void drawDocumentWindowTitleBar(juce::DocumentWindow& window, juce::Graphics& g,
-                                    int w, int h, int titleSpaceX, int titleSpaceW,
-                                    const juce::Image* icon, bool drawTitleTextOnLeft) override;
+    // 注意：不再 override drawDocumentWindowTitleBar —— Standalone 已於視窗顯示後
+    // 切換為原生系統標題列（見 OpenTuneAudioProcessorEditor::applyStandaloneNativeTitleBarOnce），
+    // JUCE 因此不會再呼叫自繪標題列；保留只會是死程式碼。與 OpenTune / Aurora 一致。
 
     // --- Fonts：等寬字主導（資料與遙測）---
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;

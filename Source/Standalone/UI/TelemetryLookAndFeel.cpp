@@ -698,69 +698,6 @@ juce::MouseCursor TelemetryLookAndFeel::getMouseCursorFor(juce::Component& compo
 }
 
 // ----------------------------------------------------------------------------
-// DocumentWindow 標題列：紅標塊 + 等寬大寫標題 + 掃描線
-// ----------------------------------------------------------------------------
-void TelemetryLookAndFeel::drawDocumentWindowTitleBar(juce::DocumentWindow& window, juce::Graphics& g,
-                                                      int w, int h, int titleSpaceX, int titleSpaceW,
-                                                      const juce::Image* icon, bool drawTitleTextOnLeft)
-{
-    juce::ignoreUnused(drawTitleTextOnLeft);
-
-    if (w * h == 0)
-        return;
-
-    auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
-
-    g.setColour(window.findColour(juce::DocumentWindow::backgroundColourId));
-    g.fillAll();
-
-    // 掃描線
-    Telemetry::drawScanlines(g, bounds);
-
-    // 左側品牌紅標塊
-    g.setColour(juce::Colour { T::HazardRed });
-    g.fillRect(0.0f, 0.0f, 6.0f, static_cast<float>(h));
-
-    // 底部結構線
-    g.setColour(juce::Colour { T::Divider });
-    g.fillRect(0.0f, bounds.getBottom() - 1.0f, static_cast<float>(w), 1.0f);
-
-    // 標題：等寬 + 大寫
-    g.setColour(juce::Colour { T::Phosphor });
-    auto font = Telemetry::monoFont(kMonoDataSize, true);
-    g.setFont(font);
-
-    auto textW = juce::GlyphArrangement::getStringWidthInt(font, window.getName().toUpperCase());
-    auto iconW = 0;
-    auto iconH = 0;
-
-    if (icon != nullptr)
-    {
-        iconH = static_cast<int>(font.getHeight());
-        iconW = icon->getWidth() * iconH / juce::jmax(1, icon->getHeight()) + 4;
-    }
-
-    textW = juce::jmin(titleSpaceW, textW + iconW);
-    auto textX = juce::jmax(titleSpaceX, (w - textW) / 2);
-
-    if (textX + textW > titleSpaceX + titleSpaceW)
-        textX = titleSpaceX + titleSpaceW - textW;
-
-    if (icon != nullptr)
-    {
-        g.setOpacity(window.isActiveWindow() ? 1.0f : 0.6f);
-        g.drawImageWithin(*icon, textX, (h - iconH) / 2, iconW, iconH,
-                          juce::RectanglePlacement::centred, false);
-        textX += iconW;
-        textW -= iconW;
-    }
-
-    g.setOpacity(window.isActiveWindow() ? 1.0f : 0.7f);
-    g.drawText(window.getName().toUpperCase(), textX, 0, textW, h,
-               juce::Justification::centredLeft, true);
-}
-
-// ----------------------------------------------------------------------------
 // 進程級預設 LookAndFeel
 // ----------------------------------------------------------------------------
 

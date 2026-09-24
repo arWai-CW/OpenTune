@@ -202,6 +202,9 @@ private:
     void applyUiZoomIfNeeded();
     // §5.1：挂入默认 StandaloneFilterWindow 且 peer 可用后，按 OpenTune.settings 恢复外层窗口几何（仅一次）。
     void restoreStandaloneWindowGeometryOnce();
+    // §5.1：掛入預設 StandaloneFilterWindow 且 peer 可用後啟用原生系統標題列（全平台，僅一次）。
+    // 在 timer 首 tick（視窗已完整建構並顯示）完成切換，避免建構中段重建桌面 peer。
+    void applyStandaloneNativeTitleBarOnce();
     void showPreferencesDialog();
     void syncSharedAppPreferences();
     void syncTrackColorsToPanel();
@@ -299,8 +302,10 @@ private:
     bool isTrackPanelVisible_ = true;
     bool isParameterPanelVisible_ = true;
 
-    // §5.1：外层窗口几何只在 peer/顶层可用后恢复一次，不在 resized 重入
+    // §5.1：外層視窗幾何只在 peer/頂層可用後恢復一次，不在 resized 重入
     bool standaloneWindowGeometryRestored_ = false;
+    // 原生標題列切換只執行一次（timer 首 tick，視窗已顯示後）。
+    bool standaloneNativeTitleBarApplied_ = false;
 
     ThemeId appliedThemeId_ = ThemeId::Aurora;
     Language appliedLanguage_ = Language::Chinese;
