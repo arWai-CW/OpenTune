@@ -49,6 +49,24 @@ void RenderCacheRegistry::invalidate(ContentKey key)
         it->second->clear();
 }
 
+void RenderCacheRegistry::invalidateAll()
+{
+    std::vector<std::shared_ptr<RenderCache>> snapshot;
+    {
+        const juce::ScopedReadLock readLock(lock_);
+        snapshot.reserve(caches_.size());
+        for (auto& [key, cache] : caches_)
+        {
+            juce::ignoreUnused(key);
+            if (cache != nullptr)
+                snapshot.push_back(cache);
+        }
+    }
+
+    for (const auto& cache : snapshot)
+        cache->clear();
+}
+
 void RenderCacheRegistry::clear()
 {
     const juce::ScopedWriteLock writeLock(lock_);

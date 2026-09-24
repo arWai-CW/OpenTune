@@ -37,9 +37,10 @@ public:
         Status status{Status::Idle};
 
         uint64_t desiredRevision{0};    // 目标版本（用户最新编辑产生）
-        uint64_t runningRevision{0};   // 当前正在运行的 revision（在 Pending→Running 时记录）
-        uint64_t publishedRevision{0};  // 已成功发布的版本
-        uint64_t lastRequestedContentRevision{0}; // 上次 reconcile 时的内容版本，用于去重
+        uint64_t runningRevision{0};   // 当前正在运行的 revision（在 Pending→Running 时記錄）
+        uint64_t publishedRevision{0};  // 已成功發布的版本
+        uint64_t lastRequestedContentRevision{0}; // 上次 reconcile 時的內容版本，用於去重
+        uint64_t generation{0}; // cache clear/rebuild generation；不可與舊 job 重用
     };
 
     // 调度状态管理 API
@@ -52,6 +53,7 @@ public:
     // 同内容版本时跳过 desiredRevision 递增。
     struct ReconcileResult {
         bool stateChanged{false};
+        std::size_t requestedChunkCount{0};
     };
     ReconcileResult reconcileFullPlanAndRequest(const std::vector<PlannedChunk>& fullPlan,
                                                 int64_t requestStartSample,
@@ -62,6 +64,7 @@ public:
         int64_t startSample{0};
         int64_t endSampleExclusive{0};
         uint64_t targetRevision{0};
+        uint64_t generation{0};
     };
     // 仅领取指定 startSample 的 pending chunk，并原子地转为 Running。
     bool claimPendingJob(int64_t startSample, PendingJob& outJob);
@@ -76,18 +79,25 @@ public:
     ChunkRenderResult completeChunkRenderWithAudio(int64_t startSample,
                                                     int64_t endSampleExclusive,
                                                     std::vector<float>&& audio,
-                                                    uint64_t revision);
+                                                    uint64_t revision,
+                                                    uint64_t generation);
 
-    bool completeChunkRenderFailure(int64_t startSample, uint64_t revision);
+    bool completeChunkRenderFailure(int64_t startSample,
+                                    uint64_t revision,
+                                    uint64_t generation);
 
     /**
      * stale-generation 回退：仅当 chunk 仍正处 Running 且 runningRevision 匹配时，
      * 把 Running→Pending 并插入待拉取集合、runningRevision 清零。不 bump desired、
      * 不改几何、不发布快照。返回是否实际回退。
      */
-    bool requeueRunningChunk(int64_t startSample, uint64_t runningRevision);
+    bool requeueRunningChunk(int64_t startSample,
+                             uint64_t runningRevision,
+                             uint64_t generation);
 
-    void markChunkAsBlank(int64_t startSample, uint64_t revision);
+    void markChunkAsBlank(int64_t startSample,
+                          uint64_t revision,
+                          uint64_t generation);
 
     struct ChunkStats {
         int idle{0};
@@ -143,6 +153,9 @@ public:
 
     void clear();
 
+    /** 取得目前 cache generation；RenderJob claim 後必須攜帶此值。 */
+    uint64_t getGeneration() const;
+
 private:
     struct PublishedChunk {
         int64_t startSample{0};
@@ -171,6 +184,7 @@ private:
     };
 
     mutable juce::SpinLock lock_;
+    uint64_t generation_{1};
     std::map<int64_t, Chunk> chunks_;
     std::set<int64_t> pendingChunks_;
 

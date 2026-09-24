@@ -58,20 +58,20 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
     }
 
     const double sampleRate = request.audioSampleRate;
-    SoundTouchStretcher* stretcher = crs.getStretcher(contentKey, sampleRate, 1);
+    auto stretcher = crs.getStretcherForStage2(contentKey, sampleRate, 1);
     if (stretcher == nullptr) return false;
 
     auto schedule = stretcher->buildTempoScheduleFromTimeGrid(*snapshot.timeGrid);
     stretcher->beginRebuild(schedule);
 
-    const auto stage1RenderCache = crs.getRenderCache(contentKey);
+    const auto stage1RenderCache = crs.getRenderCacheForStage2(contentKey);
 
     const int totalSamples = request.audioBuffer->getNumSamples();
     constexpr int kBlock = 4096;
 
     juce::AudioBuffer<float> readBuf(1, kBlock);
 
-    const uint32_t buildGen = crs.getTimeStretchCache().beginBuild(contentKey);
+    const uint32_t buildGen = crs.getTimeStretchCacheForStage2().beginBuild(contentKey);
 
     std::vector<float> output;
     output.reserve(static_cast<size_t>(totalSamples + kBlock));
@@ -130,7 +130,7 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
     if (!isCurrentPublishedRequest())
         return false;
 
-    crs.getTimeStretchCache().store(contentKey,
+    crs.getTimeStretchCacheForStage2().store(contentKey,
                                     std::move(output),
                                     contentRev,
                                     timeGridRev,

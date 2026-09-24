@@ -1855,14 +1855,21 @@ RenderStatusSnapshot OpenTuneAudioProcessorEditor::getRenderStatusSnapshot() con
         return snapshot;
     }
 
-    auto renderCache = processorRef_.getContentRenderService()->getRenderCache(contentKey);
-    if (renderCache == nullptr) {
+    auto* crs = processorRef_.getContentRenderService();
+    if (crs == nullptr) {
         snapshot.contentKey = ContentKey{};
         snapshot.placementId = 0;
         return snapshot;
     }
 
-    return makeRenderStatusSnapshot(contentKey, placementId, renderCache->getStateSnapshot());
+    const auto renderState = crs->getStateSnapshot(contentKey);
+    if (renderState.chunkStats.total() == 0) {
+        snapshot.contentKey = ContentKey{};
+        snapshot.placementId = 0;
+        return snapshot;
+    }
+
+    return makeRenderStatusSnapshot(contentKey, placementId, renderState);
 }
 
 void OpenTuneAudioProcessorEditor::syncPianoRollFromPlacementSelection(int trackId, int placementIndex)

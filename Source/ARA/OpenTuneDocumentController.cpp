@@ -13,7 +13,7 @@
 #include "../Utils/TimeCoordinate.h"
 #include "../Utils/SilentGapDetector.h"
 #include "../Utils/PitchCurve.h"
-#include "../Inference/RenderCache.h"
+#include "../Render/PlaybackReadSource.h"
 #include "../Utils/SourceWindow.h"
 #include "../Utils/AppLogger.h"
 #include "../Utils/ModelPathResolver.h"
@@ -1827,16 +1827,11 @@ bool OpenTuneDocumentController::publishPlaybackReadSourceForModification(
 
     const auto key = modification.contentKey();
 
-    auto readSource = makePlaybackReadSource(
+    return contentRenderService_->publishCanonicalSource(
         key,
         modification.snapshotContent(),
         std::move(audioBuffer),
-        TimeCoordinate::kRenderSampleRate,
-        contentRenderService_->getOrCreateRenderCache(key),
-        contentRenderService_->getTimeStretchCache());
-
-    contentRenderService_->publishPlaybackSource(key, readSource);
-    return true;
+        TimeCoordinate::kRenderSampleRate);
 }
 
 void OpenTuneDocumentController::readRestoredAudio(const AudioSource* enabledSource)
@@ -2096,8 +2091,7 @@ void OpenTuneDocumentController::removeCRSArtifactsForModification(const AudioMo
     if (!key.isValid())
         return;
 
-    contentRenderService_->removePlaybackSource(key);
-    contentRenderService_->removeRenderCache(key);
+    contentRenderService_->removeContent(key);
 }
 
 // Removed rebuildCRSForSource per architecture: sample access enable is permission,
@@ -2313,7 +2307,8 @@ void OpenTuneDocumentController::processDocumentRenderJob(RenderJob& job)
 
     if (!job.contentSnapshot)
     {
-        job.renderCache->completeChunkRenderFailure(job.startSample, job.targetRevision);
+        job.renderCache->completeChunkRenderFailure(
+            job.startSample, job.targetRevision, job.cacheGeneration);
         return;
     }
 
@@ -2332,64 +2327,6 @@ std::shared_ptr<const EditableContentSnapshot> OpenTuneDocumentController::snaps
     return mod->snapshotContent();
 }
 
-void OpenTuneDocumentController::requestModificationRender(
-    ContentKey key,
-    double startSeconds,
-    double endSeconds,
-    std::shared_ptr<const EditableContentSnapshot> snapshot)
-{
-    PlaybackReadSource readSource;
-    if (contentRenderService_ == nullptr
-        || !contentRenderService_->getPlaybackReadSource(key, readSource)
-        || readSource.audioBuffer == nullptr
-        || readSource.audioSampleRate <= 0.0)
-        return;
-
-    const int64_t totalSamples = readSource.audioBuffer->getNumSamples();
-    const int64_t startSample = juce::jlimit<int64_t>(
-        0, totalSamples, TimeCoordinate::secondsToSamplesFloor(startSeconds, readSource.audioSampleRate));
-    const int64_t endSample = juce::jlimit<int64_t>(
-        0, totalSamples, TimeCoordinate::secondsToSamplesCeil(endSeconds, readSource.audioSampleRate));
-    requestModificationRenderSamples(key, startSample, endSample, std::move(snapshot));
-}
-
-void OpenTuneDocumentController::requestModificationRenderSamples(
-    ContentKey key,
-    int64_t startSample,
-    int64_t endSampleExclusive,
-    std::shared_ptr<const EditableContentSnapshot> snapshot)
-{
-    if (contentRenderService_ == nullptr || endSampleExclusive <= startSample)
-        return;
-
-    PlaybackReadSource readSource;
-    if (!contentRenderService_->getPlaybackReadSource(key, readSource)
-        || readSource.audioBuffer == nullptr
-        || readSource.audioSampleRate <= 0.0)
-        return;
-
-    const int64_t totalSamples = readSource.audioBuffer->getNumSamples();
-    startSample = juce::jlimit<int64_t>(0, totalSamples, startSample);
-    endSampleExclusive = juce::jlimit<int64_t>(0, totalSamples, endSampleExclusive);
-    if (endSampleExclusive <= startSample)
-        return;
-
-    if (!snapshot || !contentRenderService_->republishPlaybackSource(key, snapshot)
-        || !snapshot->hasUsableOriginalF0())
-        return;
-
-    RenderJob job;
-    job.contentKey = key;
-    job.audioBuffer = readSource.audioBuffer;
-    job.audioSampleRate = readSource.audioSampleRate;
-    job.startSample = startSample;
-    job.endSampleExclusive = endSampleExclusive;
-    job.renderCache = contentRenderService_->getOrCreateRenderCache(key);
-    job.contentSnapshot = std::move(snapshot);
-
-    contentRenderService_->enqueueRender(std::move(job));
-}
-
 void OpenTuneDocumentController::requestFullModificationRender(
     ContentKey key,
     std::shared_ptr<const EditableContentSnapshot> snapshot)
@@ -2402,15 +2339,11 @@ void OpenTuneDocumentController::requestFullModificationRender(
     if (!snapshot)
         return;
 
-    PlaybackReadSource readSource;
-    if (!contentRenderService_->getPlaybackReadSource(key, readSource))
-        return;
-
-    if (readSource.audioBuffer == nullptr || readSource.audioSampleRate <= 0.0)
-        return;
-
-    requestModificationRenderSamples(
-        key, 0, readSource.audioBuffer->getNumSamples(), std::move(snapshot));
+    ContentRenderService::InvalidationRequest request;
+    request.contentKey = key;
+    request.contentSnapshot = std::move(snapshot);
+    request.kind = ContentRenderService::InvalidationKind::FullContent;
+    contentRenderService_->invalidateContent(std::move(request));
 }
 
 void OpenTuneDocumentController::invalidateAllModificationCaches()
@@ -2418,21 +2351,11 @@ void OpenTuneDocumentController::invalidateAllModificationCaches()
     if (contentRenderService_ == nullptr)
         return;
 
+    contentRenderService_->invalidateAllContentArtifacts();
     for (const auto& mod : audioModifications_)
     {
-        if (!mod.isRenderable())
-            continue;
-        const auto key = mod.contentKey();
-        if (!key.isValid())
-            continue;
-        if (auto cache = contentRenderService_->getRenderCache(key))
-            cache->clear();
-    }
-    for (const auto& mod : audioModifications_)
-    {
-        if (!mod.isRenderable())
-            continue;
-        requestFullModificationRender(mod.contentKey());
+        if (mod.isRenderable())
+            requestFullModificationRender(mod.contentKey());
     }
 }
 
@@ -2906,17 +2829,6 @@ bool OpenTuneDocumentController::applyVolumeEnvelopeToModification(const Content
     return true;
 }
 
-void OpenTuneDocumentController::republishPlaybackSourceForModification(ContentKey key)
-{
-    auto* mod = findAudioModificationByContentKey(key);
-    if (mod == nullptr || !mod->hasContentState())
-        return;
-    if (contentRenderService_ == nullptr)
-        return;
-
-    contentRenderService_->republishPlaybackSource(key, mod->snapshotContent());
-}
-
 bool OpenTuneDocumentController::applyPitchCurveToModification(const ContentKey& key, std::shared_ptr<PitchCurve> curve)
 {
     auto* mod = findAudioModificationByContentKey(key);
@@ -2958,8 +2870,8 @@ bool OpenTuneDocumentController::applyTimeGridToModification(const ContentKey& k
     if (!mod->applyTimeGrid(std::move(grid)))
         return false;
 
-    auto snapshot = mod->snapshotContent();
-    contentRenderService_->republishPlaybackSource(key, snapshot);
+    // Processor 在 owner mutation 完成後統一經 document CRS 發布；此處不再次
+    // republish，避免 TimeGrid 路徑 double publication。
     refreshRegisteredRenderers(publishModelChange());
 
     if (mod->audioModification != nullptr)

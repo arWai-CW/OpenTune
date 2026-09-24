@@ -5,6 +5,7 @@
 #include "../DSP/MelSpectrogram.h"
 #include "../DSP/NoteEqProcessor.h"
 #include "../Inference/ChunkRenderStrategy.h"
+#include "../Inference/RenderCache.h"
 #include "../Inference/VocoderDomain.h"
 #include "../Render/RenderChunkPlanner.h"
 #include "../Utils/AccelerationDetector.h"
@@ -230,9 +231,11 @@ void failChunk(const ProcessRenderRuntime::CompletionContext& completion,
                RenderCache* cache,
                int64_t startSample,
                uint64_t revision,
+               uint64_t generation,
                ContentKey key)
 {
-    if (cache != nullptr && cache->completeChunkRenderFailure(startSample, revision))
+    if (cache != nullptr && cache->completeChunkRenderFailure(
+            startSample, revision, generation))
         notifyChunkFailed(completion, key);
 }
 
@@ -276,6 +279,7 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
     const FrozenRenderBoundaries& boundaries,
     std::vector<float> audio,
     uint64_t revision,
+    uint64_t generation,
     const std::vector<Note>& notes)
 {
     for (const auto& note : notes)
@@ -348,7 +352,7 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
 
     return renderCache.completeChunkRenderWithAudio(
         boundaries.trueStartSample, boundaries.trueEndSample,
-        std::move(audio), revision);
+        std::move(audio), revision, generation);
 }
 
 } // namespace
@@ -499,7 +503,8 @@ void ProcessRenderRuntime::reconfigureVocoder(const ControlCommand& command)
             crsShared->requeueRenderChunk(retry.job);
         else
             retry.job.renderCache->completeChunkRenderFailure(
-                retry.job.startSample, retry.job.targetRevision);
+                retry.job.startSample, retry.job.targetRevision,
+                retry.job.cacheGeneration);
     }
 }
 
@@ -678,7 +683,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     if (crs == nullptr || job.renderCache == nullptr || !job.contentSnapshot || !job.audioBuffer)
     {
         failChunk(completion, job.renderCache.get(), job.startSample,
-                  job.targetRevision, job.contentKey);
+                  job.targetRevision, job.cacheGeneration, job.contentKey);
         return;
     }
 
@@ -743,10 +748,10 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
             monoAudio.begin() + static_cast<size_t>(boundaries.publishSampleCount));
         const auto result = publishChunkWithPerNoteEq(
             *coreJob.renderCache, boundaries, std::move(rawAudio),
-            coreJob.targetRevision, contentSnap->notes);
+            coreJob.targetRevision, coreJob.cacheGeneration, contentSnap->notes);
         if (result == RenderCache::ChunkRenderResult::InvalidInput) {
             failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                      coreJob.targetRevision, coreJob.contentKey);
+                      coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         } else if (result == RenderCache::ChunkRenderResult::Published)
             notifyChunkSettled(completion, coreJob);
     };
@@ -755,7 +760,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         // 无原始音频可发布：保持既有失败语义
         failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                  coreJob.targetRevision, coreJob.contentKey);
+                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         return;
     }
 
@@ -764,7 +769,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
         if (!intersectsActiveEqNote)
         {
             failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                      coreJob.targetRevision, coreJob.contentKey);
+                      coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
             return;
         }
         publishRawWithEq();
@@ -781,7 +786,8 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(coreJob.startSample, coreJob.targetRevision);
+            coreJob.renderCache->markChunkAsBlank(
+                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
             notifyChunkSettled(completion, coreJob);
         }
         else
@@ -796,7 +802,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     if (f0HopSize <= 0 || f0SampleRate <= 0.0)
     {
         failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                  coreJob.targetRevision, coreJob.contentKey);
+                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         return;
     }
 
@@ -810,7 +816,8 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(coreJob.startSample, coreJob.targetRevision);
+            coreJob.renderCache->markChunkAsBlank(
+                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
             notifyChunkSettled(completion, coreJob);
         }
         else
@@ -837,7 +844,8 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(coreJob.startSample, coreJob.targetRevision);
+            coreJob.renderCache->markChunkAsBlank(
+                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
             notifyChunkSettled(completion, coreJob);
         }
         else
@@ -863,7 +871,8 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(coreJob.startSample, coreJob.targetRevision);
+            coreJob.renderCache->markChunkAsBlank(
+                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
             notifyChunkSettled(completion, coreJob);
         }
         else
@@ -956,12 +965,13 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                 const uint64_t objectId = coreJob.contentKey.objectId;
                 const auto result = publishChunkWithPerNoteEq(
                     *coreJob.renderCache, boundaries, std::move(shiftedAudio),
-                    coreJob.targetRevision, contentSnap->notes);
+                    coreJob.targetRevision, coreJob.cacheGeneration,
+                    contentSnap->notes);
 
                 if (result == RenderCache::ChunkRenderResult::InvalidInput)
                 {
                     failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                              coreJob.targetRevision, coreJob.contentKey);
+                              coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
                 }
                 else if (result == RenderCache::ChunkRenderResult::Published)
                 {
@@ -993,12 +1003,13 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
             requeueJob.audioSampleRate = coreJob.audioSampleRate;
             requeueJob.startSample = coreJob.startSample;
             requeueJob.targetRevision = coreJob.targetRevision;
+            requeueJob.cacheGeneration = coreJob.cacheGeneration;
             deferOrRequeue(crs, std::move(requeueJob));
             return;
         }
         AppLogger::log("RenderWorker: acquireVocoderConfig FAILED");
         failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                  coreJob.targetRevision, coreJob.contentKey);
+                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         return;
     }
 
@@ -1007,7 +1018,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     if (conditioningBins <= 0)
     {
         failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                  coreJob.targetRevision, coreJob.contentKey);
+                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         return;
     }
 
@@ -1029,7 +1040,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     if (!conditioningResult.ok() || conditioningResult.value().empty())
     {
         failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                  coreJob.targetRevision, coreJob.contentKey);
+                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
         return;
     }
 
@@ -1093,6 +1104,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
 
     auto renderCache = coreJob.renderCache;
     auto targetRevision = coreJob.targetRevision;
+    const auto cacheGeneration = coreJob.cacheGeneration;
     auto requeueAudioBuffer = coreJob.audioBuffer;
     const double requeueAudioSampleRate = coreJob.audioSampleRate;
     const ContentKey captureContentKey = coreJob.contentKey;
@@ -1101,7 +1113,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     const FrozenRenderBoundaries frozenBoundaries = boundaries;
 
     vocoderJob.onComplete = [this, crs, renderCache, targetRevision,
-                             requeueAudioBuffer, requeueAudioSampleRate,
+                             cacheGeneration, requeueAudioBuffer, requeueAudioSampleRate,
                              captureContentKey, chunkObjId,
                              jobStartSample, frozenBoundaries, contentSnap,
                              completion](
@@ -1125,18 +1137,18 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                 AppLogger::error("ChunkRender: synthesis length mismatch for RenderCache publish objId="
                     + juce::String(static_cast<juce::int64>(chunkObjId)));
                 failChunk(completion, renderCache.get(), jobStartSample,
-                          targetRevision, captureContentKey);
+                          targetRevision, cacheGeneration, captureContentKey);
                 return;
             }
 
             const auto publishResult = publishChunkWithPerNoteEq(
                 *renderCache, boundaries, std::move(publishedAudio), targetRevision,
-                contentSnap->notes);
+                cacheGeneration, contentSnap->notes);
 
             if (publishResult == RenderCache::ChunkRenderResult::InvalidInput)
             {
                 failChunk(completion, renderCache.get(), jobStartSample,
-                          targetRevision, captureContentKey);
+                          targetRevision, cacheGeneration, captureContentKey);
                 return;
             }
 
@@ -1163,6 +1175,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
             requeueJob.audioSampleRate = requeueAudioSampleRate;
             requeueJob.startSample = jobStartSample;
             requeueJob.targetRevision = targetRevision;
+            requeueJob.cacheGeneration = cacheGeneration;
             deferOrRequeue(crs, std::move(requeueJob));
         }
         else
@@ -1172,7 +1185,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                 + juce::String(static_cast<juce::int64>(chunkObjId))
                 + " error=" + error);
             failChunk(completion, renderCache.get(), jobStartSample,
-                      targetRevision, captureContentKey);
+                      targetRevision, cacheGeneration, captureContentKey);
         }
     };
 

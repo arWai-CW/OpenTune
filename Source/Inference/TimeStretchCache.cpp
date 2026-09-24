@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace OpenTune {
 
@@ -333,8 +334,18 @@ void TimeStretchCache::clear()
             }
         }
     }
+
+    // 保留每個 key 的單調 generation；clear 不能讓 clear 前開始的 Stage2
+    // build 以相同 generation 在 clear 後再次被接受。
+    std::set<ContentKey> knownKeys;
+    for (const auto& [key, _] : entries_)
+        knownKeys.insert(key);
+    for (const auto& [key, _] : invalidationGen_)
+        knownKeys.insert(key);
+    for (const auto& key : knownKeys)
+        ++invalidationGen_[key];
+
     entries_.clear();
-    invalidationGen_.clear();
 
     auto snapshot = std::make_shared<const std::map<ContentKey, std::shared_ptr<const Entry>>>();
     auto old = std::atomic_exchange(&readerMap_, std::move(snapshot));

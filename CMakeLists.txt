@@ -1508,4 +1508,21 @@ if(OPENTUNE_BUILD_TESTS)
         target_compile_options(OpenTuneContentRenderRoutingTests PRIVATE /utf-8 /EHsc)
     endif()
     add_test(NAME ContentRenderRoutingTests COMMAND OpenTuneContentRenderRoutingTests)
+
+    # ContentRenderService 深化後的 interface 契約：publication、local invalidation、
+    # canonical settlement、Stage2 domain policy 與 queue identity 去重。
+    add_executable(OpenTuneContentRenderServiceTests
+        Tests/ContentRenderServiceTests.cpp
+    )
+    target_include_directories(OpenTuneContentRenderServiceTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    target_link_libraries(OpenTuneContentRenderServiceTests PRIVATE
+        OpenTune
+        juce::juce_audio_basics
+        juce::juce_core
+    )
+    if (MSVC)
+        target_compile_options(OpenTuneContentRenderServiceTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME ContentRenderServiceTests COMMAND OpenTuneContentRenderServiceTests)
 endif()

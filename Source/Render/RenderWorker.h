@@ -2,9 +2,11 @@
 
 #include "RenderJob.h"
 #include <atomic>
+#include <cstddef>
 #include <condition_variable>
-#include <deque>
 #include <functional>
+#include <list>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -59,6 +61,7 @@ public:
     void discardStage1Queue(RenderCache* cache);
     void discardAllStage1Queue();
     void enqueue(RenderJob job);
+    std::size_t getStage1QueueSize() const;
     void beginAsyncJob();
     void completeAsyncJob();
 
@@ -78,16 +81,23 @@ public:
     void stop();
 
 private:
-    void loop();
-    void enqueueLocked(RenderJob job);
+    using JobQueue = std::list<RenderJob>;
+    using JobQueueIterator = JobQueue::iterator;
+    using Stage1Index = std::map<int64_t, JobQueueIterator>;
 
-    // 物理 Stage1 队列与 cache pending chunk 集合同步。仅可在 mutex_ 持有时调用。
-    // 每个 (RenderCache, chunk start) 身份只允许一个排队项。
+    void loop();
+    void insertStage1Locked(RenderJob job);
+    void eraseQueueLocked(JobQueueIterator iterator);
+    void forgetStage1IdentityLocked(const RenderJob& job);
+
+    // 物理 Stage1 queue 與 cache pending chunk 集合同步。只在 mutex_ 持有時呼叫。
+    // 每個 (RenderCache, chunk start) identity 只允許一個排隊項。
     void syncStage1QueueLocked(const RenderJob& templateJob);
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    std::deque<RenderJob> queue_;
+    JobQueue queue_;
+    std::map<RenderCache*, Stage1Index> stage1QueueIndex_;
 
     RenderExecutionLease lease_;
 

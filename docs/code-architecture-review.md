@@ -26,19 +26,20 @@ VST3 和 Standalone 使用各自的 SharedCode target。公共源码分别编译
 
 | 模块 | 当前职责 |
 | --- | --- |
-| `PluginProcessor` | JUCE 生命周期、音频处理、格式装配、transport、内容域分发和 mutation 后的 render 调度 |
-| `ContentState` | Standalone、Capture、ARA 共用的 owner 数据状态；包含 source window、PCM 引用、分析状态、编辑状态和 revision |
-| Content owner | 持有 `ContentState`，执行域内 mutation 和生命周期；持久化由域外 adapter 读写其 content |
-| `EditableContentSnapshot` | 跨线程和跨模块的只读内容合同 |
-| `ContentSnapshotProjection` | 集中完成 `ContentState` 与 snapshot 的双向纯数据投影 |
-| `ContentRenderService` / `RenderWorker` | 按 `ContentKey` 管理 render job、RenderCache 和 playback source；Standalone/Capture 的非恒等 TimeGrid 由 Stage2 使用 `TimeStretchCache` |
+| `PluginProcessor` | JUCE 生命周期、音訊處理、格式裝配、transport、content owner 查找與 owner mutation；不再建立 `RenderJob` 或解碼 Stage1/Stage2 gate |
+| `ContentState` | Standalone、Capture、ARA 共用的 owner 資料狀態；包含 source window、PCM 引用、分析狀態、編輯狀態和 revision |
+| Content owner | 持有 `ContentState`，執行域內 mutation 和生命週期；持久化由域外 adapter 讀寫其 content |
+| `EditableContentSnapshot` | 跨執行緒和跨 module 的唯讀內容合同 |
+| `ContentSnapshotProjection` | 集中完成 `ContentState` 與 snapshot 的雙向純資料投影 |
+| `ContentRenderService` | owner mutation 後的單一 render interface；吸收 playback publication、local/full/TimeGrid invalidation、Stage1 planning、canonical settlement 與 Stage2 gate，caller 不再建立 `RenderJob` |
+| `RenderWorker` | 執行 Stage1 identity queue 與 Stage2 queue；Stage1 以 `(RenderCache, chunk start)` index 做 O(log n) 查找與去重，adapter 仍由外部注入 |
 | `ProcessF0Runtime` / `ProcessRenderRuntime` | 进程级 F0 和 render 执行资源 |
 | `OpenTuneDocumentController` | ARA document-scoped content、宿主通知、ARA mutation、CRS 和 ARA F0 生命周期 |
 | `ReferenceTrackRegistry` | 进程级单例；跨 document 的 ARA instance 參考軌發布與群組偵測（共享任一 audio source persistent ID 的 owner 連通分量）。同 document 內的參考軌不走此路徑，見 §2.6 |
 | `ContentRenderRouting` | 纯函数；把鋼琴卷簾的 content items 分流為「正在處理」與「唯讀參考軌」，並套用參考軌選單的隱藏集合。不得在此引入任何繪製或 ARA 依賴 |
 | Editor / PianoRoll | UI 状态、交互、视图投影和格式特有接线；PianoRoll 不直接依赖 Processor |
 
-`PluginProcessor` 仍是最大的协调点。它保留格式边界、RT 音频处理和跨模块调度，不应再承担新的数据模型或通用 Router 职责。
+`PluginProcessor` 仍是最大的協調點，但已退出 render transaction implementation。它保留 JUCE 生命周期、RT 音訊處理、format adapter 與 owner mutation；不得再承擔新的資料模型、`RenderJob` construction 或通用 Router 職責。
 
 ### 1.3 内容状态
 
@@ -65,7 +66,7 @@ owner snapshot 统一通过 `makeContentSnapshot()` 生成；split、clone 等�
   └─ 只读取 atomic snapshot、prepared PCM 和已发布 cache/source
 
 Render worker
-  └─ 消费 render job 和不可变输入，不应直接解引用 ARA DC 对象
+  └─ 消費 Stage1/Stage2 job 與不可變 input；以 identity index 同步 Stage1 queue，不直接解參考 ARA DC object
 
 F0 / Reference worker
   └─ 异步分析，通过 owner revision 和 completion gate 回写
@@ -84,9 +85,12 @@ F0 / Reference worker
   -> ContentState 保存 source window、PCM、编辑和分析状态
   -> ContentRenderService 发布 PlaybackReadSource
   -> F0 分析
+  -> owner mutation / snapshot
+  -> ContentRenderService::invalidateContent
   -> Stage1 render
-  -> ARA 固定 identity TimeGrid，不进入 Stage2
-  -> playback snapshot / 音频读取
+  -> canonical settlement
+  -> Standalone 非恆等 TimeGrid 進 Stage2；ARA 僅接受 identity TimeGrid
+  -> playback snapshot / 音訊讀取
 ```
 
 Arrangement 只保存 placement 的几何与混音/引用参数、track 状态和 timeline 几何。placement 通过 `ContentKey` 找到 content snapshot，不复制内容字段。
@@ -100,7 +104,8 @@ Arrangement 只保存 placement 的几何与混音/引用参数、track 状态�
   -> CaptureSegmentContent
   -> F0ExtractionService
   -> commitSegmentF0Result
-  -> ContentRenderService / RenderWorker
+  -> ContentRenderService::invalidateContent
+  -> RenderWorker / canonical settlement
   -> PlaybackReadSource
 ```
 
@@ -113,7 +118,9 @@ ARA host
   -> OpenTuneDocumentController
   -> AudioSource / AudioModification / PlaybackRegion
   -> ContentKey 和 document-scoped ContentState
-  -> CRS / PlaybackReadSource
+  -> Processor / owner mutation 完成後通知 document CRS
+  -> ContentRenderService::invalidateContent
+  -> PlaybackReadSource / canonical Stage1
   -> OpenTunePlaybackRenderer
 ```
 
@@ -172,7 +179,7 @@ PianoRoll 的 source、output、timeline、pixel 映射集中在 `PianoRollTimeM
 
 Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容字段都恢复到对应 owner 的 `ContentState`。`contentRevision` 和 `audioRevision` 不从归档恢复，新内容身份从 1 开始；ARA 另外保存并恢复 `notesRevision`、`pitchRevision`、`timeGridRevision` 及分析相关 revision，Standalone 也恢复 `referenceFeatures.analysisRevision`。不额外生成运行时 revision 账本。跨采样率 buffer 长度由源 sample 数和源/目标采样率一次投影得到；不得从投影后的 buffer 长度反算源内容秒数。
 
-当前启用测试默认关闭；打开 `OPENTUNE_BUILD_TESTS` 后有 9 个测试目标：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests` 和 `ContentRenderRoutingTests`。后两项是纯逻辑测试，不需要 ARA host：`ReferenceTrackRegistryTests` 覆盖跨 instance 群组偵測（交集、傳遞閉包、合併、註銷、發布查詢、版本戳記），`ContentRenderRoutingTests` 覆盖钢琴卷帘的「正在處理 / 唯讀參考轨」分流决策（含選單隱藏、焦點無效不得誤認第一個 item、同軌多 clip）。最近一次 VS/CMake/Ninja 构建中，VST3/Standalone target 和 9/9 CTest 均通过。
+當前啟用測試預設關閉；打開 `OPENTUNE_BUILD_TESTS` 後有 10 個測試目標：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests`、`ContentRenderRoutingTests` 和 `ContentRenderServiceTests`。`ContentRenderServiceTests` 覆蓋無 usable F0 時只發布 playback source、playback-only republish 不啟動 Stage1、TimeGrid derived-output invalidation、local invalidation 的實體 queue 邊界、canonical settlement，以及只有非 ARA content 會啟動 Stage2；`ReferenceTrackRegistryTests` 與 `ContentRenderRoutingTests` 維持既有 reference routing 契約。最近一次 CMake/Ninja 建置中，VST3/Standalone target 和 10/10 CTest 均通過。
 
 ## 3. 已完成的边界收敛
 
@@ -195,7 +202,11 @@ Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容�
 15. 參考軌呈现收敛为统一灰色：`UIColors::referenceCurve` 由 renderer 层强制指定，`ReferenceTrackCurve` 不再暴露 colour/opacity 字段，呼叫端无法重新引入 per-source 配色，也确保与主動曲线的红/蓝明确区隔。
 16. 同 document 與 registry 兩种參考來源以 modification persistent ID 去重，同 document 路径优先；「複製一軌改成和聲」不再被重複繪製成錯位重影。
 17. 參考軌選單成为參考轨显隐的唯一权威：同 document 来源经 `setHiddenReferenceContentKeys` 真正停止绘製（而非降低透明度），registry 来源经曲线过滤；正在编辑的 track 不受選單隱藏影响。
-18. OpenTune 的 AUTO 与「吸附到音階」開關共用同一策略：開啟時套用目前音階；關閉時不套用音階投影，沿用音符生成器既有的最近半音量化，讓經過音與和弦外音可被保留並人工繪製。
+18. OpenTune 的 AUTO 與「吸附到音階」開關共用同一策略：開啟時套用目前音階；關閉時不套用音階投影，沿用音符生成器既有的最近半音量化，讓經過音與和弦外音可被保留並人工繪製。
+19. Standalone、Capture、ARA 的 owner 都先完成 mutation，再以不可變 snapshot 通知 `ContentRenderService`；`PluginProcessor` 與 `OpenTuneDocumentController` 不再自行建立 `RenderJob`。
+20. `ContentRenderService` 內部處理 playback publication、usable-F0 gate、Stage1 reconcile、canonical settlement、Stage2 domain policy 與 derived cache lifecycle；Stage1 executor 是唯一外部 execution seam。
+21. `RenderWorker` 的 Stage1 queue 以 `(RenderCache*, chunk start)` index 查找、排序與去重，local revision 更新不再對整個 deque 做巢狀線性掃描。
+22. `ContentRenderService::Metrics` 提供 invalidation、affected/queued chunks、Stage2、settlement、retry 與 async completion 基線；新增 `ContentRenderServiceTests` 鎖定 interface 行為。
 
 ## 4. 剩余问题
 
@@ -209,15 +220,15 @@ Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容�
 
 1. **离散投影与绝对时间的边界合同仍需宿主和数据回归。** placement fade、RenderCache 跨率长度、TimeGrid spacing、F0 区间投影已分别使用明确的 seconds/point/interval 语义；剩余问题集中在 ARA source window 的 fractional sample 对齐和模型输入边界，不能凭经验改绝对时间公式。
 2. **F0 frame 与模型窗中心的合同未锁定。** FCPE padding、F0Timeline 和 mel/F0 插值需要训练侧定义和回归样本确认。
-3. **旧 cache 拒绝、非恒等 TimeGrid 的 cache miss、F0Timeline/SourceWindow 采样网格与 split 边界数学、AutomationLane slice/merge、跨 instance 群組偵測、钢琴卷帘 active/reference 分流已有纯逻辑测试。** ARA 非零 source window、局部渲染 revision、导出一致性、placement fractional sample 边界以及 `splitPlacementAtSeconds` 端到端集成目前只有代码合同；相关 ARA/Capture 行为仍缺宿主级验证。当前启用测试目标为 9 个，CTest 全部通过。
+3. **旧 cache 拒绝、非恒等 TimeGrid 的 cache miss、F0Timeline/SourceWindow 采样网格与 split 边界数学、AutomationLane slice/merge、跨 instance 群組偵測、钢琴卷帘 active/reference 分流已有纯逻辑测试。** ARA 非零 source window、局部渲染 revision、导出一致性、placement fractional sample 边界以及 `splitPlacementAtSeconds` 端到端集成目前只有代码合同；相关 ARA/Capture 行为仍缺宿主级验证。當前啟用測試目標為 10 個，CTest 全部通過。
 
 ### P2：维护成本
 
-1. `PluginProcessor` 仍承载较多 domain、render、transport 和 inference 编排，继续拆分前应先确定新的 owner 和不变量，不能只按文件大小抽 helper。
+1. `PluginProcessor` 已退出 `RenderJob` construction 與 Stage1/Stage2 gate，但仍承載較多 owner mutation、transport、import/export 與 inference 接線；後續只能沿已確認的 owner/invariant 收斂，不能按檔案大小抽 helper。
 2. F0/Reference 使用 detached worker，RenderWorker 使用可 join 的常驻线程，Vocoder control worker 依附进程寿命单例；各自拥有去重、shutdown 和 completion 机制。业务不能强行合并，但关闭、generation 和 completion gate 应建立共同测试合同。
 3. 三种持久化容器仍各自解释 EQ/Note migration；格式边界应保留，纯数据迁移规则可以共享。
 4. Beat 计算、MIDI/Hz 与 lane-center 转换、cents math 等仍有重复或同名 API，后续应在纯数学边界单点化，不能把 UI 坐标规则混入音高真相。
-5. 测试默认仍为关闭选项；本次验证显式打开 `OPENTUNE_BUILD_TESTS` 后，VST3/Standalone target 和 9/9 CTest 均通过。
+5. 測試預設仍為關閉選項；本次驗證顯式打開 `OPENTUNE_BUILD_TESTS` 後，VST3/Standalone target 和 10/10 CTest 均通過。
 
 ### 不属于当前架构问题的事项
 

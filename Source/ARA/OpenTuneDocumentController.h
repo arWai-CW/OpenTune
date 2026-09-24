@@ -58,15 +58,6 @@ public:
 
     const ContentRenderService* getContentRenderService() const noexcept;
     std::shared_ptr<ContentRenderService> getContentRenderServiceShared() const noexcept;
-    // ARA mutation/render API — processor 通过这些 API 请求 ARA 渲染
-    void requestModificationRender(
-        ContentKey key,
-        double startSeconds,
-        double endSeconds,
-        std::shared_ptr<const EditableContentSnapshot> snapshot);
-    void requestFullModificationRender(
-        ContentKey key,
-        std::shared_ptr<const EditableContentSnapshot> snapshot = nullptr);
     void invalidateAllModificationCaches();
     // ============================================================
     // 编辑器只读内容访问器（通过 ContentKey 路由到 AudioModification + CRS）
@@ -189,11 +180,6 @@ protected:
     juce::ARAEditorView* doCreateEditorView() override;
 
 private:
-    void requestModificationRenderSamples(ContentKey key,
-                                          int64_t startSample,
-                                          int64_t endSampleExclusive,
-                                          std::shared_ptr<const EditableContentSnapshot> snapshot);
-
     std::vector<AudioSource> audioSources_;
     std::vector<AudioModification> audioModifications_;
     std::vector<PlaybackRegion> playbackRegions_;
@@ -265,9 +251,6 @@ public:
     bool applyNotesToModification(const ContentKey& key, std::vector<Note> notes);
     // Volume envelope 编辑不触发神经渲染。
     bool applyVolumeEnvelopeToModification(const ContentKey& key, AutomationLane envelope);
-    // 无渲染 republish：从最新 owner snapshot 原子发布播放源。
-    // 不 enqueue render、不失效 RenderCache。
-    void republishPlaybackSourceForModification(ContentKey key);
     bool applyPitchCurveToModification(const ContentKey& key, std::shared_ptr<PitchCurve> curve);
     bool applyOriginalF0ToModification(const ContentKey& key, std::shared_ptr<PitchCurve> curve);
     bool applyTimeGridToModification(const ContentKey& key, std::shared_ptr<const TimeGridSnapshot> grid);
@@ -303,6 +286,9 @@ private:
                                    OriginalF0InputStamp stamp);
     static OriginalF0InputStamp makeF0InputStamp(const AudioSource& source, const AudioModification& modification);
     std::shared_ptr<const EditableContentSnapshot> snapshotAudioModification(ContentKey key) const;
+    void requestFullModificationRender(
+        ContentKey key,
+        std::shared_ptr<const EditableContentSnapshot> snapshot = nullptr);
     void installDocumentRenderExecution();
     void processDocumentRenderJob(RenderJob& job);
     bool removePlaybackRegion(juce::ARAPlaybackRegion* playbackRegion);

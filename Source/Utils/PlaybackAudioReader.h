@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Render/ContentRenderService.h"
+#include "../Render/PlaybackReadSource.h"
 #include "TimeCoordinate.h"
 #include "../Inference/TimeStretchCache.h"
 #include "../Inference/RenderCache.h"

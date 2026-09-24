@@ -30,7 +30,7 @@
 #include "Standalone/UI/FontScale.h"
 #include "Utils/PianoRollEditAction.h"
 #include "Utils/PitchShiftEditAction.h"
-#include "Render/Stage2TimeStretchRebuilder.h"
+#include "Render/PlaybackReadSource.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <algorithm>
 #include <atomic>
@@ -110,10 +110,8 @@ void publishStandalonePlaybackSource(ContentRenderService& crs,
                                      const ContentState& payload)
 {
     auto snapshot = std::make_shared<const EditableContentSnapshot>(makeContentSnapshot(payload));
-    auto readSource = makePlaybackReadSource(
-        key, std::move(snapshot), payload.audioBuffer, payload.sampleRate,
-        crs.getOrCreateRenderCache(key), crs.getTimeStretchCache());
-    crs.publishPlaybackSource(key, std::move(readSource));
+    crs.publishCanonicalSource(
+        key, std::move(snapshot), payload.audioBuffer, payload.sampleRate);
 }
 
 ContentKey createStandaloneClipOwner(StandaloneContentRepository& repository,
@@ -787,26 +785,15 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
         ContentRenderService::ExecutionLease lease;
         lease.owner = this;
         lease.renderJobCallback = [this](RenderJob& job) {
-            if (job.kind == RenderJob::Kind::Stage2Rebuild) {
-                if (job.contentKey.domainKind == DomainKind::ARAAudioModification
-                    || !job.contentSnapshot || !job.audioBuffer)
-                    return;
-
-                Stage2TimeStretchRebuilder::Request request;
-                request.contentKey = job.contentKey;
-                request.contentSnapshot = job.contentSnapshot;
-                request.audioBuffer = job.audioBuffer;
-                request.audioSampleRate = job.audioSampleRate;
-                Stage2TimeStretchRebuilder::rebuild(*contentRenderService_, request);
-                return;
-            }
-
+            // ContentRenderService 已內部處理 Stage2 與 settlement；
+            // processor adapter 只需執行 Stage1 inference。
             if (job.renderCache == nullptr)
                 return;
 
             auto contentSnap = job.contentSnapshot;
             if (!contentSnap) {
-                if (job.renderCache->completeChunkRenderFailure(job.startSample, job.targetRevision))
+                if (job.renderCache->completeChunkRenderFailure(
+                        job.startSample, job.targetRevision, job.cacheGeneration))
                 {
 #if JucePlugin_Build_VST3
                     auto gate = completionGate_;
@@ -986,7 +973,7 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
         bindings.retireSegment = [this](ContentKey segmentContentKey) {
             // CaptureSegmentContent owns content; CRS cache is derived.
             if (contentRenderService_) {
-                contentRenderService_->removeRenderCache(segmentContentKey);
+                contentRenderService_->invalidateContentArtifacts(segmentContentKey);
             }
         };
 
@@ -1109,11 +1096,8 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                 canonicalAudio = std::move(derived);
             }
 
-            auto readSource = makePlaybackReadSource(
-                key, std::move(snapshot), std::move(canonicalAudio), targetRate,
-                contentRenderService_->getOrCreateRenderCache(key),
-                contentRenderService_->getTimeStretchCache());
-            contentRenderService_->publishPlaybackSource(key, readSource);
+            contentRenderService_->publishCanonicalSource(
+                key, std::move(snapshot), std::move(canonicalAudio), targetRate);
         };
 
         bindings.requestFullRender = [this](ContentKey key) {
@@ -1313,13 +1297,9 @@ void OpenTuneAudioProcessor::setVocoderModelWeight(const VocoderModelWeight& wei
         // 3. 模型切换完成后才清 RenderCache/TimeStretchCache 并恢复 render worker
 #if JucePlugin_Build_Standalone
         if (processor->contentRenderService_ && processor->standaloneContentRepository_) {
-            const auto keys = processor->standaloneContentRepository_->getAllClips();
-            for (const auto key : keys) {
-                if (auto cache = processor->contentRenderService_->getRenderCache(key))
-                    cache->clear();
+            processor->contentRenderService_->invalidateAllContentArtifacts();
+            for (const auto key : processor->standaloneContentRepository_->getAllClips())
                 processor->requestFullContentRender(key);
-            }
-            processor->contentRenderService_->getTimeStretchCache().clear();
         }
 #endif
 #if JucePlugin_Enable_ARA
@@ -1335,13 +1315,9 @@ void OpenTuneAudioProcessor::invalidateAllContentCaches()
 {
 #if JucePlugin_Build_Standalone
     if (contentRenderService_ && standaloneContentRepository_) {
-        const auto keys = standaloneContentRepository_->getAllClips();
-        for (const auto key : keys) {
-            if (auto cache = contentRenderService_->getRenderCache(key))
-                cache->clear();
+        contentRenderService_->invalidateAllContentArtifacts();
+        for (const auto key : standaloneContentRepository_->getAllClips())
             requestFullContentRender(key);
-        }
-        contentRenderService_->getTimeStretchCache().clear();
     }
 #endif
 #if JucePlugin_Enable_ARA
@@ -2319,8 +2295,10 @@ OpenTuneAudioProcessor::DiagnosticInfo OpenTuneAudioProcessor::getDiagnosticInfo
 
     info.contentKey = targetPlacement.contentKey;
     info.placementId = targetPlacement.placementId;
-    if (auto renderCache = contentRenderService_->getRenderCache(targetPlacement.contentKey)) {
-        const auto renderState = renderCache->getStateSnapshot();
+    if (contentRenderService_ != nullptr)
+    {
+        const auto renderState = contentRenderService_->getStateSnapshot(
+            targetPlacement.contentKey);
         info.chunkStats = renderState.chunkStats;
         info.publishedRevision = 0;
         info.desiredRevision = 0;
@@ -3023,12 +3001,8 @@ void OpenTuneAudioProcessor::runReclaimSweepOnMessageThread()
             sourceId = clip->content().sourceWindow.sourceId;
         }
 
-        if (contentRenderService_ != nullptr) {
-            contentRenderService_->removePlaybackSource(key);
-            contentRenderService_->removeRenderCache(key);
-            contentRenderService_->removeStretcher(key);
-            contentRenderService_->getTimeStretchCache().invalidate(key);
-        }
+        if (contentRenderService_ != nullptr)
+            contentRenderService_->removeContent(key);
 
         standaloneContentRepository_->releaseClip(key);
 
@@ -3089,13 +3063,16 @@ std::shared_ptr<const EditableContentSnapshot> OpenTuneAudioProcessor::getConten
     return nullptr;
 }
 
-const ContentRenderService* OpenTuneAudioProcessor::resolveReadableContentRenderService(ContentKey key) const noexcept
+ContentRenderService* OpenTuneAudioProcessor::resolveContentRenderService(ContentKey key) const noexcept
 {
     switch (key.domainKind) {
 #if JucePlugin_Enable_ARA
         case DomainKind::ARAAudioModification: {
             auto* dc = getDocumentController();
-            return dc != nullptr ? dc->getContentRenderService() : nullptr;
+            if (dc == nullptr)
+                return nullptr;
+            auto sharedService = dc->getContentRenderServiceShared();
+            return sharedService.get();
         }
 #endif
 #if JucePlugin_Build_Standalone
@@ -3111,34 +3088,17 @@ const ContentRenderService* OpenTuneAudioProcessor::resolveReadableContentRender
     return nullptr;
 }
 
-RenderCache::ChunkStats OpenTuneAudioProcessor::getReadableContentChunkStats(ContentKey key) const noexcept
+const ContentRenderService* OpenTuneAudioProcessor::resolveReadableContentRenderService(ContentKey key) const noexcept
 {
-    const auto* readableCrs = resolveReadableContentRenderService(key);
-    if (readableCrs == nullptr)
-        return {};
-
-    const auto renderCache = readableCrs->getRenderCache(key);
-    return renderCache != nullptr ? renderCache->getChunkStats() : RenderCache::ChunkStats{};
+    return resolveContentRenderService(key);
 }
 
-ContentRenderService* OpenTuneAudioProcessor::resolveMutableLocalContentRenderService(ContentKey key) const noexcept
+ContentRenderService::ChunkStats OpenTuneAudioProcessor::getReadableContentChunkStats(ContentKey key) const noexcept
 {
-    switch (key.domainKind) {
-#if JucePlugin_Build_Standalone
-        case DomainKind::StandaloneClip:
-#endif
-#if JucePlugin_Build_VST3
-        case DomainKind::RegularVST3Capture:
-#endif
-            return contentRenderService_.get();
-#if JucePlugin_Enable_ARA
-        case DomainKind::ARAAudioModification:
-            return nullptr;  // ARA CRS is owned by DC, processor must not mutate it
-#endif
-        default:
-            break;
-    }
-    return nullptr;
+    const auto* readableCrs = resolveReadableContentRenderService(key);
+    return readableCrs != nullptr
+        ? readableCrs->getChunkStats(key)
+        : ContentRenderService::ChunkStats{};
 }
 
 OpenTuneAudioProcessor::AnalysisAudioProvider
@@ -3199,119 +3159,36 @@ void OpenTuneAudioProcessor::onContentLocalMutationCompletedSeconds(ContentKey k
                                                                      double endSeconds,
                                                                      std::shared_ptr<const EditableContentSnapshot> snapshot)
 {
-#if JucePlugin_Enable_ARA
-    if (key.domainKind == DomainKind::ARAAudioModification)
-    {
-        auto* dc = getDocumentController();
-        if (dc != nullptr)
-        {
-            dc->requestModificationRender(
-                key, startSeconds, endSeconds, std::move(snapshot));
-        }
+    auto* crs = resolveContentRenderService(key);
+    if (crs == nullptr)
         return;
-    }
-#endif
 
-    // Non-ARA path: processor-local CRS
-    requestRenderForLocalMutationRange(key,
-                                       startSeconds,
-                                       endSeconds,
-                                       std::move(snapshot));
+    ContentRenderService::InvalidationRequest request;
+    request.contentKey = key;
+    request.contentSnapshot = std::move(snapshot);
+    request.kind = ContentRenderService::InvalidationKind::LocalRange;
+    request.startSeconds = startSeconds;
+    request.endSeconds = endSeconds;
+    crs->invalidateContent(std::move(request));
 }
 
 void OpenTuneAudioProcessor::onContentFullMutationCompleted(ContentKey key)
 {
     auto snapshot = getContentSnapshot(key);
-    if (!snapshot)
+    auto* crs = resolveContentRenderService(key);
+    if (snapshot == nullptr || crs == nullptr)
         return;
 
-#if JucePlugin_Enable_ARA
-    if (key.domainKind == DomainKind::ARAAudioModification)
-    {
-        auto* dc = getDocumentController();
-        if (dc != nullptr)
-        {
-            dc->requestFullModificationRender(key, std::move(snapshot));
-        }
-        return;
-    }
-#endif
-
-    // Non-ARA path
-    const double durationSeconds = contentDurationSeconds(*snapshot);
-    if (durationSeconds > 0.0)
-        requestRenderForLocalMutationRange(key, 0.0, durationSeconds, std::move(snapshot));
+    ContentRenderService::InvalidationRequest request;
+    request.contentKey = key;
+    request.contentSnapshot = std::move(snapshot);
+    request.kind = ContentRenderService::InvalidationKind::FullContent;
+    crs->invalidateContent(std::move(request));
 }
 
 void OpenTuneAudioProcessor::requestFullContentRender(ContentKey key)
 {
-    auto snap = getContentSnapshot(key);
-    if (!snap) return;
-    const double durationSeconds = contentDurationSeconds(*snap);
-    if (durationSeconds <= 0.0) return;
-    requestRenderForLocalMutationRange(key, 0.0, durationSeconds, std::move(snap));
-}
-
-void OpenTuneAudioProcessor::requestRenderForLocalMutationRange(ContentKey key,
-                                                                 double startSeconds,
-                                                                 double endSeconds,
-                                                                 std::shared_ptr<const EditableContentSnapshot> snap)
-{
-    if (!snap) return;
-
-    auto* crs = resolveMutableLocalContentRenderService(key);
-    if (crs == nullptr) return;
-
-    PlaybackReadSource readSource;
-    if (!crs->getPlaybackReadSource(key, readSource)) return;
-
-    const double crsSampleRate = readSource.audioSampleRate;
-    auto audioBuffer = readSource.audioBuffer;
-    if (crsSampleRate <= 0.0 || audioBuffer == nullptr || audioBuffer->getNumSamples() <= 0) return;
-
-    if (!crs->republishPlaybackSource(key, snap))
-        return;
-
-    if (!snap->hasUsableOriginalF0()) return;
-
-    const int64_t totalSamples = audioBuffer->getNumSamples();
-    const int64_t startSample = juce::jlimit<int64_t>(
-        0, totalSamples, TimeCoordinate::secondsToSamplesFloor(startSeconds, crsSampleRate));
-    const int64_t endSample = juce::jlimit<int64_t>(
-        0, totalSamples, TimeCoordinate::secondsToSamplesCeil(endSeconds, crsSampleRate));
-
-    if (endSample <= startSample) return;
-
-    RenderJob job;
-    job.contentKey = key;
-    job.renderCache = crs->getOrCreateRenderCache(key);
-    job.audioBuffer = audioBuffer;
-    job.audioSampleRate = crsSampleRate;
-    job.startSample = startSample;
-    job.endSampleExclusive = endSample;
-    job.contentSnapshot = snap;
-
-    crs->enqueueRender(std::move(job));
-}
-
-void OpenTuneAudioProcessor::enqueueStage2WhenCanonicalSettled(
-    ContentKey key,
-    std::shared_ptr<const EditableContentSnapshot> snapshot,
-    std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer,
-    double audioSampleRate)
-{
-    if (key.domainKind == DomainKind::ARAAudioModification)
-        return;
-
-    if (snapshot == nullptr || audioBuffer == nullptr || snapshot->timeGrid->isIdentity())
-        return;
-
-    auto* crs = resolveMutableLocalContentRenderService(key);
-    if (crs == nullptr)
-        return;
-
-    crs->enqueueStage2RebuildWhenCanonicalSettled(
-        key, std::move(snapshot), std::move(audioBuffer), audioSampleRate);
+    onContentFullMutationCompleted(key);
 }
 
 void OpenTuneAudioProcessor::handleStage1ChunkSettled(
@@ -3320,20 +3197,25 @@ void OpenTuneAudioProcessor::handleStage1ChunkSettled(
     std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer,
     double audioSampleRate)
 {
+    auto* crs = resolveContentRenderService(key);
+    if (crs == nullptr)
+        return;
+
+    const bool canonicalSettled = crs->isCanonicalSettled(key);
+
 #if JucePlugin_Build_VST3
-    // Only transition to Edited when ALL chunks are canonical settled.
-    // Partial completion must not promote the segment prematurely.
-    if (auto* session = getCaptureSession()) {
-        auto cache = contentRenderService_->getRenderCache(key);
-        if (cache && cache->isCanonicalSettled())
+    // Capture 的 Processing→Edited 屬於 owner lifecycle；先讓 owner 完成
+    // compaction/retire，再讓 render module 針對仍存在的 content 排 Stage2。
+    if (canonicalSettled)
+    {
+        if (auto* session = getCaptureSession())
             session->onRenderComplete(key);
     }
 #endif
 
-    if (contentRenderService_ != nullptr
-        && key.domainKind != DomainKind::ARAAudioModification)
+    if (canonicalSettled)
     {
-        enqueueStage2WhenCanonicalSettled(
+        crs->handleStage1ChunkSettled(
             key,
             std::move(snapshot),
             std::move(audioBuffer),
@@ -4717,9 +4599,9 @@ bool OpenTuneAudioProcessor::replaceContentNotesForFullMutation(ContentKey key, 
     if (!ok)
         return false;
 
-    // 发布由调用方统一负责：Scissors 提交后调用 republishPlaybackSource；
-    // requestContentRefresh 经 onContentFullMutationCompleted → render 请求内
-    // requestRenderForLocalMutationRange 的 republishPlaybackSource 重建包络。
+    // 發布由呼叫端統一負責：Scissors 提交後呼叫 republishPlaybackSource；
+    // requestContentRefresh 經 onContentFullMutationCompleted → render request
+    // 一次發布最新 snapshot。
     // 此处不再发布，避免同一变更两次 publish（不含包络的中间态双发布）。
     return true;
 }
@@ -4897,21 +4779,10 @@ ContentCommitSnapshot OpenTuneAudioProcessor::commitVolumeEnvelope(ContentKey ke
 
 void OpenTuneAudioProcessor::republishPlaybackSource(ContentKey key)
 {
-#if JucePlugin_Enable_ARA
-    if (key.domainKind == DomainKind::ARAAudioModification)
-    {
-        auto* dc = getDocumentController();
-        if (dc != nullptr)
-            dc->republishPlaybackSourceForModification(key);
-        return;
-    }
-#endif
-
-    auto snap = getContentSnapshot(key);
-    if (!snap) return;
-    auto* crs = resolveMutableLocalContentRenderService(key);
-    if (crs == nullptr) return;
-    crs->republishPlaybackSource(key, std::move(snap));
+    auto snapshot = getContentSnapshot(key);
+    auto* crs = resolveContentRenderService(key);
+    if (snapshot != nullptr && crs != nullptr)
+        crs->republishPlaybackSource(key, std::move(snapshot));
 }
 
 bool OpenTuneAudioProcessor::writePitchCurveToOwner(ContentKey key,
@@ -5018,23 +4889,23 @@ bool OpenTuneAudioProcessor::setContentTimeGrid(ContentKey key,
     }
     if (ok) {
         auto snapshot = getContentSnapshot(key);
-        auto* crs = resolveMutableLocalContentRenderService(key);
-        if (key.domainKind != DomainKind::ARAAudioModification
-            && crs != nullptr
-            && snapshot != nullptr)
+        auto* crs = resolveContentRenderService(key);
+        if (crs == nullptr || snapshot == nullptr)
+            return ok;
+
+        if (key.domainKind == DomainKind::ARAAudioModification)
         {
-            // TimeGrid affects only Stage2. Requeue a full Stage1 plan so any
-            // pending jobs carry the new snapshot, then let the canonical-settled
-            // callback enqueue Stage2 if the plan is still running.
-            if (!crs->republishPlaybackSource(key, snapshot))
-                return ok;
-            crs->getTimeStretchCache().invalidate(key);
-            requestFullContentRender(key);
-        }
-        else if (key.domainKind == DomainKind::ARAAudioModification
-                 && crs != nullptr
-                 && snapshot != nullptr)
+            // ARA 只接受 identity TimeGrid；只需發布最新 snapshot，不進 Stage2。
             crs->republishPlaybackSource(key, std::move(snapshot));
+        }
+        else
+        {
+            ContentRenderService::InvalidationRequest request;
+            request.contentKey = key;
+            request.contentSnapshot = std::move(snapshot);
+            request.kind = ContentRenderService::InvalidationKind::TimeGridChange;
+            crs->invalidateContent(std::move(request));
+        }
     }
     return ok;
 }

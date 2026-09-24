@@ -322,6 +322,7 @@ void RenderCache::clear() {
             const size_t chunkBytes = (chunk.audio ? chunk.audio->size() : 0) * sizeof(float);
             globalCacheCurrentBytes().fetch_sub(chunkBytes, std::memory_order_relaxed);
         }
+        ++generation_;
         chunks_.clear();
         pendingChunks_.clear();
         publishLocked();
@@ -343,6 +344,12 @@ void RenderCache::clear() {
                 [](const auto& p) { return p.use_count() <= 1; }),
             retiredPreparedSnapshots_.end());
     }
+}
+
+uint64_t RenderCache::getGeneration() const
+{
+    const juce::SpinLock::ScopedLockType guard(lock_);
+    return generation_;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +413,8 @@ RenderCache::ReconcileResult RenderCache::reconcileFullPlanAndRequest(
 
             const bool intersectsRequest = planned.startSample < requestEndSampleExclusive
                 && endSampleExclusive > requestStartSample;
+            if (intersectsRequest)
+                ++result.requestedChunkCount;
 
             if (sameSpan)
             {
@@ -501,6 +510,7 @@ RenderCache::ReconcileResult RenderCache::reconcileFullPlanAndRequest(
                 result.stateChanged = true;
             }
 
+            newChunk.generation = generation_;
             newChunks.emplace(startSample, std::move(newChunk));
         }
 
@@ -527,6 +537,7 @@ RenderCache::ReconcileResult RenderCache::reconcileFullPlanAndRequest(
         + " requestStart=" + juce::String(requestStartSample)
         + " requestEnd=" + juce::String(requestEndSampleExclusive)
         + " pendingChunks=" + juce::String(static_cast<juce::int64>(pendingChunkCount))
+        + " requestedChunks=" + juce::String(static_cast<juce::int64>(result.requestedChunkCount))
         + " stateChanged=" + juce::String(result.stateChanged ? 1 : 0)
         + " geometryChanged=" + juce::String(geometryChanged ? 1 : 0));
 
@@ -547,7 +558,9 @@ bool RenderCache::claimPendingJob(int64_t startSample, PendingJob& outJob) {
     }
 
     auto& chunk = it->second;
-    if (chunk.startSample != startSample || chunk.status != Chunk::Status::Pending) {
+    if (chunk.startSample != startSample
+        || chunk.status != Chunk::Status::Pending
+        || chunk.generation != generation_) {
         pendingChunks_.erase(pendingIt);
         return false;
     }
@@ -560,6 +573,7 @@ bool RenderCache::claimPendingJob(int64_t startSample, PendingJob& outJob) {
     outJob.startSample = chunk.startSample;
     outJob.endSampleExclusive = chunk.endSampleExclusive;
     outJob.targetRevision = chunk.desiredRevision;
+    outJob.generation = chunk.generation;
 
     AppLogger::log("RenderCache::claimPendingJob start=" + juce::String(projectRenderSeconds(startSample), 3)
         + " startSample=" + juce::String(chunk.startSample)
@@ -575,10 +589,12 @@ std::vector<int64_t> RenderCache::getPendingChunkStarts() const
     return {pendingChunks_.begin(), pendingChunks_.end()};
 }
 
-RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(int64_t startSample,
-                                                                           int64_t endSampleExclusive,
-                                                                           std::vector<float>&& audio,
-                                                                           uint64_t revision) {
+RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(
+    int64_t startSample,
+    int64_t endSampleExclusive,
+    std::vector<float>&& audio,
+    uint64_t revision,
+    uint64_t generation) {
     if (audio.empty() || revision == 0 || endSampleExclusive <= startSample) {
         jassert(audio.empty() == false && revision != 0 && endSampleExclusive > startSample);
         AppLogger::log("RenderCache::completeChunkRenderWithAudio INVALID_INPUT"
@@ -610,6 +626,9 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(int64_t
 
         // 身份检查：span 不符视为过期完成（chunk 已被重新规划）
         if (chunk.startSample != startSample || chunk.endSampleExclusive != endSampleExclusive)
+            return ChunkRenderResult::Stale;
+
+        if (chunk.generation != generation || generation != generation_)
             return ChunkRenderResult::Stale;
 
         if (chunk.runningRevision != revision)
@@ -656,7 +675,9 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(int64_t
     return ChunkRenderResult::Published;
 }
 
-bool RenderCache::completeChunkRenderFailure(int64_t startSample, uint64_t revision) {
+bool RenderCache::completeChunkRenderFailure(int64_t startSample,
+                                             uint64_t revision,
+                                             uint64_t generation) {
     const double startSeconds = projectRenderSeconds(startSample);
     {
         const juce::SpinLock::ScopedLockType guard(lock_);
@@ -667,6 +688,11 @@ bool RenderCache::completeChunkRenderFailure(int64_t startSample, uint64_t revis
         }
 
         auto& chunk = it->second;
+
+        // generation 先於 revision 判斷：clear/rebuild 後即使 span/revision 重複，
+        // 舊 async completion 也不得寫入新 cache。
+        if (chunk.generation != generation || generation != generation_)
+            return false;
 
         if (chunk.runningRevision != revision) {
             AppLogger::log("RenderCache::completeChunkRenderFailure STALE runningRevision="
@@ -697,7 +723,9 @@ bool RenderCache::completeChunkRenderFailure(int64_t startSample, uint64_t revis
     return true;
 }
 
-bool RenderCache::requeueRunningChunk(int64_t startSample, uint64_t runningRevision) {
+bool RenderCache::requeueRunningChunk(int64_t startSample,
+                                      uint64_t runningRevision,
+                                      uint64_t generation) {
     const juce::SpinLock::ScopedLockType guard(lock_);
     const double startSeconds = projectRenderSeconds(startSample);
     auto it = chunks_.find(startSample);
@@ -707,6 +735,8 @@ bool RenderCache::requeueRunningChunk(int64_t startSample, uint64_t runningRevis
     auto& chunk = it->second;
     if (chunk.startSample != startSample
         || chunk.status != Chunk::Status::Running
+        || chunk.generation != generation
+        || generation != generation_
         || chunk.runningRevision != runningRevision)
         return false;
 
@@ -796,7 +826,9 @@ bool RenderCache::isCanonicalSettled() const
     return isCanonicalSettledLocked_();
 }
 
-void RenderCache::markChunkAsBlank(int64_t startSample, uint64_t revision) {
+void RenderCache::markChunkAsBlank(int64_t startSample,
+                                   uint64_t revision,
+                                   uint64_t generation) {
     const double startSeconds = projectRenderSeconds(startSample);
     int64_t endSample = 0;
     {
@@ -807,6 +839,9 @@ void RenderCache::markChunkAsBlank(int64_t startSample, uint64_t revision) {
         }
 
         auto& chunk = it->second;
+
+        if (chunk.generation != generation || generation != generation_)
+            return;
 
         if (chunk.status != Chunk::Status::Running) {
             return;

@@ -692,10 +692,9 @@ Result<void> ProjectSession::commitPreparedOpen(PreparedOpen&& preparedOpen)
                 if (snap->audioBuffer && snap->audioBuffer->getNumSamples() > 0)
                 {
                     auto* crs = processorRef_.getContentRenderService();
-                    auto readSource = makePlaybackReadSource(
-                        key, snap, snap->audioBuffer, snap->audioSampleRate,
-                        crs->getOrCreateRenderCache(key), crs->getTimeStretchCache());
-                    crs->publishPlaybackSource(key, std::move(readSource));
+                    if (crs != nullptr)
+                        crs->publishCanonicalSource(
+                            key, snap, snap->audioBuffer, snap->audioSampleRate);
                 }
             }
 

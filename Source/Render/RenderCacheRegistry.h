@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace OpenTune {
 
@@ -30,6 +31,7 @@ public:
     std::shared_ptr<RenderCache> get(ContentKey key) const;
     void remove(ContentKey key);
     void invalidate(ContentKey key);
+    void invalidateAll();
     void clear();
 
     /** 更新目标率并串行重建所有 cache 的 prepared snapshot。 */

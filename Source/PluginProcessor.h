@@ -37,7 +37,6 @@
 #include "Utils/PitchCurve.h"
 #include "Utils/ContentTimelineProjection.h"
 #include "Utils/DetectedKey.h"
-#include "Inference/RenderCache.h"
 #include "Inference/F0InferenceService.h"
 #include "Services/F0ExtractionService.h"
 #include "Services/ReferenceAnalysisService.h"
@@ -419,7 +418,7 @@ public:
         uint64_t desiredRevision{0};
         juce::String lastControlCall{"none"};
         juce::int64 lastControlTimestamp{0};
-        RenderCache::ChunkStats chunkStats;
+        ContentRenderService::ChunkStats chunkStats;
     };
 
     /**
@@ -579,7 +578,7 @@ private:
     ContentKey ensureSourceAndCreateStandaloneClip(PreparedImport&& prepared, uint64_t& sourceId, bool& createdSource);
 #endif
 
-    ContentRenderService* resolveMutableLocalContentRenderService(ContentKey key) const noexcept;
+    ContentRenderService* resolveContentRenderService(ContentKey key) const noexcept;
     const ContentRenderService* resolveReadableContentRenderService(ContentKey key) const noexcept;
     AnalysisAudioProvider resolveAnalysisAudioProvider(ContentKey key);
 
@@ -624,7 +623,7 @@ public:
 #endif
     ContentRenderService* getContentRenderService() noexcept { return contentRenderService_.get(); }
     const ContentRenderService* getContentRenderService() const noexcept { return contentRenderService_.get(); }
-    RenderCache::ChunkStats getReadableContentChunkStats(ContentKey key) const noexcept;
+    ContentRenderService::ChunkStats getReadableContentChunkStats(ContentKey key) const noexcept;
 
 #if JucePlugin_Build_VST3
     /** Returns the regular VST3 capture session, or nullptr outside regular VST3 mode. */
@@ -675,11 +674,6 @@ public:
     }
 
 private:
-    void enqueueStage2WhenCanonicalSettled(
-        ContentKey key,
-        std::shared_ptr<const EditableContentSnapshot> snapshot,
-        std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer,
-        double audioSampleRate);
     ReferenceFeatureProducer resolveReferenceFeatureProducer() const;
     // 纯数据 StandardAuto 特征生产（static：不访问 processor 状态，analysisRevision
     // 由提交方在消息线程固定，worker 只读提交时捕获的不可变 snapshot）。
@@ -867,15 +861,6 @@ private:
     OutputSpectrumAnalyzer outputSpectrumAnalyzer_;
 
     AppPreferences* appPreferences_{nullptr};
-
-    // Hard-cut render mutation request primitive. This is the only path
-    // that builds RenderJob and enqueues into ContentRenderService; every other
-    // mutation entry point funnels through the two sinks above.
-    void requestRenderForLocalMutationRange(
-        ContentKey key,
-        double startSeconds,
-        double endSeconds,
-        std::shared_ptr<const EditableContentSnapshot> snapshot);
 
     // Owner-truth-only write helpers. These update the underlying content stores without triggering
     // immediate render. They are designed for write-back mutation paths (Correction/Final F0) and are

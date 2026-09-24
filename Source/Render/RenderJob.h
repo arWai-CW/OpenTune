@@ -35,6 +35,7 @@ struct RenderJob
     int64_t queuedChunkStartSample{-1};
 
     uint64_t targetRevision{0};
+    uint64_t cacheGeneration{0};
 
 };
 

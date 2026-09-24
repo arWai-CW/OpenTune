@@ -3,6 +3,7 @@
 #include "../Content/EditableContentSnapshot.h"
 #include "../Inference/VocoderDomain.h"
 #include "../Render/ContentRenderService.h"
+#include "../Render/RenderJob.h"
 #include "../Utils/VocoderModelWeight.h"
 #include <condition_variable>
 #include <deque>

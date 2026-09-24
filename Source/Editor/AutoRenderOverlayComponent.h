@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <cstdint>
 #include <cmath>
-#include "Inference/RenderCache.h"
+#include "Render/ContentRenderService.h"
 #include "Standalone/UI/UIColors.h"
 #include "Content/ContentKey.h"
 
@@ -28,7 +28,7 @@ inline juce::String buildRenderingOverlayTitle(int completedTasks, int totalTask
 
 struct RenderStatusSnapshot {
     RenderStatus status{RenderStatus::Idle};
-    RenderCache::ChunkStats chunkStats;
+    ContentRenderService::ChunkStats chunkStats;
     ContentKey contentKey;
     uint64_t placementId{0};
     bool hasContent{false};
@@ -41,13 +41,13 @@ struct AutoRenderOverlayDecision {
     RenderStatus displayStatus{RenderStatus::Idle};
 };
 
-inline RenderStatus evaluateRenderStatus(const RenderCache::StateSnapshot& cacheSnapshot)
+inline RenderStatus evaluateRenderStatus(const ContentRenderService::StateSnapshot& cacheSnapshot)
 {
     if (cacheSnapshot.chunkStats.hasActiveWork()) {
         return RenderStatus::Rendering;
     }
 
-    if (cacheSnapshot.chunkStats.total() == 0 || !cacheSnapshot.hasNonBlankChunks) {
+    if (cacheSnapshot.chunkStats.total() == 0 || !cacheSnapshot.hasContent) {
         return RenderStatus::Idle;
     }
 
@@ -60,14 +60,14 @@ inline RenderStatus evaluateRenderStatus(const RenderCache::StateSnapshot& cache
 
 inline RenderStatusSnapshot makeRenderStatusSnapshot(ContentKey contentKey,
                                                      uint64_t placementId,
-                                                     const RenderCache::StateSnapshot& cacheSnapshot)
+                                                     const ContentRenderService::StateSnapshot& cacheSnapshot)
 {
     RenderStatusSnapshot snapshot;
     snapshot.status = evaluateRenderStatus(cacheSnapshot);
     snapshot.chunkStats = cacheSnapshot.chunkStats;
     snapshot.contentKey = contentKey;
     snapshot.placementId = placementId;
-    snapshot.hasContent = cacheSnapshot.hasNonBlankChunks;
+    snapshot.hasContent = cacheSnapshot.hasContent;
     return snapshot;
 }
 
