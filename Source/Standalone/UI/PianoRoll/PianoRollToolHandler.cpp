@@ -1837,7 +1837,8 @@ void PianoRollToolHandler::dragNotePitch(const juce::MouseEvent& e)
         // 连续基准 MIDI（不提前取整）：SNAP 目标全程保持连续语义
         const float baseMidi = PitchUtils::freqToMidi(note.pitch);
         const float targetMidi = baseMidi + initialOffset + deltaSemitones;
-        // Pitch Grid 三态决定吸附方式；Alt 拖拽临时解除吸附（保留连续 cents）
+        // Pitch Grid 三态决定吸附方式；Alt 拖拽临时解除吸附（保留连续 cents）。
+        // OpenTune（选择器隐藏）下关闭「吸附到音阶」时 KeyScale 退回最近半音（允许全部音高）。
         float snappedMidi = targetMidi;
         if (!altBypass) {
             switch (pitchGridMode_) {
@@ -1849,6 +1850,13 @@ void PianoRollToolHandler::dragNotePitch(const juce::MouseEvent& e)
                     break;
                 case PitchGridMode::KeyScale: {
                     // 吸附到活动音阶；无配置时用默认 Chromatic（quantize 内部 round 半音）
+                    // OpenDyne：Pitch Grid 选择器已显式选择 KeyScale，直接按当前音阶吸附；
+                    // OpenTune：选择器隐藏，遵循全域「吸附到音阶」开关，关闭时退回最近半音。
+                    const bool openDyneScheme = AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme());
+                    if (!openDyneScheme && !dragSnapToScaleEnabled_) {
+                        snappedMidi = std::round(targetMidi);
+                        break;
+                    }
                     const auto scaleSnap = ctx_.getActiveScaleSnap ? ctx_.getActiveScaleSnap() : std::nullopt;
                     const ScaleSnapConfig snap = scaleSnap.value_or(ScaleSnapConfig{});
                     snappedMidi = snap.quantizeMidiToActiveScale(targetMidi);

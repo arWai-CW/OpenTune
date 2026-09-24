@@ -66,6 +66,8 @@ struct SharedPreferencesState {
     KeyShortcutConfig::KeyShortcutSettings shortcuts = KeyShortcutConfig::KeyShortcutSettings::getDefault();
     bool suppressEqRemoveConfirmation = false;  ///< 抑制 EQ 工具删除确认弹窗
     bool lightPitchCorrectionEnabled = true;  ///< 轻量修音开关（AutoTune cycle resampling，默认开）
+    /// 拖動音符時吸附到活動音階（Pitch Grid KeyScale；預設關閉，關閉時僅吸附到最近半音，保留和弦外音）
+    bool dragSnapToScaleEnabled = false;
     F0ModelType f0ModelType = F0ModelType::FCPE;
     PianoGridStyle gridStyle = PianoGridStyle::PianoLanes;
     TimelineDisplayMode timelineDisplayMode = TimelineDisplayMode::Time;
@@ -126,6 +128,8 @@ public:
     TrackColorMode getTrackColorMode() const;
 
     void setLightPitchCorrectionEnabled(bool enabled);
+
+    void setDragSnapToScaleEnabled(bool enabled);
 
     void setF0ModelType(F0ModelType type);
     F0ModelType getF0ModelType() const;

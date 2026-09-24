@@ -218,6 +218,8 @@ public:
 
     void setTool(ToolId tool);
     void setPitchGridMode(PitchGridMode mode) { pitchGridMode_ = mode; }
+    /// 拖動音符時是否吸附到活動音階；關閉時 Pitch Grid KeyScale 退回最近半音吸附
+    void setDragSnapToScaleEnabled(bool enabled) { dragSnapToScaleEnabled_ = enabled; }
     void mouseMove(const juce::MouseEvent& e);
     void mouseDown(const juce::MouseEvent& e);
     void mouseDrag(const juce::MouseEvent& e);
@@ -358,6 +360,8 @@ private:
     Context ctx_;
     ToolId currentTool_ = ToolId::Select;
     PitchGridMode pitchGridMode_ = PitchGridMode::KeyScale;
+    /// 拖動音符時吸附到活動音階的開關（預設關閉；關閉時 KeyScale 拖拽退回最近半音）
+    bool dragSnapToScaleEnabled_ = false;
 
     // Scissors 自定义双击检测：记录上一次点击的时间戳和位置
     // 在 handleScissorsToolUp 中检测：800ms / 30px 内的同位置点击触发合并。

@@ -211,6 +211,12 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     contentRoot_.addAndMakeVisible(topBar_);
     contentRoot_.addAndMakeVisible(parameterPanel_);
     parameterPanel_.addListener(this);
+    // 拖動吸附到音階開關 → 全域偏好 + ToolHandler
+    parameterPanel_.onDragSnapToScaleChanged = [this](bool enabled) {
+        appPreferences_.setDragSnapToScaleEnabled(enabled);
+        if (auto* handler = pianoRoll_.getToolHandler())
+            handler->setDragSnapToScaleEnabled(enabled);
+    };
 
     contentRoot_.addAndMakeVisible(pianoRoll_);
     pianoRoll_.addListener(this);
@@ -361,6 +367,8 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
         applyThemeToEditor(sharedPreferences.theme);
 
     pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
+    pianoRoll_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
+    parameterPanel_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
     pianoRoll_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     pianoRoll_.setNoteNameMode(visualPreferences.noteNameMode);
     pianoRoll_.setShowUnvoicedFrames(visualPreferences.showUnvoicedFrames);

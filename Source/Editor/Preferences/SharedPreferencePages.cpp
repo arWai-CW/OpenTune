@@ -300,10 +300,23 @@ public:
         };
         addAndMakeVisible(lightPitchCorrectionToggle_);
 
+        initialiseToggleButton(dragSnapToScaleToggle_);
+        dragSnapToScaleToggle_.setButtonText(juce::String::fromUTF8(u8"拖動音符時吸附到音階"));
+        dragSnapToScaleToggle_.setTooltip(juce::String::fromUTF8(
+            u8"OpenTune 修音：拖動音符時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
+            u8"OpenDyne 下 Key Scale 由 Pitch Grid 選擇器直接決定，不受此開關影響"));
+        dragSnapToScaleToggle_.setToggleState(state.shared.dragSnapToScaleEnabled,
+                                              juce::dontSendNotification);
+        dragSnapToScaleToggle_.onClick = [this] {
+            appPreferences_.setDragSnapToScaleEnabled(dragSnapToScaleToggle_.getToggleState());
+            notifyChanged();
+        };
+        addAndMakeVisible(dragSnapToScaleToggle_);
+
         // 供父容器布局使用的确定内容高度
         {
             const int vPad = 4 * 2; // reduced(10, 4) vertical
-            const int rows = isVst3Plugin_ ? 5 : 7; // 插件隐藏实验控件
+            const int rows = isVst3Plugin_ ? 6 : 8; // 插件隐藏实验控件；末尾含輕量修音與音階吸附兩行開關
             const int rowH = 34;
             const int gaps = 8 * (rows - 1) + (isVst3Plugin_ ? 0 : 4); // 行间 8px；实验模式下额外 hint 前 4px
             const int hintHeight = isVst3Plugin_ ? 0 : 42;
@@ -367,6 +380,10 @@ public:
         bounds.removeFromTop(8);
         row = bounds.removeFromTop(rowHeight);
         lightPitchCorrectionToggle_.setBounds(row.removeFromLeft(labelWidth + selectorWidth + 80));
+
+        bounds.removeFromTop(8);
+        row = bounds.removeFromTop(rowHeight);
+        dragSnapToScaleToggle_.setBounds(row.removeFromLeft(labelWidth + selectorWidth + 80));
     }
 
 private:
@@ -489,6 +506,7 @@ private:
     juce::Label experimentalReferenceAlignModeLabel_;
     juce::ComboBox experimentalReferenceAlignModeSelector_;
     juce::ToggleButton lightPitchCorrectionToggle_;
+    juce::ToggleButton dragSnapToScaleToggle_;
 };
 
 class SharedEditingPage final : public juce::Component

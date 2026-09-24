@@ -676,6 +676,12 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         if (auto* handler = pianoRoll_.getToolHandler())
             handler->setPitchGridMode(mode);
     };
+    // 拖動吸附到音階開關 → 全域偏好 + ToolHandler（OpenTune/OpenDyne 皆可快速切換）
+    parameterPanel_.onDragSnapToScaleChanged = [this](bool enabled) {
+        appPreferences_.setDragSnapToScaleEnabled(enabled);
+        if (auto* handler = pianoRoll_.getToolHandler())
+            handler->setDragSnapToScaleEnabled(enabled);
+    };
     // parameterPanel_.setRetuneSpeed(processorRef_.getRetuneSpeed());
     parameterPanel_.setRetuneSpeed(PitchControlConfig::kDefaultRetuneSpeedPercent);
     pianoRoll_.setRetuneSpeed(PitchControlConfig::kDefaultRetuneSpeedNormalized);
@@ -1760,6 +1766,8 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
         applyThemeToEditor(effectiveTheme);
 
     pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
+    pianoRoll_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
+    parameterPanel_.setDragSnapToScaleEnabled(sharedPreferences.dragSnapToScaleEnabled);
     pianoRoll_.setExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
     pianoRoll_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     pianoRoll_.setNoteNameMode(visualPreferences.noteNameMode);

@@ -198,6 +198,11 @@ public:
     void setScale(int rootNote, int scaleType);
     void setAudioEditingScheme(AudioEditingScheme::Scheme scheme) { applyAudioEditingScheme(scheme); }
     bool isOpenDyne() const noexcept { return AudioEditingScheme::usesNotesPrimaryScheme(audioEditingScheme_); }
+    /// 拖動音符時吸附到活動音階的開關（透传到 ToolHandler）
+    void setDragSnapToScaleEnabled(bool enabled) {
+        if (toolHandler_ != nullptr)
+            toolHandler_->setDragSnapToScaleEnabled(enabled);
+    }
 
     /** 轨道主题色注入：OpenDyne waveform blob 的填充/描边色。 */
     void setTrackDisplayColour(juce::Colour colour);

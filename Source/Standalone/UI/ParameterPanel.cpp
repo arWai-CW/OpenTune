@@ -608,6 +608,20 @@ ParameterPanel::ParameterPanel()
     // 滚轮调参：ComboBox 在 JUCE 中默认关闭，此处显式开启；鼠标在控件上时事件被其消费，Viewport 不滚
     pitchGridSelector_.setScrollWheelEnabled(true);
     contentComponent_.addChildComponent(pitchGridSelector_);
+
+    // ── 拖動吸附到音階開關（OpenTune 專用；OpenDyne 由 Pitch Grid 選擇器直接決定，此開關隱藏） ──
+    dragSnapToScaleToggle_.setButtonText(juce::String::fromUTF8(u8"吸附到音階"));
+    dragSnapToScaleToggle_.setTooltip(juce::String::fromUTF8(
+        u8"OpenTune 修音：拖動音符時吸附到當前音階；關閉（預設）：僅吸附到最近半音，可保留和弦外音。"
+        u8"OpenDyne 下由 Pitch Grid 的 Key Scale 直接控制。"));
+    dragSnapToScaleToggle_.setToggleState(dragSnapToScaleEnabled_, juce::dontSendNotification);
+    dragSnapToScaleToggle_.onClick = [this] {
+        dragSnapToScaleEnabled_ = dragSnapToScaleToggle_.getToggleState();
+        if (onDragSnapToScaleChanged)
+            onDragSnapToScaleChanged(dragSnapToScaleEnabled_);
+    };
+    dragSnapToScaleToggle_.setColour(juce::ToggleButton::textColourId, UIColors::textSecondary);
+    contentComponent_.addAndMakeVisible(dragSnapToScaleToggle_);
 }
 
 ParameterPanel::~ParameterPanel()
@@ -833,6 +847,7 @@ int ParameterPanel::layoutContent(int width)
         const int gridBottom = y + gridRows * toolButtonSize + (gridRows - 1) * toolButtonGap;
         pitchGridSelector_.setBounds(contentLeft + 5, gridBottom + 14, contentWidth - 10, 22);
 
+        // OpenDyne：KeyScale 由 Pitch Grid 选择器直接决定，吸附開關不顯示
         return pitchGridSelector_.getBounds().getBottom() + innerPadding;
     }
     else
@@ -858,7 +873,11 @@ int ParameterPanel::layoutContent(int width)
 
         const int gridRows = (static_cast<int>(buttons.size()) + 1) / 2;
         const int gridBottom = y + gridRows * toolButtonSize + (gridRows - 1) * toolButtonGap;
-        return gridBottom + innerPadding;
+
+        // 拖動吸附到音階開關：工具網格下方（OpenTune 修音模式專用，Pitch Grid 選擇器隱藏）
+        dragSnapToScaleToggle_.setBounds(contentLeft + 5, gridBottom + 14, contentWidth - 10, 24);
+
+        return dragSnapToScaleToggle_.getBottom() + innerPadding;
     }
 }
 
@@ -885,6 +904,8 @@ void ParameterPanel::applyTheme()
     pitchGridSelector_.setColour(juce::ComboBox::backgroundColourId, UIColors::backgroundLight);
     pitchGridSelector_.setColour(juce::ComboBox::textColourId, UIColors::textPrimary);
     pitchGridSelector_.setColour(juce::ComboBox::outlineColourId, UIColors::panelBorder);
+
+    dragSnapToScaleToggle_.setColour(juce::ToggleButton::textColourId, UIColors::textSecondary);
 
     resized();
     repaint();
@@ -1036,6 +1057,8 @@ void ParameterPanel::setOpenDyneMode(bool enabled)
     if (volumeEnvelopeToolButton_)       volumeEnvelopeToolButton_->setVisible(enabled);
     if (scissorsToolButton_)             scissorsToolButton_->setVisible(enabled);
     pitchGridSelector_.setVisible(enabled);
+    // OpenTune（選擇器隱藏）才使用「吸附到音階」開關；OpenDyne 由 Pitch Grid 選擇器直接決定
+    dragSnapToScaleToggle_.setVisible(!enabled);
 
     // Time 在两种模式均仅受 experimental 开关控制
     if (timeToolButton_)
@@ -1045,6 +1068,14 @@ void ParameterPanel::setOpenDyneMode(bool enabled)
     refreshLocalizedText();
     resized();
     repaint();
+}
+
+void ParameterPanel::setDragSnapToScaleEnabled(bool enabled)
+{
+    if (dragSnapToScaleEnabled_ == enabled)
+        return;
+    dragSnapToScaleEnabled_ = enabled;
+    dragSnapToScaleToggle_.setToggleState(enabled, juce::dontSendNotification);
 }
 
 void ParameterPanel::setAutoButtonPresentation(const AutoButtonPresentation& presentation)

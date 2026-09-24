@@ -91,6 +91,12 @@ public:
     /** Pitch Grid 全局开关回调：切换 No Snap / Chromatic / Key Scale 吸附模式。 */
     std::function<void(PitchGridMode)> onPitchGridModeChanged;
 
+    /** 拖動音符時「吸附到音階」開關回調（Key Scale 拖拽吸附；全域偏好）。 */
+    std::function<void(bool)> onDragSnapToScaleChanged;
+
+    /** 同步「拖動吸附到音階」開關的顯示狀態（不觸發回調）。 */
+    void setDragSnapToScaleEnabled(bool enabled);
+
     /** 设置 AUTO 按钮的模式显示（OpenTune 主文本 "AUTO"，OpenDyne 主文本 "SNAP"）。
      *  @param presentation 携带 ReferenceAuto 模式时显示 "(Ref)" 副标题。
      */
@@ -195,6 +201,9 @@ private:
     std::unique_ptr<juce::TextButton> pitchShiftButton_;
     // OpenDyne Pitch Grid 全局开关（No Snap / Chromatic / Key Scale）
     juce::ComboBox pitchGridSelector_;
+    /// 拖動音符時吸附到音階的開關（全域偏好，兩種模式均顯示）
+    juce::ToggleButton dragSnapToScaleToggle_;
+    bool dragSnapToScaleEnabled_ = false;
 
     LargeKnobLookAndFeel largeKnobLookAndFeel_;
     juce::Image auroraSidebarSurface_;

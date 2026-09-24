@@ -33,6 +33,7 @@ constexpr const char* kSharedSnapEnabledKey = "shared.snap.enabled";
 constexpr const char* kSharedSnapModeKey = "shared.snap.mode";
 constexpr const char* kSharedTrackColorModeKey = "shared.trackColor.mode";
 constexpr const char* kSharedLightPitchCorrectionEnabledKey = "shared.rendering.lightPitchCorrection";
+constexpr const char* kSharedDragSnapToScaleEnabledKey = "shared.pianoRoll.dragSnapToScale";
 constexpr const char* kSharedF0ModelTypeKey = "shared.f0.modelType";
 constexpr const char* kSharedTimelineDisplayModeKey = "shared.timeline.displayMode";
 constexpr const char* kSharedTuningHzKey = "shared.tuning.hz";
@@ -340,6 +341,9 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     state.shared.lightPitchCorrectionEnabled = properties.getBoolValue(
         kSharedLightPitchCorrectionEnabledKey,
         state.shared.lightPitchCorrectionEnabled);
+    state.shared.dragSnapToScaleEnabled = properties.getBoolValue(
+        kSharedDragSnapToScaleEnabledKey,
+        state.shared.dragSnapToScaleEnabled);
     state.shared.f0ModelType = fromF0ModelTypeToken(
         properties.getValue(kSharedF0ModelTypeKey, toF0ModelTypeToken(state.shared.f0ModelType)));
     state.shared.suppressEqRemoveConfirmation = properties.getBoolValue(
@@ -408,6 +412,8 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
                         state.shared.experimentalFeaturesEnabled);
     properties.setValue(kSharedLightPitchCorrectionEnabledKey,
                         state.shared.lightPitchCorrectionEnabled);
+    properties.setValue(kSharedDragSnapToScaleEnabledKey,
+                        state.shared.dragSnapToScaleEnabled);
     properties.setValue(kSharedF0ModelTypeKey,
                         toF0ModelTypeToken(state.shared.f0ModelType));
     properties.setValue(kSharedEqSuppressRemoveConfirmationKey,
@@ -713,6 +719,13 @@ void AppPreferences::setLightPitchCorrectionEnabled(bool enabled)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     state_.shared.lightPitchCorrectionEnabled = enabled;
+    saveLocked();
+}
+
+void AppPreferences::setDragSnapToScaleEnabled(bool enabled)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    state_.shared.dragSnapToScaleEnabled = enabled;
     saveLocked();
 }
 
