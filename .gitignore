@@ -38,6 +38,9 @@ spike/
 !models/fcpe.onnx
 *.dmg
 
+# Agent skills 安裝器的本機鎖定檔（非專案原始碼）
+skills-lock.json
+
 # macOS metadata
 .DS_Store
 
