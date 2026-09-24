@@ -349,6 +349,9 @@ bool testStaleCompletionCannotPassClearedCacheGeneration()
     if (cache.requeueRunningChunk(
             0, oldPending.targetRevision, oldPending.generation))
         return false;
+    if (cache.markChunkAsBlank(
+            0, oldPending.targetRevision, oldPending.generation))
+        return false;
 
     const auto result = cache.completeChunkRenderWithAudio(
         0, 512, std::vector<float>(512, 0.0f),

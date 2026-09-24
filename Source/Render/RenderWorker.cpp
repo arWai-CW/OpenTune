@@ -217,6 +217,33 @@ void RenderWorker::discardAllStage1Queue()
     cv_.notify_all();
 }
 
+void RenderWorker::discardStage2Queue(ContentKey key)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto it = queue_.begin(); it != queue_.end();)
+    {
+        if (it->kind == RenderJob::Kind::Stage2Rebuild
+            && it->contentKey == key)
+            it = queue_.erase(it);
+        else
+            ++it;
+    }
+    cv_.notify_all();
+}
+
+void RenderWorker::discardAllStage2Queue()
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto it = queue_.begin(); it != queue_.end();)
+    {
+        if (it->kind == RenderJob::Kind::Stage2Rebuild)
+            it = queue_.erase(it);
+        else
+            ++it;
+    }
+    cv_.notify_all();
+}
+
 void RenderWorker::enqueue(RenderJob job)
 {
     {
@@ -343,7 +370,11 @@ void RenderWorker::loop()
                     }
                     else if (job.kind == RenderJob::Kind::Stage2Rebuild)
                     {
-                        hasJob = true;
+                        // Stage2 job 可能在 queue 等待期間遇到 cache clear/
+                        // replan；執行前再次驗證 generation 與 canonical state。
+                        hasJob = job.renderCache != nullptr
+                            && job.cacheGeneration == job.renderCache->getGeneration()
+                            && job.renderCache->isCanonicalSettled();
                     }
                 }
             }

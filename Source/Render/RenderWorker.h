@@ -60,6 +60,8 @@ public:
                                      const std::function<void()>& reconcile);
     void discardStage1Queue(RenderCache* cache);
     void discardAllStage1Queue();
+    void discardStage2Queue(ContentKey key);
+    void discardAllStage2Queue();
     void enqueue(RenderJob job);
     std::size_t getStage1QueueSize() const;
     void beginAsyncJob();

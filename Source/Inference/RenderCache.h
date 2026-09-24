@@ -95,7 +95,7 @@ public:
                              uint64_t runningRevision,
                              uint64_t generation);
 
-    void markChunkAsBlank(int64_t startSample,
+    bool markChunkAsBlank(int64_t startSample,
                           uint64_t revision,
                           uint64_t generation);
 

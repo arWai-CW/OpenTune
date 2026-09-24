@@ -826,7 +826,7 @@ bool RenderCache::isCanonicalSettled() const
     return isCanonicalSettledLocked_();
 }
 
-void RenderCache::markChunkAsBlank(int64_t startSample,
+bool RenderCache::markChunkAsBlank(int64_t startSample,
                                    uint64_t revision,
                                    uint64_t generation) {
     const double startSeconds = projectRenderSeconds(startSample);
@@ -835,23 +835,23 @@ void RenderCache::markChunkAsBlank(int64_t startSample,
         const juce::SpinLock::ScopedLockType guard(lock_);
         auto it = chunks_.find(startSample);
         if (it == chunks_.end()) {
-            return;
+            return false;
         }
 
         auto& chunk = it->second;
 
         if (chunk.generation != generation || generation != generation_)
-            return;
+            return false;
 
         if (chunk.status != Chunk::Status::Running) {
-            return;
+            return false;
         }
 
         if (chunk.runningRevision != revision) {
             AppLogger::log("RenderCache::markChunkAsBlank STALE runningRevision="
                 + juce::String(static_cast<juce::int64>(chunk.runningRevision))
                 + " != revision=" + juce::String(static_cast<juce::int64>(revision)));
-            return;
+            return false;
         }
 
         chunk.status = Chunk::Status::Blank;
@@ -881,6 +881,7 @@ void RenderCache::markChunkAsBlank(int64_t startSample,
     AppLogger::log("RenderCache::markChunkAsBlank start=" + juce::String(startSeconds, 3)
         + " endSampleExclusive=" + juce::String(endSample)
         + " revision=" + juce::String(static_cast<juce::int64>(revision)));
+    return true;
 }
 
 } // namespace OpenTune

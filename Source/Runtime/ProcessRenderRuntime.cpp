@@ -191,7 +191,7 @@ bool preparePublishedAudioFromSynthesis(const FrozenRenderBoundaries& boundaries
 void notifyChunkSettled(const ProcessRenderRuntime::CompletionContext& completion,
                         const RenderJob& job)
 {
-    if (!completion.chunkSettled)
+    if (!completion.gate || !completion.chunkSettled)
         return;
     std::lock_guard<std::mutex> lk(completion.gate->mutex);
     if (!completion.gate->closed)
@@ -207,7 +207,7 @@ void notifyChunkSettled(const ProcessRenderRuntime::CompletionContext& completio
                         std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer,
                         double audioSampleRate)
 {
-    if (!completion.chunkSettled)
+    if (!completion.gate || !completion.chunkSettled)
         return;
     std::lock_guard<std::mutex> lk(completion.gate->mutex);
     if (!completion.gate->closed)
@@ -220,7 +220,7 @@ void notifyChunkSettled(const ProcessRenderRuntime::CompletionContext& completio
 void notifyChunkFailed(const ProcessRenderRuntime::CompletionContext& completion,
                        ContentKey key)
 {
-    if (!completion.chunkFailed)
+    if (!completion.gate || !completion.chunkFailed)
         return;
     std::lock_guard<std::mutex> lk(completion.gate->mutex);
     if (!completion.gate->closed)
@@ -444,7 +444,9 @@ void ProcessRenderRuntime::reconfigureVocoder(const ControlCommand& command)
         std::unique_lock<std::mutex> lock(vocoderMutex_);
 
         if (command.type == ControlCommand::Type::SetVocoderWeight
-            && currentVocoderModelWeight_ == command.weight)
+            && currentVocoderModelWeight_ == command.weight
+            && vocoderDomain_ != nullptr
+            && !vocoderReconfiguring_)
             return;
 
         if (command.type == ControlCommand::Type::SetVocoderWeight)
@@ -786,9 +788,9 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(
-                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
-            notifyChunkSettled(completion, coreJob);
+            if (coreJob.renderCache->markChunkAsBlank(
+                    coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration))
+                notifyChunkSettled(completion, coreJob);
         }
         else
         {
@@ -816,9 +818,9 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(
-                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
-            notifyChunkSettled(completion, coreJob);
+            if (coreJob.renderCache->markChunkAsBlank(
+                    coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration))
+                notifyChunkSettled(completion, coreJob);
         }
         else
         {
@@ -844,9 +846,9 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(
-                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
-            notifyChunkSettled(completion, coreJob);
+            if (coreJob.renderCache->markChunkAsBlank(
+                    coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration))
+                notifyChunkSettled(completion, coreJob);
         }
         else
         {
@@ -871,9 +873,9 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     {
         if (!intersectsActiveEqNote)
         {
-            coreJob.renderCache->markChunkAsBlank(
-                coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration);
-            notifyChunkSettled(completion, coreJob);
+            if (coreJob.renderCache->markChunkAsBlank(
+                    coreJob.startSample, coreJob.targetRevision, coreJob.cacheGeneration))
+                notifyChunkSettled(completion, coreJob);
         }
         else
         {

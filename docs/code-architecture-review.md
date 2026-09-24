@@ -179,14 +179,14 @@ PianoRoll 的 source、output、timeline、pixel 映射集中在 `PianoRollTimeM
 
 Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容字段都恢复到对应 owner 的 `ContentState`。`contentRevision` 和 `audioRevision` 不从归档恢复，新内容身份从 1 开始；ARA 另外保存并恢复 `notesRevision`、`pitchRevision`、`timeGridRevision` 及分析相关 revision，Standalone 也恢复 `referenceFeatures.analysisRevision`。不额外生成运行时 revision 账本。跨采样率 buffer 长度由源 sample 数和源/目标采样率一次投影得到；不得从投影后的 buffer 长度反算源内容秒数。
 
-當前啟用測試預設關閉；打開 `OPENTUNE_BUILD_TESTS` 後有 10 個測試目標：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests`、`ContentRenderRoutingTests` 和 `ContentRenderServiceTests`。`ContentRenderServiceTests` 覆蓋無 usable F0 時只發布 playback source、playback-only republish 不啟動 Stage1、TimeGrid derived-output invalidation、local invalidation 的實體 queue 邊界、canonical settlement，以及只有非 ARA content 會啟動 Stage2；`ReferenceTrackRegistryTests` 與 `ContentRenderRoutingTests` 維持既有 reference routing 契約。最近一次 CMake/Ninja 建置中，VST3/Standalone target 和 10/10 CTest 均通過。
+當前啟用測試預設關閉；打開 `OPENTUNE_BUILD_TESTS` 後有 10 個測試目標：`AutoTunePitchShifterTests`、`PitchParameterContractTests`、`PitchLaneVisualPolicyTests`、`Vst3ProcessorStateCodecTests`、`StandaloneProcessorStateCodecTests`、`CapturePersistenceTests`、`ContentSnapshotProjectionTests`、`ReferenceTrackRegistryTests`、`ContentRenderRoutingTests` 和 `ContentRenderServiceTests`。`ContentRenderServiceTests` 覆蓋無 usable F0 時只發布 playback source、playback-only republish 不啟動 Stage1、TimeGrid derived-output invalidation、local invalidation 的實體 queue 邊界、canonical settlement、只有非 ARA content 會啟動 Stage2、stale generation/blank completion、TimeStretch clear ABA，以及 service shutdown wakeup；`ReferenceTrackRegistryTests` 與 `ContentRenderRoutingTests` 維持既有 reference routing 契約。最近一次 CMake/Ninja 建置中，VST3/Standalone target 和 10/10 CTest 均通過。
 
 ## 3. 已完成的边界收敛
 
 当前代码已具备以下边界：
 
-1. `Stage2TimeStretchRebuilder` 不再构造缺少 snapshot 的临时 `PlaybackReadSource`；canonical Stage1 读取只接收 job 固定的 source PCM 和 `RenderCache`。
-2. Stage2 提交前同时校验已发布 snapshot 的 `contentRevision`、`timeGridRevision`、`audioRevision` 和 audio buffer identity；`TimeStretchCache` 仍以 `(contentRevision, timeGridRevision)` 为唯一版本键。
+1. `Stage2TimeStretchRebuilder` 不再構造缺少 snapshot 的臨時 `PlaybackReadSource`；canonical Stage1 讀取只接收 job 固定的 source PCM 和 `RenderCache`。
+2. Stage2 job 帶入 `RenderCache` generation；invalidate／clear／remove 會丟棄待處理 Stage2 queue，worker 執行前與 rebuild 完成前都會重新驗證 generation、canonical settled、published revisions 和 source identity。`TimeStretchCache` 仍以 `(contentRevision, timeGridRevision)` 為版本 key，並以 invalidation generation 拒絕舊 build。
 3. 局部 Stage1 编辑会为未受影响的 pending/running chunk 继承新的 `contentRevision`，避免 prepared overlay 跳过该 chunk 后回退到 dry。
 4. Standalone、Capture 的非恒等 TimeGrid 经过 canonical-settled gate 进入 Stage2；ARA 只接受 identity TimeGrid，对非恒等 TimeGrid 显式拒绝，且不进入 Stage2。
 5. `PluginProcessor` 的 ARA/Capture 分支在最终输出后发布频谱；Standalone placement 的 PianoRoll projection、ARA 非零 source window projection 和 TrimLeft output/source 映射已按各自坐标合同修正。
@@ -207,6 +207,8 @@ Standalone、Capture、ARA 保留各自的 archive/container 格式，但内容�
 20. `ContentRenderService` 內部處理 playback publication、usable-F0 gate、Stage1 reconcile、canonical settlement、Stage2 domain policy 與 derived cache lifecycle；Stage1 executor 是唯一外部 execution seam。
 21. `RenderWorker` 的 Stage1 queue 以 `(RenderCache*, chunk start)` index 查找、排序與去重，local revision 更新不再對整個 deque 做巢狀線性掃描。
 22. `ContentRenderService::Metrics` 提供 invalidation、affected/queued chunks、Stage2、settlement、retry 與 async completion 基線；新增 `ContentRenderServiceTests` 鎖定 interface 行為。
+23. `ProcessRenderRuntime` 只有在 `RenderCache::markChunkAsBlank()` 實際接受 revision/generation 後才回報 settled；completion gate 缺失時安全忽略 callback。相同 vocoder weight 在前次 model creation 失敗後仍允許重試。
+24. `ContentRenderService::requeueRenderChunk()` 以 published source 的 `RenderCache` identity 和 cache state machine 判定 job；local disjoint edit 不會因 snapshot revision 差異而把 chunk 永久留在 `Running`。
 
 ## 4. 剩余问题
 

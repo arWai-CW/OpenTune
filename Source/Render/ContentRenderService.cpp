@@ -355,6 +355,7 @@ void ContentRenderService::invalidateContentArtifacts(ContentKey key)
     if (auto renderCache = impl_->renderCaches.get(key))
     {
         impl_->renderWorker.discardStage1Queue(renderCache.get());
+        impl_->renderWorker.discardStage2Queue(key);
         renderCache->clear();
     }
     impl_->timeStretchCache.invalidate(key);
@@ -366,6 +367,7 @@ void ContentRenderService::invalidateContentArtifacts(ContentKey key)
 void ContentRenderService::invalidateAllContentArtifacts()
 {
     impl_->renderWorker.discardAllStage1Queue();
+    impl_->renderWorker.discardAllStage2Queue();
     impl_->renderCaches.invalidateAll();
     impl_->timeStretchCache.clear();
     impl_->stage1QueuedChunks.store(0, std::memory_order_relaxed);
@@ -376,6 +378,7 @@ void ContentRenderService::removeContent(ContentKey key)
 {
     if (auto renderCache = impl_->renderCaches.get(key))
         impl_->renderWorker.discardStage1Queue(renderCache.get());
+    impl_->renderWorker.discardStage2Queue(key);
     impl_->stage1QueuedChunks.store(
         impl_->renderWorker.getStage1QueueSize(), std::memory_order_relaxed);
     impl_->playbackSources.remove(key);
@@ -443,6 +446,7 @@ void ContentRenderService::executeRenderJob(RenderJob& job)
 
         Stage2TimeStretchRebuilder::Request request;
         request.contentKey = job.contentKey;
+        request.cacheGeneration = job.cacheGeneration;
         request.contentSnapshot = std::move(job.contentSnapshot);
         request.audioBuffer = std::move(job.audioBuffer);
         request.audioSampleRate = job.audioSampleRate;
@@ -489,6 +493,8 @@ bool ContentRenderService::enqueueStage2RebuildWhenCanonicalSettled(
     RenderJob job;
     job.kind = RenderJob::Kind::Stage2Rebuild;
     job.contentKey = key;
+    job.renderCache = renderCache;
+    job.cacheGeneration = renderCache->getGeneration();
     job.contentSnapshot = std::move(contentSnapshot);
     job.audioBuffer = std::move(audioBuffer);
     job.audioSampleRate = audioSampleRate;
@@ -521,9 +527,7 @@ void ContentRenderService::requeueRenderChunk(const RenderJob& job)
     if (!impl_->playbackSources.get(job.contentKey, current)
         || current.contentSnapshot == nullptr
         || current.audioBuffer == nullptr
-        || job.contentSnapshot == nullptr
-        || current.contentSnapshot->contentRevision
-               != job.contentSnapshot->contentRevision)
+        || current.renderCache != job.renderCache)
         return;
 
     if (job.renderCache->requeueRunningChunk(
@@ -573,6 +577,7 @@ TimeStretchCache& ContentRenderService::getTimeStretchCacheForStage2() noexcept
 void ContentRenderService::clearAll()
 {
     impl_->renderWorker.discardAllStage1Queue();
+    impl_->renderWorker.discardAllStage2Queue();
     impl_->playbackSources.clear();
     impl_->renderCaches.clear();
     impl_->stretchers.clear();

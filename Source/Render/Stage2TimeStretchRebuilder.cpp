@@ -35,6 +35,11 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
     }
 
     const auto& snapshot = *request.contentSnapshot;
+    const auto stage1RenderCache = crs.getRenderCacheForStage2(contentKey);
+    if (stage1RenderCache == nullptr
+        || stage1RenderCache->getGeneration() != request.cacheGeneration
+        || !stage1RenderCache->isCanonicalSettled())
+        return false;
 
     // 同 revision 的合法 republish 会换 snapshot 指针，指针相等不是新鲜度判据。
     // 只比较 CRS 已发布 snapshot 的 revision；getPlaybackReadSource 成功即遵守
@@ -46,6 +51,7 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
             && published.contentSnapshot->contentRevision == snapshot.contentRevision
             && published.contentSnapshot->timeGridRevision == snapshot.timeGridRevision
             && published.contentSnapshot->audioRevision == snapshot.audioRevision
+            && published.renderCache == stage1RenderCache
             && published.audioBuffer == request.audioBuffer;
     };
 
@@ -63,8 +69,6 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
 
     auto schedule = stretcher->buildTempoScheduleFromTimeGrid(*snapshot.timeGrid);
     stretcher->beginRebuild(schedule);
-
-    const auto stage1RenderCache = crs.getRenderCacheForStage2(contentKey);
 
     const int totalSamples = request.audioBuffer->getNumSamples();
     constexpr int kBlock = 4096;
@@ -127,7 +131,8 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
     const uint64_t contentRev = snapshot.contentRevision;
     const uint64_t timeGridRev = snapshot.timeGridRevision;
 
-    if (!isCurrentPublishedRequest())
+    if (stage1RenderCache->getGeneration() != request.cacheGeneration
+        || !isCurrentPublishedRequest())
         return false;
 
     crs.getTimeStretchCacheForStage2().store(contentKey,

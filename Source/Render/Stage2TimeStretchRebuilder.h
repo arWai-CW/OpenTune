@@ -3,6 +3,7 @@
 #include "../Content/ContentKey.h"
 #include "../Content/EditableContentSnapshot.h"
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <cstdint>
 #include <memory>
 
 namespace OpenTune {
@@ -23,6 +24,7 @@ struct Stage2TimeStretchRebuilder
     struct Request
     {
         ContentKey contentKey;
+        uint64_t cacheGeneration{0};
         std::shared_ptr<const EditableContentSnapshot> contentSnapshot;
         std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer;
         double audioSampleRate{0.0};
