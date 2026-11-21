@@ -106,6 +106,7 @@ public:
     explicit AppPreferences(const StorageOptions& storageOptions);
 
     static bool readAraF0AnalysisCacheEnabledFromDisk();
+    static juce::String readCustomModelsDirectoryFromDisk();
     static juce::File getStorageDirectory();
 
     AppPreferencesState getState() const;
@@ -150,6 +151,8 @@ public:
 
     void setF0ModelType(F0ModelType type);
     F0ModelType getF0ModelType() const;
+    juce::String getCustomModelsDirectory() const;
+    bool setCustomModelsDirectory(const juce::String& directory);
 
     void setGridStyle(PianoGridStyle gridStyle);
     PianoGridStyle getGridStyle() const;

@@ -249,6 +249,35 @@ public:
         initialiseComboBox(f0ModelSelector_);
         addAndMakeVisible(f0ModelSelector_);
 
+#if !JUCE_IOS
+        initialiseLabel(modelDirectoryPath_, {});
+        initialiseLabel(modelDirectoryHint_, LOC(kModelsFolderRestart));
+        chooseModelDirectory_.setButtonText(LOC(kModelsFolder));
+        resetModelDirectory_.setButtonText(LOC(kResetToDefaults));
+        chooseModelDirectory_.onClick = [this] {
+            chooser_ = std::make_unique<juce::FileChooser>(
+                LOC(kModelsFolder), juce::File(ModelPathResolver::getModelsDirectory()));
+            chooseModelDirectory_.setEnabled(false);
+            chooser_->launchAsync(juce::FileBrowserComponent::openMode
+                                      | juce::FileBrowserComponent::canSelectDirectories,
+                                  [self = juce::Component::SafePointer<SharedAudioPage>(this)](
+                                      const juce::FileChooser& chooser) {
+                if (self == nullptr)
+                    return;
+                self->chooseModelDirectory_.setEnabled(true);
+                const auto directory = chooser.getResult();
+                if (directory.isDirectory())
+                    self->saveModelDirectory(directory.getFullPathName());
+            });
+        };
+        resetModelDirectory_.onClick = [this] { saveModelDirectory({}); };
+        addAndMakeVisible(modelDirectoryPath_);
+        addAndMakeVisible(modelDirectoryHint_);
+        addAndMakeVisible(chooseModelDirectory_);
+        addAndMakeVisible(resetModelDirectory_);
+        refreshModelDirectory();
+#endif
+
         initialiseToggleButton(araF0AnalysisCacheToggle_);
         araF0AnalysisCacheToggle_.setButtonText(LOC(kAraF0AnalysisCache));
         araF0AnalysisCacheToggle_.setToggleState(state.shared.araF0AnalysisCacheEnabled,
@@ -314,6 +343,9 @@ public:
             const int gaps = 8 * (rows - 1) + (isVst3Plugin_ ? 0 : 4); // 行间 8px；实验模式下额外 hint 前 4px
             const int hintHeight = isVst3Plugin_ ? 0 : 42;
             contentHeight_ = vPad + rowH + 8 + rows * rowH + gaps + hintHeight;
+#if !JUCE_IOS
+            contentHeight_ += 8 + rowH + 22;
+#endif
         }
     }
 
@@ -343,6 +375,17 @@ public:
         f0ModelLabel_.setBounds(row.removeFromLeft(labelWidth));
         f0ModelSelector_.setBounds(row.removeFromLeft(selectorWidth).reduced(0, 4));
 
+#if !JUCE_IOS
+        bounds.removeFromTop(8);
+        row = bounds.removeFromTop(rowHeight);
+        chooseModelDirectory_.setBounds(row.removeFromLeft(labelWidth).reduced(0, 4));
+        row.removeFromLeft(8);
+        resetModelDirectory_.setBounds(row.removeFromRight(128).reduced(0, 4));
+        row.removeFromRight(8);
+        modelDirectoryPath_.setBounds(row);
+        modelDirectoryHint_.setBounds(bounds.removeFromTop(22));
+#endif
+
         bounds.removeFromTop(8);
         row = bounds.removeFromTop(rowHeight);
         araF0AnalysisCacheToggle_.setBounds(row.removeFromLeft(labelWidth + selectorWidth + 80));
@@ -362,6 +405,29 @@ public:
     }
 
 private:
+#if !JUCE_IOS
+    void refreshModelDirectory()
+    {
+        const auto custom = appPreferences_.getCustomModelsDirectory();
+        const auto shownPath = custom.isNotEmpty()
+            ? custom
+            : juce::String(ModelPathResolver::getModelsDirectory());
+        modelDirectoryPath_.setText(shownPath, juce::dontSendNotification);
+        modelDirectoryPath_.setTooltip(shownPath);
+        resetModelDirectory_.setEnabled(custom.isNotEmpty());
+    }
+
+    void saveModelDirectory(const juce::String& directory)
+    {
+        if (appPreferences_.setCustomModelsDirectory(directory)) {
+            refreshModelDirectory();
+            return;
+        }
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                              LOC(kModelsFolder), LOC(kModelsFolderSaveFailed));
+    }
+#endif
+
     AppPreferences& appPreferences_;
     ProcessingPreferenceRuntimeOperations runtimeOperations_;
     std::function<void()> onPreferencesChanged_;
@@ -374,6 +440,13 @@ private:
     juce::TextButton replayOnboardingButton_;
     juce::Label f0ModelLabel_;
     a11y::AccessibleComboBox f0ModelSelector_;
+#if !JUCE_IOS
+    juce::Label modelDirectoryPath_;
+    juce::Label modelDirectoryHint_;
+    juce::TextButton chooseModelDirectory_;
+    juce::TextButton resetModelDirectory_;
+    std::unique_ptr<juce::FileChooser> chooser_;
+#endif
     a11y::AccessibleToggleButton araF0AnalysisCacheToggle_;
     a11y::AccessibleToggleButton experimentalFeaturesToggle_;
     juce::Label experimentalFeaturesHintLabel_;

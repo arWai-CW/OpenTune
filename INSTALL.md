@@ -25,6 +25,10 @@
 
 ## 运行时文件结构（Windows）
 
+桌面版可在 **偏好设置 → 音频 → 选择模型文件夹** 指定包含模型文件（如
+`fcpe.onnx`、`hifigan.onnx`）的目录，Standalone 和插件共用此设置。
+修改后重启 OpenTune 或 DAW；点击 **恢复默认设置** 可恢复自动查找。
+
 ```
 OpenTune/
 ├── OpenTune.exe
