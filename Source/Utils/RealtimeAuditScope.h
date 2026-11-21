@@ -1,5 +1,8 @@
 #pragma once
 
+// Visual Studio may force-include this for C sources in a mixed target.
+#ifdef __cplusplus
+
 #include <cstddef>
 #include <cstdint>
 
@@ -141,3 +144,5 @@ void recordSpinLockWait() noexcept;
     #define OPENTUNE_REALTIME_AUDIT_SPIN_WAIT() \
         ::OpenTune::RealtimeAudit::recordSpinLockWait()
 #endif
+
+#endif // __cplusplus
