@@ -2032,6 +2032,89 @@ Shifter::OctaveRepairResult runFixedToneOctaveRepair(float detectorPeriod)
         detected.data(), kNumSamples, false);
 }
 
+void testStereoChannelsShareRepairedTimeline()
+{
+    constexpr int sampleRate = 44100;
+    constexpr int numSamples = 32768;
+    constexpr int history = OpenTune::AutoTunePeriodDetector::kRequiredLookbehindSamples
+        + Shifter::kLookaheadSamples + 2;
+    constexpr float original = 220.0f;
+    const int total = history + numSamples + Shifter::kLookaheadSamples;
+    std::vector<float> left(total), right(total), sum(total), silence(total, 0.0f);
+    for (int i = 0; i < total; ++i) {
+        const double phase = kTwoPi * original * (i - history) / sampleRate;
+        const double delayed = phase - kTwoPi * original * 7.0 / sampleRate;
+        left[i] = static_cast<float>(0.4 * std::sin(phase) + 0.1 * std::sin(2 * phase));
+        right[i] = static_cast<float>(0.25 * std::sin(delayed) + 0.15 * std::sin(3 * delayed));
+        sum[i] = left[i] + right[i];
+    }
+    const auto detected = OpenTune::AutoTunePeriodDetector::analyze(
+        left.data(), history, left.data() + history, numSamples,
+        sampleRate, &original, 1, 100.0);
+    for (bool snap : {false, true}) for (double cents : {-25.0, 25.0})
+        for (bool wrongOctave : {false, true}) {
+            auto periods = detected;
+            if (wrongOctave)
+                for (auto& period : periods) period.periodSamples *= 2.0f;
+            const float target = static_cast<float>(original * std::exp2(cents / 1200.0));
+            Shifter first(sampleRate);
+            const auto shared = first.shiftChunkWithOctaveRepair(
+                left.data() + history, numSamples, &original, &target, 1, 100.0, 0.0,
+                left.data() + history + numSamples, Shifter::kLookaheadSamples,
+                left.data(), history, periods.data(), numSamples, snap, true);
+            expectTrue(shared.success, "stereo: reference channel repair succeeds");
+            if (!shared.success) continue;
+            expectTrue(shared.detectorPeriods.size() == detected.size(),
+                       "stereo: accepted repair exposes the shared period timeline");
+            const auto renderShared = [&](const std::vector<float>& input, float corrected, int n) {
+                Shifter shifter(sampleRate);
+                return shifter.shiftChunkWithSharedPeriods(
+                    input.data() + history, n, &corrected, 1, 100.0, 0.0,
+                    input.data() + history + numSamples, Shifter::kLookaheadSamples,
+                    input.data(), history, shared, snap);
+            };
+            const auto leftAgain = renderShared(left, target, numSamples);
+            const auto stereoRight = renderShared(right, target, numSamples);
+            const auto shiftedSum = renderShared(sum, target, numSamples);
+            const auto shiftedSilence = renderShared(silence, target, numSamples);
+            Shifter independent(sampleRate);
+            const auto expectedRight = independent.shiftChunk(
+                right.data() + history, numSamples, &original, &target, 1, 100.0, 0.0,
+                right.data() + history + numSamples, Shifter::kLookaheadSamples,
+                right.data(), history, shared.detectorPeriods.data(), numSamples, snap);
+            expectTrue(leftAgain == shared.audio, "stereo: mono reference audio is unchanged");
+            expectTrue(stereoRight == expectedRight, "stereo: right channel uses its own source content");
+            expectTrue(stereoRight != shared.audio, "stereo: distinct channels do not collapse to mono");
+            expectTrue(shiftedSum.size() == numSamples && shiftedSilence.size() == numSamples,
+                       "stereo: shared-period renders preserve length");
+            if (shiftedSum.size() != numSamples || stereoRight.size() != numSamples
+                || shiftedSilence.size() != numSamples) continue;
+            double alignmentError = 0.0;
+            for (int i = 0; i < numSamples; ++i) {
+                alignmentError = std::max(alignmentError, std::abs(
+                    static_cast<double>(shiftedSum[i]) - shared.audio[i] - stereoRight[i]));
+                expectTrue(shiftedSilence[i] == 0.0f, "stereo: a silent channel stays silent");
+            }
+            expectTrue(alignmentError < 2e-6,
+                       "stereo: shared rendering is linear through every cycle jump and crossfade");
+            expectTrue(renderShared(right, target, 0).empty(), "stereo: empty input stays empty");
+            expectTrue(renderShared(right, original * 2.0f, numSamples).empty(),
+                       "stereo: another channel's contract failure rejects the render");
+        }
+    Shifter shifter(sampleRate);
+    const Shifter::OctaveRepairResult failed;
+    expectTrue(shifter.shiftChunkWithSharedPeriods(
+        right.data() + history, numSamples, &original, 1, 100.0, 0.0,
+        nullptr, 0, right.data(), history, failed, false).empty(),
+        "stereo: failed shared repair cannot render another channel");
+    Shifter::OctaveRepairResult missing;
+    missing.success = true;
+    expectTrue(shifter.shiftChunkWithSharedPeriods(
+        right.data() + history, numSamples, &original, 1, 100.0, 0.0,
+        nullptr, 0, right.data(), history, missing, false).empty(),
+        "stereo: missing shared periods reject another channel");
+}
+
 // Detector locked an octave too low: period 400 is 2P for a 220 Hz tone.
 // Repair must halve it and render the corrected 220 Hz target, never 440 Hz.
 void testOctaveRepairScalesDoublePeriod()
@@ -2601,6 +2684,7 @@ int main()
     testLowFrequencyHoldRejectsUnverifiableTarget();
     testLightPitchRoutingBounds();
     testShiftChunkSkipsStaleHeldPeriodForRateContract();
+    testStereoChannelsShareRepairedTimeline();
 
     if (g_failures == 0) {
         std::printf("All AutoTunePitchShifter tests passed.\n");

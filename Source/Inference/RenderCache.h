@@ -84,10 +84,12 @@ public:
         MemoryLimitExceeded
     };
 
+    // Audio is planar, with one contiguous sample span per channel.
     ChunkRenderResult completeChunkRenderWithAudio(int64_t startSample,
                                                     int64_t endSampleExclusive,
                                                     std::vector<float>&& audio,
-                                                    uint64_t revision);
+                                                    uint64_t revision,
+                                                    int numChannels = 1);
 
     bool completeChunkRenderFailure(int64_t startSample, uint64_t revision);
     bool markFailureNotificationForContentRevision(uint64_t contentRevision);
@@ -253,13 +255,15 @@ private:
     void fillCanonicalContextFromNative(std::vector<float>& context,
                                         int64_t globalBegin,
                                         int64_t globalEnd,
-                                        int64_t contextGlobalBegin);
+                                        int64_t contextGlobalBegin,
+                                        int channel);
     std::vector<float> resampleCanonicalRange(
         const PublishedRenderSnapshot& canonicalSnapshot,
         const PlaybackSampleGeometry::SampleSpan& support,
         int64_t targetBegin,
         int outputLength,
-        double targetSampleRate);
+        double targetSampleRate,
+        int channel);
     // Settled check callable only when lock_ is already held (avoids recursive lock).
     bool isCanonicalSettledLocked_() const;
 
