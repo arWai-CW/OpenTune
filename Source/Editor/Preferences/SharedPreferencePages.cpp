@@ -260,10 +260,10 @@ public:
             chooser_ = std::make_unique<juce::FileChooser>(
                 LOC(kModelsFolder), initialFolder);
             chooseModelDirectory_.setEnabled(false);
+            const juce::Component::SafePointer<SharedAudioPage> self(this);
             chooser_->launchAsync(juce::FileBrowserComponent::openMode
                                       | juce::FileBrowserComponent::canSelectDirectories,
-                                  [self = juce::Component::SafePointer<SharedAudioPage>(this)](
-                                      const juce::FileChooser& chooser) {
+                                  [self](const juce::FileChooser& chooser) {
                 if (self == nullptr)
                     return;
                 self->chooseModelDirectory_.setEnabled(true);
