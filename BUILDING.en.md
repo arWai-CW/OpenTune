@@ -219,6 +219,26 @@ OpenTune/
 
 ## Build Commands
 
+### Updating the upstream-based fork
+
+`personal/upstream-based` tracks upstream `standalone` plus the fork's
+independent feature patches. To sync, make an integration branch from
+`origin/personal/upstream-based`, fetch upstream `standalone`, and merge it there:
+
+```sh
+git fetch origin personal/upstream-based
+git switch -c sync/upstream FETCH_HEAD
+git fetch https://github.com/YuFeng926/OpenTune.git standalone
+git merge --no-ff FETCH_HEAD
+```
+
+Review any conflicts against the feature PRs rather than importing the old
+fork's UI. Push the integration branch and open a PR into
+`personal/upstream-based` instead of updating that branch directly.
+The Windows check builds the ARA-enabled VST3 and runs focused AutoTune and
+playback-cache tests. It does not sign, package, or publish a release, and it
+does not replace testing in a DAW.
+
 **Windows (Visual Studio + CMake)**
 
 ```powershell

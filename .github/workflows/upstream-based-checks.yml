@@ -1,0 +1,43 @@
+name: Upstream-based checks
+
+on:
+  pull_request:
+    branches: [personal/upstream-based]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-based-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  vst3:
+    name: Windows VST3 and focused tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download pinned dependencies
+        shell: powershell
+        run: scripts/github_actions/fetch-windows-deps.ps1
+
+      - name: Configure
+        run: cmake --preset windows-ara-vs2022 -DOPENTUNE_BUILD_TESTS=ON
+
+      - name: Build
+        run: >-
+          cmake --build --preset windows-ara-release
+          --target OpenTune_VST3 OpenTuneAutoTuneTests OpenTunePlaybackCacheRealtimeTests
+
+      - name: Test
+        run: >-
+          ctest --test-dir build-ara-overlay-vs18-clean -C Release
+          --output-on-failure --no-tests=error
+          -R '^(AutoTunePitchShifterTests|PlaybackCacheRealtimeTests)$'
