@@ -55,6 +55,7 @@ public:
 
     struct OctaveRepairResult {
         std::vector<float> audio;
+        std::vector<AutoTunePeriodDetector::DetectedPeriod> detectorPeriods;
         bool success = false;
         int octave = 0;
         double targetErrorCents = 0.0;
@@ -82,6 +83,16 @@ public:
         const AutoTunePeriodDetector::DetectedPeriod* detectorPeriods,
         int numDetectorSamples,
         bool snapMode) const;
+
+    /// Render another channel on the accepted channel's exact read/fade timeline.
+    /// No channel-local octave selection is performed. Failed or missing shared
+    /// evidence returns an empty vector; contract-hold failures still reject audio.
+    std::vector<float> shiftChunkWithSharedPeriods(
+        const float* input, int numSamples, const float* correctedF0,
+        int numF0Frames, double f0FrameRate, double firstSampleFramePhase,
+        const float* lookahead, int numLookaheadSamples,
+        const float* lookbehind, int numLookbehindSamples,
+        const OctaveRepairResult& shared, bool snapMode);
 
 private:
     std::vector<float> shiftChunkInternal(

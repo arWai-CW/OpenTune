@@ -26,6 +26,7 @@ public:
         int64_t startSample{0};
         int64_t endSampleExclusive{0};
         std::shared_ptr<const std::vector<float>> audio;
+        int numChannels{1}; // Planar PCM; each channel spans the chunk's sample range.
 
         enum class Status : uint8_t {
             Idle,    // 无待处理渲染需求
@@ -80,7 +81,8 @@ public:
                                                     int64_t endSampleExclusive,
                                                     std::vector<float>&& audio,
                                                     uint64_t revision,
-                                                    uint64_t generation);
+                                                    uint64_t generation,
+                                                    int numChannels = 1);
 
     bool completeChunkRenderFailure(int64_t startSample,
                                     uint64_t revision,
@@ -161,6 +163,7 @@ private:
         int64_t startSample{0};
         int64_t endSampleExclusive{0};
         std::shared_ptr<const std::vector<float>> audio;
+        int numChannels{1};
         uint64_t contentRevision{0};    // 生成该 chunk 音频时的 snapshot contentRevision（唯一复用/覆盖版本键）
     };
 
@@ -175,6 +178,7 @@ private:
         int64_t startSample{0};
         int64_t endSampleExclusive{0};
         std::shared_ptr<const std::vector<float>> audio;
+        int numChannels{1};
         uint64_t sourceRevision{0};  // 该 prepared 结果所基于的 canonical contentRevision
     };
 

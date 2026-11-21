@@ -370,6 +370,23 @@ std::vector<float> AutoTunePitchShifter::shiftChunkInternal(
     return output;
 }
 
+std::vector<float> AutoTunePitchShifter::shiftChunkWithSharedPeriods(
+    const float* input, int numSamples, const float* correctedF0,
+    int numF0Frames, double f0FrameRate, double firstSampleFramePhase,
+    const float* lookahead, int numLookaheadSamples,
+    const float* lookbehind, int numLookbehindSamples,
+    const OctaveRepairResult& shared, bool snapMode)
+{
+    if (!shared.success || numSamples <= 0
+        || shared.detectorPeriods.size() < static_cast<size_t>(numSamples))
+        return {};
+    return shiftChunkInternal(
+        input, numSamples, nullptr, correctedF0, numF0Frames,
+        f0FrameRate, firstSampleFramePhase, lookahead, numLookaheadSamples,
+        lookbehind, numLookbehindSamples, shared.detectorPeriods.data(),
+        static_cast<int>(shared.detectorPeriods.size()), snapMode, false);
+}
+
 AutoTunePitchShifter::OctaveRepairResult
 AutoTunePitchShifter::shiftChunkWithOctaveRepair(
     const float* input, int numSamples,
@@ -595,6 +612,7 @@ AutoTunePitchShifter::shiftChunkWithOctaveRepair(
     if (!baselineAudio.empty() && !baselineMetrics.hasAnomaly
         && !sourceOctaveAnomaly) {
         result.audio = baselineAudio;
+        result.detectorPeriods.assign(detectorPeriods, detectorPeriods + numDetectorSamples);
         result.success = true;
         result.octave = 0;
         result.targetErrorCents = baselineMetrics.targetErrorCents;
@@ -722,6 +740,7 @@ AutoTunePitchShifter::shiftChunkWithOctaveRepair(
             hasAccepted = true;
             acceptedScore = score;
             accepted.audio = std::move(audio);
+            accepted.detectorPeriods = std::move(periods);
             accepted.success = true;
             accepted.octave = octave;
             accepted.targetErrorCents = metrics.targetErrorCents;

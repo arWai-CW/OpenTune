@@ -271,12 +271,9 @@ bool chunkIntersectsActiveEqNote(const std::vector<Note>& notes,
     return false;
 }
 
-RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
-    RenderCache& renderCache,
+void applyPerNoteEq(
     const FrozenRenderBoundaries& boundaries,
-    std::vector<float> audio,
-    uint64_t revision,
-    uint64_t generation,
+    float* audio,
     const std::vector<Note>& notes)
 {
     for (const auto& note : notes)
@@ -308,14 +305,14 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
 
         if (!fadeIn && !fadeOut)
         {
-            float* channelData[1] = { audio.data() + audioOffset };
+            float* channelData[1] = { audio + audioOffset };
             juce::AudioBuffer<float> noteBuffer(channelData, 1, noteSampleCount);
             processor.process(noteBuffer);
             continue;
         }
 
         std::vector<float> filtered(static_cast<size_t>(noteSampleCount));
-        std::copy_n(audio.data() + audioOffset, noteSampleCount, filtered.data());
+        std::copy_n(audio + audioOffset, noteSampleCount, filtered.data());
         float* filteredData[1] = { filtered.data() };
         juce::AudioBuffer<float> filteredBuffer(filteredData, 1, noteSampleCount);
         processor.process(filteredBuffer);
@@ -346,10 +343,23 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
             audio[audioOffset + static_cast<size_t>(i)] = dry + (wet - dry) * wetMix;
         }
     }
+}
 
+RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
+    RenderCache& renderCache,
+    const FrozenRenderBoundaries& boundaries,
+    std::vector<float> audio,
+    uint64_t revision,
+    uint64_t generation,
+    const std::vector<Note>& notes,
+    int numChannels = 1)
+{
+    for (int channel = 0; channel < numChannels; ++channel)
+        applyPerNoteEq(boundaries,
+                       audio.data() + static_cast<size_t>(channel) * boundaries.publishSampleCount, notes);
     return renderCache.completeChunkRenderWithAudio(
         boundaries.trueStartSample, boundaries.trueEndSample,
-        std::move(audio), revision, generation);
+        std::move(audio), revision, generation, numChannels);
 }
 
 } // namespace
@@ -783,8 +793,31 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     detectorNumSamples,
                     snapMode);
 
+                const int numChannels = coreJob.audioBuffer->getNumChannels();
+                auto shiftedAudio = std::move(repair.audio);
+                if (repair.success && shiftedAudio.size() == static_cast<size_t>(boundaries.publishSampleCount))
+                {
+                    for (int channel = 1; channel < numChannels; ++channel)
+                    {
+                        const float* source = coreJob.audioBuffer->getReadPointer(channel);
+                        AutoTunePitchShifter channelShifter(RenderCache::kSampleRate);
+                        auto channelAudio = channelShifter.shiftChunkWithSharedPeriods(
+                            source + boundaries.trueStartSample, detectorNumSamples,
+                            autoTuneTargetF0.data(), safeNumF0Frames, f0FrameRate, firstSampleFramePhase,
+                            source + boundaries.trueEndSample, shifterLookaheadSamples,
+                            source + boundaries.trueStartSample - shifterLookbehindSamples,
+                            shifterLookbehindSamples, repair, snapMode);
+                        if (channelAudio.size() != static_cast<size_t>(boundaries.publishSampleCount))
+                        {
+                            repair.success = false;
+                            break;
+                        }
+                        shiftedAudio.insert(shiftedAudio.end(), channelAudio.begin(), channelAudio.end());
+                    }
+                }
+
                 if (!repair.success
-                    || repair.audio.size() != static_cast<size_t>(boundaries.publishSampleCount))
+                    || shiftedAudio.size() != static_cast<size_t>(boundaries.publishSampleCount) * numChannels)
                 {
                     AppLogger::warn("RenderWorker: AutoTune pitch-shift contract not met, falling through to vocoder (startSample="
                         + juce::String(boundaries.trueStartSample)
@@ -796,9 +829,9 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                 {
                     const uint64_t objectId = coreJob.contentKey.objectId;
                     const auto result = publishChunkWithPerNoteEq(
-                        *coreJob.renderCache, boundaries, std::move(repair.audio),
+                        *coreJob.renderCache, boundaries, std::move(shiftedAudio),
                         coreJob.targetRevision, coreJob.cacheGeneration,
-                        contentSnap->notes);
+                        contentSnap->notes, numChannels);
 
                     if (result == RenderCache::ChunkRenderResult::InvalidInput)
                     {
