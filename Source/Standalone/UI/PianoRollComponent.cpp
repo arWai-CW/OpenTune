@@ -3627,9 +3627,6 @@ bool PianoRollComponent::applyTimelineContentPlacements(std::vector<TimelineCont
     std::set<ContentKey> aliveContents;
     for (const auto& placement : placements) {
         aliveContents.insert(placement.contentKey);
-        // ARA supplies the active waveform through setEditedContent from the render service.
-        if (placement.contentKey.domainKind == DomainKind::ARAAudioModification)
-            continue;
         if (const auto snapshot = readSnapshotFor(placement.contentKey);
             snapshot != nullptr && snapshot->audioBuffer != nullptr) {
             waveformMipmapCache_.setAudioSource(placement.contentKey, snapshot->audioBuffer);
