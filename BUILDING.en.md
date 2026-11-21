@@ -90,7 +90,7 @@ This project requires **two** ONNX Runtime packages (Windows): the CPU version p
 
 | Package | Link | Extract to |
 |---------|------|------------|
-| ONNX Runtime CPU | [onnxruntime-win-x64-1.24.4.zip](https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip) | `ThirdParty/onnxruntime-win-x64-1.24.4/` |
+| ONNX Runtime CPU | [NuGet 1.24.4](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.24.4) | `ThirdParty/onnxruntime-win-x64-1.24.4/` (`build/native/include` → `include`, `runtimes/win-x64/native` → `lib`) |
 | ONNX Runtime DirectML | [Microsoft.ML.OnnxRuntime.DirectML.1.24.4.nupkg](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML/1.24.4) | `ThirdParty/onnxruntime-dml-1.24.4/` |
 
 > **Tip:** Rename `.nupkg` to `.zip` before extracting.
@@ -218,6 +218,26 @@ OpenTune/
 ```
 
 ## Build Commands
+
+### Updating the upstream-based fork
+
+`personal/upstream-based` tracks upstream `standalone` plus the fork's
+independent feature patches. To sync, make an integration branch from
+`origin/personal/upstream-based`, fetch upstream `standalone`, and merge it there:
+
+```sh
+git fetch origin personal/upstream-based
+git switch -c sync/upstream FETCH_HEAD
+git fetch https://github.com/YuFeng926/OpenTune.git standalone
+git merge --no-ff FETCH_HEAD
+```
+
+Review any conflicts against the feature PRs rather than importing the old
+fork's UI. Push the integration branch and open a PR into
+`personal/upstream-based` instead of updating that branch directly.
+The Windows check builds the ARA-enabled VST3 and runs focused AutoTune and
+playback-cache tests. It does not sign, package, or publish a release, and it
+does not replace testing in a DAW.
 
 **Windows (Visual Studio + CMake)**
 
