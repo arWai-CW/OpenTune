@@ -337,6 +337,8 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
     if (targetSr > 0.0 && canonicalSnapshot && !canonicalSnapshot->chunks.empty()) {
         using PlaybackSampleGeometry::projectToSample;
         const bool aliasCanonical = targetSr == kSampleRate;
+        const int64_t canonicalEnd = firstCanonicalSample_
+            + (canonicalBuffer_ != nullptr ? canonicalBuffer_->getNumSamples() : 0);
         preparedSnapshot->chunks.reserve(canonicalSnapshot->chunks.size());
 
         for (const auto& chunk : canonicalSnapshot->chunks) {
@@ -385,6 +387,18 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
             dependencies.canonicalBuffer = canonicalBuffer_;
             dependencies.firstCanonicalSample = firstCanonicalSample_;
             dependencies.nativeSource = nativeSource_;
+            // A mono edit can still have distinct channel values after SRC
+            // if the filter reaches a stereo neighbour or dry source.
+            size_t numChannels = 1;
+            int64_t coveredUntil = support.begin;
+            const auto includeDryChannels = [&](int64_t begin, int64_t end) {
+                if (end <= begin)
+                    return;
+                if (canonicalBuffer_ != nullptr && begin < canonicalEnd && end > firstCanonicalSample_)
+                    numChannels = std::max(numChannels, static_cast<size_t>(canonicalBuffer_->getNumChannels()));
+                if (nativeSource_.buffer != nullptr && (begin < firstCanonicalSample_ || end > canonicalEnd))
+                    numChannels = std::max(numChannels, static_cast<size_t>(nativeSource_.buffer->getNumChannels()));
+            };
             for (const auto& edit : canonicalSnapshot->chunks) {
                 if (!edit.audio || edit.audio->empty())
                     continue;
@@ -392,9 +406,14 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
                 const int64_t editGlobalEnd = firstCanonicalSample_ + edit.endSampleExclusive;
                 if (editGlobalEnd <= support.begin || editGlobalBegin >= support.end)
                     continue;
+                includeDryChannels(coveredUntil, editGlobalBegin);
+                coveredUntil = std::max(coveredUntil, editGlobalEnd);
+                numChannels = std::max(numChannels, edit.audio->size()
+                    / static_cast<size_t>(editGlobalEnd - editGlobalBegin));
                 dependencies.edits.push_back(
                     { edit.audio, edit.startSample, edit.endSampleExclusive, edit.audioRevision });
             }
+            includeDryChannels(coveredUntil, support.end);
 
             // Reuse only when every value dependency of this target chunk is
             // unchanged: canonical input identity/origin, native halo
@@ -413,8 +432,6 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
                 continue;
             }
 
-            const size_t numChannels = chunk.audio->size()
-                / static_cast<size_t>(chunk.endSampleExclusive - chunk.startSample);
             const size_t channelBytes = static_cast<size_t>(outputLength) * sizeof(float);
             if (numChannels > std::numeric_limits<size_t>::max() / channelBytes)
                 return false;

@@ -165,12 +165,13 @@ bool testStereoRenderCache()
     if (!cache.prepareForPlaybackSampleRate(targetRate))
         return false;
     const auto start = projectToSample(origin * targetRate / sourceRate);
-    const int count = static_cast<int>(projectToSample((origin + frames) * targetRate / sourceRate) - start);
+    const int count = static_cast<int>(projectToSample((origin + 2 * frames) * targetRate / sourceRate) - start);
+    output.setSize(2, count);
     output.clear();
     cache.overlayPreparedAudio(output, 0, count, start, targetRate, 1);
     OpenTune::ResamplingManager resampler;
     for (int channel = 0; channel < 2; ++channel) {
-        // Compare with the continuous signal, including native halo and adjacent mono edit.
+        // Both sides of the mixed-channel boundary must match continuous resampling.
         const auto* dry = native->getReadPointer(channel);
         std::vector<float> continuous(dry, dry + nativeFrames);
         std::fill_n(continuous.begin() + origin, frames, channel == 0 ? 0.25f : -0.75f);
