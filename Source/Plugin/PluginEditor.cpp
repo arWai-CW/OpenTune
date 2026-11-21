@@ -180,6 +180,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
 #if JucePlugin_Enable_ARA
         if (menuIndex == 2)
             addPitchReferenceMenu(menu);
+        else if (menuIndex == 1 && processorRef_.getDocumentController() != nullptr) {
+            menu.addSeparator();
+            menu.addItem(LOC(kTuneToPitchReference), pitchReferenceTrack_ != nullptr, false, [safeEditor] {
+                if (safeEditor != nullptr)
+                    safeEditor->tuneToPitchReference();
+            });
+        }
 #endif
         // Accessibility: open with the first item highlighted, so the first Enter works
         // (user test: NVDA read "Options" on open, but Enter did nothing until an arrow key).
@@ -1013,6 +1020,19 @@ void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequenc
     if (pitchReferenceTrack_ != nullptr)
         pitchReferenceTrack_->addListener(this);
     pianoRoll_.setPitchReferences({});
+}
+
+void OpenTuneAudioProcessorEditor::tuneToPitchReference()
+{
+    parameterPanel_.commitPendingEdits();
+    syncContentProjectionToPianoRoll();
+    const auto result = pianoRoll_.tuneToPitchReference();
+    if (result.applied())
+        a11y::announce(pianoRoll_, LOC(kTuneToPitchReference));
+    else if (result.status == PianoRollComponent::AutoTuneApplyStatus::NoChange)
+        a11y::announce(pianoRoll_, LOC_RAW("Already corrected"));
+    else
+        OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, LOC(kTuneToPitchReference), result.message());
 }
 
 void OpenTuneAudioProcessorEditor::willDestroyRegionSequence(juce::ARARegionSequence* track)

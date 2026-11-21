@@ -174,6 +174,7 @@ private:
 #if JucePlugin_Enable_ARA
     void addPitchReferenceMenu(juce::PopupMenu& menu);
     void setPitchReferenceTrack(juce::ARARegionSequence* track);
+    void tuneToPitchReference();
     void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
     juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
 

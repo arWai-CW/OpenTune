@@ -884,6 +884,7 @@ set(OPENTUNE_COMMON_SOURCES
         # attached to exactly one SharedCode target below)
         Source/Content/ContentKey.h
         Source/Content/ContentEditCommands.cpp
+        Source/Content/PitchReferenceSnapshot.cpp
         Source/Content/DomainContentOwner.h
         Source/Content/AnalysisState.h
         Source/Content/ContentState.h
@@ -1971,6 +1972,7 @@ if(OPENTUNE_BUILD_TESTS)
 
     add_executable(OpenTunePitchReferenceTests
         Tests/PitchReferenceTests.cpp
+        Source/Content/PitchReferenceSnapshot.cpp
         Source/Utils/AppLogger.cpp
         Source/Utils/TimeGrid.cpp
     )
