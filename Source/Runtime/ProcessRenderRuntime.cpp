@@ -699,16 +699,26 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
         const int originalF0Size = static_cast<int>(originalF0Full.size());
         if (f0StartFrame >= 0 && f0StartFrame < originalF0Size)
         {
+            const int safeNumF0Frames = std::min(numF0Frames, originalF0Size - f0StartFrame);
+            std::vector<float> autoTuneTargetF0(static_cast<size_t>(safeNumF0Frames), 0.0f);
+            pitchCurve->forEachCorrectionF0Span(
+                f0StartFrame, f0StartFrame + safeNumF0Frames,
+                [&autoTuneTargetF0, f0StartFrame](int frameIndex, const float* values, int spanLength)
+                {
+                    if (values == nullptr)
+                        return;
+                    const int offset = frameIndex - f0StartFrame;
+                    for (int k = 0; k < spanLength; ++k)
+                        autoTuneTargetF0[static_cast<size_t>(offset + k)] = values[static_cast<size_t>(k)];
+                });
             const bool needsVocoder = chunkNeedsVocoder(
-                effectiveF0.data(), numF0Frames, originalF0Full, f0StartFrame);
+                autoTuneTargetF0.data(), safeNumF0Frames, originalF0Full, f0StartFrame);
             if (!needsVocoder)
             {
                 AutoTunePitchShifter autoTuneShifter(RenderCache::kSampleRate);
-                const int safeNumF0Frames = std::min(numF0Frames, originalF0Size - f0StartFrame);
-
                 // Supply the source context needed by the pitch resampler:
-                // preceding waveform history for cycle jumps and five future
-                // samples for zero-latency interpolation.
+                // preceding waveform history for cycle transitions and future
+                // samples for aligned band-limited interpolation.
                 float shifterLookahead[AutoTunePitchShifter::kLookaheadSamples] = {};
                 int shifterLookaheadSamples = 0;
                 const float* shifterLookbehind = nullptr;
@@ -737,19 +747,19 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
 
                 // Chunk-local 双阶段周期检测：downsampled lag 粗搜 + full-rate
                 // V=E-2H 局部精搜，逐样本输出 period/valid 影子源交给 shifter。
-                // FCPE F0 hint provides an octave prior for coarse acquisition.
+                // Locate the chunk and its lookbehind on the global F0 hint grid.
                 const int detectorNumSamples =
                     static_cast<int>(boundaries.publishSampleCount);
                 // UV/V is decided by the waveform detector itself.  RMVPE's
                 // originalF0 remains the editable source/target track, but it
                 // must not gate the AutoTune detector's periodicity analysis.
-                const float* f0HintPtr = originalF0Full.data() + f0StartFrame;
                 const std::vector<AutoTunePeriodDetector::DetectedPeriod>
                     detectorFrames = AutoTunePeriodDetector::analyze(
                         shifterLookbehind, shifterLookbehindSamples,
                         monoAudio.data(), detectorNumSamples,
                         RenderCache::kSampleRate,
-                        f0HintPtr, safeNumF0Frames, f0FrameRate);
+                        originalF0Full.data(), originalF0Size, f0FrameRate,
+                        static_cast<double>(f0StartFrame) + firstSampleFramePhase);
 
                 // snapMode：所有音符 retuneSpeed 均为 1.0 时，DSP 跳过 EMA 直接锁定
                 bool snapMode = true;
@@ -757,11 +767,11 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     if (n.retuneSpeed < 1.0f) { snapMode = false; break; }
                 }
 
-                auto shiftedAudio = autoTuneShifter.shiftChunk(
+                auto repair = autoTuneShifter.shiftChunkWithOctaveRepair(
                     monoAudio.data(),
                     static_cast<int>(boundaries.publishSampleCount),
                     originalF0Full.data() + f0StartFrame,
-                    effectiveF0.data(),
+                    autoTuneTargetF0.data(),
                     safeNumF0Frames,
                     f0FrameRate,
                     firstSampleFramePhase,
@@ -773,26 +783,38 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     detectorNumSamples,
                     snapMode);
 
-                const uint64_t objectId = coreJob.contentKey.objectId;
-                const auto result = publishChunkWithPerNoteEq(
-                    *coreJob.renderCache, boundaries, std::move(shiftedAudio),
-                    coreJob.targetRevision, coreJob.cacheGeneration,
-                    contentSnap->notes);
-
-                if (result == RenderCache::ChunkRenderResult::InvalidInput)
+                if (!repair.success
+                    || repair.audio.size() != static_cast<size_t>(boundaries.publishSampleCount))
                 {
-                    failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
-                              coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
+                    AppLogger::warn("RenderWorker: AutoTune pitch-shift contract not met, falling through to vocoder (startSample="
+                        + juce::String(boundaries.trueStartSample)
+                        + ", bestOctave=" + juce::String(repair.octave)
+                        + ", targetErrorCents=" + juce::String(repair.targetErrorCents, 3)
+                        + ", continuityCents=" + juce::String(repair.continuityCents, 3) + ")");
                 }
-                else if (result == RenderCache::ChunkRenderResult::Published)
+                else
                 {
-                    notifyChunkSettled(completion, coreJob);
-                }
+                    const uint64_t objectId = coreJob.contentKey.objectId;
+                    const auto result = publishChunkWithPerNoteEq(
+                        *coreJob.renderCache, boundaries, std::move(repair.audio),
+                        coreJob.targetRevision, coreJob.cacheGeneration,
+                        contentSnap->notes);
 
-                AppLogger::debug("RenderWorker: AutoTune pitch-shift chunk objId="
-                    + juce::String(static_cast<juce::int64>(objectId))
-                    + " start=" + juce::String(relChunkStartSec, 3));
-                return;
+                    if (result == RenderCache::ChunkRenderResult::InvalidInput)
+                    {
+                        failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
+                                  coreJob.targetRevision, coreJob.cacheGeneration, coreJob.contentKey);
+                    }
+                    else if (result == RenderCache::ChunkRenderResult::Published)
+                    {
+                        notifyChunkSettled(completion, coreJob);
+                    }
+
+                    AppLogger::debug("RenderWorker: AutoTune pitch-shift chunk objId="
+                        + juce::String(static_cast<juce::int64>(objectId))
+                        + " start=" + juce::String(relChunkStartSec, 3));
+                    return;
+                }
             }
         }
     }
