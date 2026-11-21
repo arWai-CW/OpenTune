@@ -152,6 +152,17 @@ public:
 
     bool hasOriginalF0Data() const { return !originalF0_.empty(); }
 
+    template <typename Sink>
+    void forEachEffectiveF0Span(int startFrame, int endFrame, float originalPitchRatio,
+                                Sink&& sink) const
+    {
+        forEachCorrectionF0Span(startFrame, endFrame,
+            [&](int start, const float* values, int count) {
+                sink(start, values != nullptr ? values : originalF0_.data() + start,
+                     count, values != nullptr ? 1.0f : originalPitchRatio);
+            });
+    }
+
     bool isVocoderFrame(int frame) const {
         return frame >= 0 && static_cast<size_t>(frame) < vocoderMask_.size() && vocoderMask_[static_cast<size_t>(frame)];
     }

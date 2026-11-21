@@ -89,25 +89,6 @@ ContentKey chooseActiveCaptureContentKey(Capture::CaptureSession& session,
     return {};
 }
 
-#if JucePlugin_Enable_ARA
-ContentTimelineProjection makePianoRollLocalProjection(
-    const OpenTuneAudioProcessor& processor,
-    const OpenTuneDocumentController::PlaybackRegionProjection& region)
-{
-    const auto snapshot = processor.getContentSnapshot(region.contentKey);
-    if (snapshot == nullptr)
-        return {};
-
-    ContentTimelineProjection projection;
-    projection.timelineStartSeconds = region.startInPlaybackTime;
-    projection.timelineDurationSeconds = region.durationInPlaybackTime;
-    projection.contentStartSeconds = region.startInModificationTime
-        - snapshot->sourceWindow.sourceStartSeconds;
-    projection.contentDurationSeconds = region.durationInModificationTime;
-    return projection;
-}
-#endif
-
 } // anonymous namespace
 
 // =========================================================================
@@ -196,6 +177,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         auto menuNames = menuBar_.getMenuBarNames();
         auto menu = menuBar_.getMenuForIndex(menuIndex, menuIndex < menuNames.size() ? menuNames[menuIndex]
                                                                                     : juce::String());
+#if JucePlugin_Enable_ARA
+        if (menuIndex == 2)
+            addPitchReferenceMenu(menu);
+#endif
         // Accessibility: open with the first item highlighted, so the first Enter works
         // (user test: NVDA read "Options" on open, but Enter did nothing until an arrow key).
         auto options = juce::PopupMenu::Options()
@@ -343,6 +328,7 @@ OpenTuneAudioProcessorEditor::~OpenTuneAudioProcessorEditor()
 {
 #if JucePlugin_Enable_ARA
     clearPendingNoteGenerationSubscription();
+    setPitchReferenceTrack(nullptr);
 #endif
     preferencesDialog_.reset();
     onboardingOverlay_.reset();
@@ -978,6 +964,63 @@ OpenTuneAudioProcessorEditor::resolveContentScopeRegions() const
 }
 
 #if JucePlugin_Enable_ARA
+void OpenTuneAudioProcessorEditor::addPitchReferenceMenu(juce::PopupMenu& menu)
+{
+    auto* dc = processorRef_.getDocumentController();
+    auto* document = dc != nullptr ? dc->getDocument() : nullptr;
+    if (document == nullptr)
+        return;
+
+    const auto focused = resolveCurrentContentSync().focusedAraTrack;
+    juce::PopupMenu references;
+    const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safeThis(this);
+    references.addItem(LOC(kOff), true, pitchReferenceTrack_ == nullptr, [safeThis] {
+        if (safeThis != nullptr)
+            safeThis->setPitchReferenceTrack(nullptr);
+    });
+    int index = 0;
+    for (auto* track : document->getRegionSequences()) {
+        ++index;
+        if (track == focused || track->getPlaybackRegions().empty())
+            continue;
+
+        auto name = juce::String::fromUTF8(track->getName());
+        if (name.isEmpty())
+            name = LOC(kUnnamedReferenceTrack);
+        references.addItem(juce::String(index) + ". " + name, true, track == pitchReferenceTrack_,
+            [safeThis, track] {
+                if (safeThis == nullptr)
+                    return;
+                auto* current = safeThis->processorRef_.getDocumentController();
+                if (auto* document = current != nullptr ? current->getDocument() : nullptr) {
+                    const auto& tracks = document->getRegionSequences();
+                    if (std::find(tracks.begin(), tracks.end(), track) != tracks.end())
+                        safeThis->setPitchReferenceTrack(track);
+                }
+            });
+    }
+    if (references.getNumItems() > 1 || pitchReferenceTrack_ != nullptr)
+        menu.addSubMenu(LOC(kReferenceTrack), references);
+}
+
+void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequence* track)
+{
+    if (pitchReferenceTrack_ == track)
+        return;
+    if (pitchReferenceTrack_ != nullptr)
+        pitchReferenceTrack_->removeListener(this);
+    pitchReferenceTrack_ = track;
+    if (pitchReferenceTrack_ != nullptr)
+        pitchReferenceTrack_->addListener(this);
+    pianoRoll_.setPitchReferences({});
+}
+
+void OpenTuneAudioProcessorEditor::willDestroyRegionSequence(juce::ARARegionSequence* track)
+{
+    if (pitchReferenceTrack_ == track)
+        setPitchReferenceTrack(nullptr);
+}
+
 void OpenTuneAudioProcessorEditor::clearPendingNoteGenerationSubscription()
 {
     if (pendingNoteGenerationListenerTarget_ != nullptr)
@@ -1130,17 +1173,21 @@ OpenTuneAudioProcessorEditor::resolveCurrentContentSync()
 #if JucePlugin_Enable_ARA
     if (const auto* dc = processorRef_.getDocumentController()) {
         const auto projections = dc->getPlaybackRegionProjectionsFor(resolveContentScopeRegions());
-        processorRef_.setNotePitchAuditionTargetRegion(
-            projections.empty() ? nullptr : projections.front().playbackRegion);
+        juce::ARAPlaybackRegion* activeRegion = nullptr;
         for (const auto& region : projections) {
-            if (!region.contentKey.isValid())
+            if (!region.contentKey.isValid() || !region.contentProjection.isValid())
                 continue;
-            const auto projection = makePianoRollLocalProjection(processorRef_, region);
-            if (!projection.isValid())
+            const auto* track = region.playbackRegion->getRegionSequence();
+            if (activeRegion == nullptr) {
+                activeRegion = region.playbackRegion;
+                sync.focusedAraTrack = track;
+            }
+            if (track != sync.focusedAraTrack)
                 continue;
-            sync.placements.push_back(makePlacement(region.contentKey, projection,
+            sync.placements.push_back(makePlacement(region.contentKey, region.contentProjection,
                 region.displayColour.value_or(UIColors::noteBlock)));
         }
+        processorRef_.setNotePitchAuditionTargetRegion(activeRegion);
 
         if (sync.placements.empty())
             return sync;
@@ -1943,6 +1990,13 @@ OpenTuneAudioProcessorEditor::syncContentProjectionToPianoRoll()
     const bool identityChanged = sync.activePlacementIdentity.has_value() != presentedPlacementIdentity_.has_value()
         || (sync.activePlacementIdentity.has_value() && !(*sync.activePlacementIdentity == *presentedPlacementIdentity_));
 #if JucePlugin_Enable_ARA
+    const auto* dc = processorRef_.getDocumentController();
+    if (dc != nullptr && sync.hasActiveContent() && pitchReferenceTrack_ != nullptr
+        && pitchReferenceTrack_ != sync.focusedAraTrack)
+        pianoRoll_.setPitchReferences(dc->readPitchReferences(*pitchReferenceTrack_, sync.activeContentKey));
+    else
+        pianoRoll_.setPitchReferences({});
+
     if (pendingNoteGenerationListenerTarget_ != nullptr
         && pendingNoteGenerationIntent_.has_value()
         && sync.activeContentKey != pendingNoteGenerationIntent_->key)

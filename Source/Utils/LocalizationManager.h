@@ -224,6 +224,8 @@ constexpr const char* kThemeAurora = "Aurora Glass";
 constexpr const char* kThemeOverdose = "升天 / Overdose";
 constexpr const char* kMouseTrail = "Mouse Trail";
 constexpr const char* kOff = "Off";
+constexpr const char* kReferenceTrack = "Pitch Reference Track";
+constexpr const char* kUnnamedReferenceTrack = "Unnamed Track";
 constexpr const char* kClassic = "Classic";
 constexpr const char* kNeon = "Neon";
 constexpr const char* kFire = "Fire";
@@ -576,6 +578,8 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kThemeOverdose, "Overdose", "升天", "オーバードーズ", "Передозировка", "Sobredosis" },
         { Keys::kMouseTrail, "Mouse Trail", "鼠标轨迹", "マウストレイル", "След мыши", "Ratón" },
         { Keys::kOff, "Off", "关闭", "オフ", "Выкл", "Apagado" },
+        { Keys::kReferenceTrack, "Pitch Reference Track", "音高参考轨", "ピッチ参照トラック", "Дорожка-ориентир высоты тона", "Pista de referencia tonal" },
+        { Keys::kUnnamedReferenceTrack, "Unnamed Track", "未命名轨道", "名称未設定のトラック", "Дорожка без названия", "Pista sin nombre" },
         { Keys::kClassic, "Classic", "经典", "クラシック", "Классика", "Clásico" },
         { Keys::kNeon, "Neon", "霓虹", "ネオン", "Неон", "Neón" },
         { Keys::kFire, "Fire", "火焰", "ファイア", "Огонь", "Fuego" },

@@ -1969,6 +1969,18 @@ if(OPENTUNE_BUILD_TESTS)
     endif()
     add_test(NAME TimeGridEditTests COMMAND OpenTuneTimeGridEditTests)
 
+    add_executable(OpenTunePitchReferenceTests
+        Tests/PitchReferenceTests.cpp
+        Source/Utils/AppLogger.cpp
+        Source/Utils/TimeGrid.cpp
+    )
+    target_include_directories(OpenTunePitchReferenceTests PRIVATE Source Source/Standalone)
+    target_link_libraries(OpenTunePitchReferenceTests PRIVATE juce::juce_core)
+    if(MSVC)
+        target_compile_options(OpenTunePitchReferenceTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME PitchReferenceTests COMMAND OpenTunePitchReferenceTests)
+
     # Scissors topology planner + undo action tests — pure planner, no plugin runtime
     add_executable(OpenTuneScissorsTopologyEditTests
         Tests/ScissorsTopologyEditTests.cpp

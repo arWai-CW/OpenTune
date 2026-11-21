@@ -75,21 +75,8 @@ struct EditableContentSnapshot
         if (pitchCurve == nullptr)
             return;
 
-        const auto& curveSnapshot = *pitchCurve;
-        const auto& originalF0 = curveSnapshot.getOriginalF0();
-        const float gapGain = static_cast<float>(pitchShiftSettings.getPitchRatio());
-
-        curveSnapshot.forEachCorrectionF0Span(
-            startFrame,
-            endFrame,
-            [&](int spanStartFrame, const float* values, int count)
-            {
-                const bool isCorrection = values != nullptr;
-                sink(spanStartFrame,
-                     isCorrection ? values : originalF0.data() + spanStartFrame,
-                     count,
-                     isCorrection ? 1.0f : gapGain);
-            });
+        pitchCurve->forEachEffectiveF0Span(startFrame, endFrame,
+            static_cast<float>(pitchShiftSettings.getPitchRatio()), sink);
     }
 };
 
