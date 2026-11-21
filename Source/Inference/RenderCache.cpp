@@ -642,16 +642,18 @@ void RenderCache::clear() {
     }
 }
 
-void RenderCache::collectPlaybackSnapshots()
+void RenderCache::collectPlaybackSnapshots(bool waitForPrepared)
 {
     {
         const juce::SpinLock::ScopedLockType guard(lock_);
         publishedSnapshot_.collect();
     }
-    {
-        std::lock_guard<std::mutex> lg(preparedBuildMutex_);
-        preparedSnapshot_.collect();
-    }
+    std::unique_lock<std::mutex> preparedLock(preparedBuildMutex_, std::defer_lock);
+    if (waitForPrepared)
+        preparedLock.lock();
+    else if (!preparedLock.try_lock())
+        return;
+    preparedSnapshot_.collect();
 }
 
 // ---------------------------------------------------------------------------

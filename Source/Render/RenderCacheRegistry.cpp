@@ -77,8 +77,10 @@ void RenderCacheRegistry::collectPlaybackSnapshots()
         }
     }
 
+    // The editor sweeps this registry on its heartbeat. A prepared rebuild
+    // holds its mutex through resampling and collects before releasing it.
     for (const auto& cache : caches)
-        cache->collectPlaybackSnapshots();
+        cache->collectPlaybackSnapshots(/*waitForPrepared=*/false);
 }
 
 bool RenderCacheRegistry::preparePlaybackSampleRate(double targetSr)
