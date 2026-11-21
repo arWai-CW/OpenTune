@@ -173,7 +173,7 @@ public:
                                 int64_t readStartSample) const;
 
     void clear();
-    void collectPlaybackSnapshots();
+    void collectPlaybackSnapshots(bool waitForPrepared = true);
 
 private:
     struct PublishedChunk {
