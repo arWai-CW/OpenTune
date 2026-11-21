@@ -255,8 +255,10 @@ public:
         chooseModelDirectory_.setButtonText(LOC(kModelsFolder));
         resetModelDirectory_.setButtonText(LOC(kResetToDefaults));
         chooseModelDirectory_.onClick = [this] {
+            const auto initialFolder = juce::File::getCurrentWorkingDirectory()
+                .getChildFile(modelDirectoryPath_.getText());
             chooser_ = std::make_unique<juce::FileChooser>(
-                LOC(kModelsFolder), juce::File(ModelPathResolver::getModelsDirectory()));
+                LOC(kModelsFolder), initialFolder);
             chooseModelDirectory_.setEnabled(false);
             chooser_->launchAsync(juce::FileBrowserComponent::openMode
                                       | juce::FileBrowserComponent::canSelectDirectories,
@@ -409,9 +411,9 @@ private:
     void refreshModelDirectory()
     {
         const auto custom = appPreferences_.getCustomModelsDirectory();
-        const auto shownPath = custom.isNotEmpty()
+        const auto shownPath = juce::File::isAbsolutePath(custom)
             ? custom
-            : juce::String(ModelPathResolver::getModelsDirectory());
+            : juce::String(ModelPathResolver::getDefaultModelsDirectory());
         modelDirectoryPath_.setText(shownPath, juce::dontSendNotification);
         modelDirectoryPath_.setTooltip(shownPath);
         resetModelDirectory_.setEnabled(custom.isNotEmpty());

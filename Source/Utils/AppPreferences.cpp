@@ -757,8 +757,14 @@ bool AppPreferences::setCustomModelsDirectory(const juce::String& directory)
     if (directory.isNotEmpty() && !juce::File::isAbsolutePath(directory))
         return false;
 
-    // An explicit empty selection must override the legacy preference too.
-    return customModelsDirectoryFile(storageOptions_).replaceWithText(directory);
+    const auto file = customModelsDirectoryFile(storageOptions_);
+    if (file.getParentDirectory().createDirectory().failed())
+        return false;
+
+    // An explicit empty file must override the legacy preference too.
+    juce::TemporaryFile replacement(file, juce::TemporaryFile::useHiddenFile);
+    return replacement.getFile().appendText(directory, false, false, nullptr)
+        && replacement.overwriteTargetFileWithTemporary();
 }
 
 juce::File AppPreferences::getStorageDirectory()

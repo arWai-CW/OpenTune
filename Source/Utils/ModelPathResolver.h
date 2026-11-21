@@ -92,10 +92,15 @@ public:
 
     static std::string getModelsDirectory() {
 #if !JUCE_IOS
-        if (const auto custom = AppPreferences::readCustomModelsDirectoryFromDisk();
-            juce::File::isAbsolutePath(custom))
+        // Lazy runtime initializers in this module must all see the same override.
+        static const auto custom = AppPreferences::readCustomModelsDirectoryFromDisk();
+        if (juce::File::isAbsolutePath(custom))
             return custom.toStdString();
 #endif
+        return getDefaultModelsDirectory();
+    }
+
+    static std::string getDefaultModelsDirectory() {
 #if defined(__APPLE__) && JucePlugin_Build_AU \
     && !JucePlugin_Build_VST3 && !JucePlugin_Build_Standalone
         const juce::File moduleFile = getCurrentModuleFile();
