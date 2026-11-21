@@ -285,6 +285,9 @@ constexpr const char* kGpuFirst = "GPU First";
 constexpr const char* kCpuFirst = "CPU First";
 constexpr const char* kHybridMode = "Hybrid Mode";
 constexpr const char* kAraF0AnalysisCache = "Cache ARA original pitch analysis";
+constexpr const char* kModelsFolder = "Choose Models Folder…";
+constexpr const char* kModelsFolderRestart = "Restart OpenTune or the DAW to apply the models folder.";
+constexpr const char* kModelsFolderSaveFailed = "Could not save the models folder.";
 
 constexpr const char* kSetShortcut = "Set Shortcut";
 constexpr const char* kPressNewKeyCombination = "Press the new key combination";
@@ -637,6 +640,9 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kCpuFirst, "CPU First", "CPU 优先", "CPU 優先", "CPU приоритет", "CPU primero" },
         { Keys::kHybridMode, "Hybrid Mode: Small corrections use DSP, large corrections use vocoder", "混合模式:小修用dsp，大修用声码器", "ハイブリッドモード：小さな修正はDSP、大きな修正はボコーダー", "Гибридный режим: небольшие коррекции через DSP, большие через вокодер", "Modo híbrido: correcciones pequeñas con DSP, grandes con vocoder" },
         { Keys::kAraF0AnalysisCache, "Cache ARA original pitch analysis", "缓存 ARA 原始音高分析", "ARA の元ピッチ解析をキャッシュ", "Кэшировать анализ исходной высоты ARA", "Guardar análisis de tono original ARA en caché" },
+        { Keys::kModelsFolder, "Choose Models Folder…", "选择模型文件夹…", "モデルフォルダーを選択…", "Выбрать папку моделей…", "Elegir carpeta de modelos…" },
+        { Keys::kModelsFolderRestart, "Restart OpenTune or the DAW to apply the models folder.", "重启 OpenTune 或 DAW 以应用模型文件夹。", "モデルフォルダーを適用するには OpenTune または DAW を再起動してください。", "Перезапустите OpenTune или DAW, чтобы сменить папку моделей.", "Reinicia OpenTune o el DAW para aplicar la carpeta de modelos." },
+        { Keys::kModelsFolderSaveFailed, "Could not save the models folder.", "无法保存模型文件夹。", "モデルフォルダーを保存できませんでした。", "Не удалось сохранить папку моделей.", "No se pudo guardar la carpeta de modelos." },
 
         { Keys::kSetShortcut, "Set Shortcut", "设置快捷键", "ショートカットを設定", "Назначить сочетание", "Atajo" },
         { Keys::kPressNewKeyCombination, "Press a key, wheel, middle or side button", "按下按键、滚动滚轮或点击鼠标中键/侧键", "キー、ホイール、中央またはサイドボタンを操作してください", "Нажмите клавишу, прокрутите колесо или нажмите среднюю/боковую кнопку", "Pulse una tecla, la rueda o un botón central/lateral" },

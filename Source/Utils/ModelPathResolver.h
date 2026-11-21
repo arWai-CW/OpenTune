@@ -4,7 +4,7 @@
  * ModelPathResolver - 模型路径解析器
  * 
  * 负责解析 ONNX Runtime 动态库路径和模型目录路径。
- * 自带优先：模块所在目录（随应用分发的那一份）永远第一，共享安装目录只作兜底，
+ * 未指定自定义目录时，模块目录优先，共享安装目录只作兜底，
  * 避免旧安装静默遮蔽便携包/开发构建。
  * 搜索顺序：模块目录 > Resources > OpenTune.app 内置模型（macOS）> Program Files > ProgramData > 当前工作目录 > exe 目录
  */
@@ -27,6 +27,7 @@
 
 #include <string>
 #include <juce_core/juce_core.h>
+#include "AppPreferences.h"
 
 #if defined(__APPLE__) && JucePlugin_Build_AU \
     && !JucePlugin_Build_VST3 && !JucePlugin_Build_Standalone
@@ -90,6 +91,16 @@ public:
     }
 
     static std::string getModelsDirectory() {
+#if !JUCE_IOS
+        // Lazy runtime initializers in this module must all see the same override.
+        static const auto custom = AppPreferences::readCustomModelsDirectoryFromDisk();
+        if (juce::File::isAbsolutePath(custom))
+            return custom.toStdString();
+#endif
+        return getDefaultModelsDirectory();
+    }
+
+    static std::string getDefaultModelsDirectory() {
 #if defined(__APPLE__) && JucePlugin_Build_AU \
     && !JucePlugin_Build_VST3 && !JucePlugin_Build_Standalone
         const juce::File moduleFile = getCurrentModuleFile();

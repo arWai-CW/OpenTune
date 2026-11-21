@@ -36,6 +36,7 @@ constexpr const char* kSharedTrackColorModeKey = "shared.trackColor.mode";
 constexpr const char* kSharedLightPitchCorrectionEnabledKey = "shared.rendering.lightPitchCorrection";
 constexpr const char* kSharedAraF0AnalysisCacheEnabledKey = "shared.f0.araAnalysisCacheEnabled";
 constexpr const char* kSharedF0ModelTypeKey = "shared.f0.modelType";
+constexpr const char* kLegacyCustomModelsDirectoryKey = "shared.models.customDirectory";
 constexpr const char* kSharedTimelineDisplayModeKey = "shared.timeline.displayMode";
 constexpr const char* kSharedTuningHzKey = "shared.tuning.hz";
 constexpr const char* kSharedGridStyleKey = "shared.pianoRoll.gridStyle";
@@ -102,6 +103,23 @@ juce::PropertiesFile::Options makePropertiesOptions(const AppPreferences::Storag
     options.millisecondsBeforeSaving = 0;
     options.processLock = processLock;
     return options;
+}
+
+juce::File customModelsDirectoryFile(const AppPreferences::StorageOptions& storageOptions)
+{
+    const auto settingsFile = resolveSettingsFile(storageOptions);
+    return settingsFile.getSiblingFile(settingsFile.getFileName() + ".models-directory");
+}
+
+juce::String readCustomModelsDirectory(const AppPreferences::StorageOptions& storageOptions)
+{
+    const auto overrideFile = customModelsDirectoryFile(storageOptions);
+    // A separate file keeps stale editor instances from overwriting the selection.
+    if (overrideFile.existsAsFile())
+        return overrideFile.loadFileAsString();
+
+    juce::PropertiesFile legacy(makePropertiesOptions(storageOptions, nullptr));
+    return legacy.getValue(kLegacyCustomModelsDirectoryKey);
 }
 
 juce::String buildProcessLockName(const AppPreferences::StorageOptions& storageOptions)
@@ -722,6 +740,31 @@ bool AppPreferences::readAraF0AnalysisCacheEnabledFromDisk()
     const StorageOptions storageOptions;
     juce::PropertiesFile properties(makePropertiesOptions(storageOptions, nullptr));
     return properties.getBoolValue(kSharedAraF0AnalysisCacheEnabledKey, true);
+}
+
+juce::String AppPreferences::readCustomModelsDirectoryFromDisk()
+{
+    return readCustomModelsDirectory(StorageOptions{});
+}
+
+juce::String AppPreferences::getCustomModelsDirectory() const
+{
+    return readCustomModelsDirectory(storageOptions_);
+}
+
+bool AppPreferences::setCustomModelsDirectory(const juce::String& directory)
+{
+    if (directory.isNotEmpty() && !juce::File::isAbsolutePath(directory))
+        return false;
+
+    const auto file = customModelsDirectoryFile(storageOptions_);
+    if (file.getParentDirectory().createDirectory().failed())
+        return false;
+
+    // An explicit empty file must override the legacy preference too.
+    juce::TemporaryFile replacement(file, juce::TemporaryFile::useHiddenFile);
+    return replacement.getFile().appendText(directory, false, false, nullptr)
+        && replacement.overwriteTargetFileWithTemporary();
 }
 
 juce::File AppPreferences::getStorageDirectory()

@@ -45,3 +45,9 @@ OpenTune/
 > and are shared by the Standalone and the VST3/ARA plugin; everything else is the
 > same. A custom install directory does not affect model resolution (the resolver
 > looks in the module directory first and falls back to the shared locations).
+
+On desktop, **Preferences → Audio → Choose Models Folder** lets you use a
+different model directory for OpenTune Standalone and the plugin. Select the
+folder containing the model files (such as `fcpe.onnx` and `hifigan.onnx`),
+then restart OpenTune or the DAW. Use **Reset to Defaults** to restore
+automatic lookup.

@@ -36,6 +36,45 @@ bool testSharedPluginEditorSize()
     return sharedInstancesReadLatestSize && hasSize(persistedSize, 1280, 760);
 }
 
+bool testSharedModelsDirectory()
+{
+    const auto temporaryDirectory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("OpenTuneAppPreferences-" + juce::Uuid().toString());
+    OpenTune::AppPreferences::StorageOptions options;
+    options.settingsDirectory = temporaryDirectory;
+    const auto legacyPath = temporaryDirectory.getChildFile("Legacy Models").getFullPathName();
+    const auto chosenPath = temporaryDirectory.getChildFile("Chosen Models").getFullPathName();
+    bool passed = false;
+    {
+        OpenTune::AppPreferences noOverride(options);
+        if (noOverride.getCustomModelsDirectory().isEmpty()) {
+            juce::PropertiesFile::Options legacyOptions;
+            legacyOptions.applicationName = "app-preferences";
+            legacyOptions.filenameSuffix = ".settings";
+            legacyOptions.folderName = temporaryDirectory.getFullPathName();
+            legacyOptions.storageFormat = juce::PropertiesFile::storeAsXML;
+            {
+                juce::PropertiesFile legacy(legacyOptions);
+                legacy.setValue("shared.models.customDirectory", legacyPath);
+                passed = legacy.saveIfNeeded();
+            }
+            OpenTune::AppPreferences writer(options);
+            passed = passed && writer.getCustomModelsDirectory() == legacyPath
+                && writer.setCustomModelsDirectory(chosenPath);
+            noOverride.setTheme(OpenTune::ThemeId::DarkBlueGrey);
+
+            OpenTune::AppPreferences reopened(options);
+            passed = passed && reopened.getCustomModelsDirectory() == chosenPath
+                && !reopened.setCustomModelsDirectory("relative/models")
+                && reopened.getCustomModelsDirectory() == chosenPath
+                && reopened.setCustomModelsDirectory({})
+                && writer.getCustomModelsDirectory().isEmpty();
+        }
+    }
+    temporaryDirectory.deleteRecursively();
+    return passed;
+}
+
 bool testShortcutScopesAndConflicts()
 {
     using namespace OpenTune::KeyShortcutConfig;
@@ -524,6 +563,11 @@ int main()
 {
     if (!testSharedPluginEditorSize()) {
         std::fputs("FAIL: shared plugin editor size preferences\n", stderr);
+        return 1;
+    }
+
+    if (!testSharedModelsDirectory()) {
+        std::fputs("FAIL: shared models directory preference\n", stderr);
         return 1;
     }
 
