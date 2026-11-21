@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <atomic>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -115,6 +116,75 @@ bool testBlankPreparedBuildFailureRollsBack()
             == baseline;
 }
 
+bool testStereoRenderCache()
+{
+    using OpenTune::RenderCache;
+    using OpenTune::PlaybackSampleGeometry::projectToSample;
+    constexpr int frames = 128;
+    constexpr int origin = 64;
+    constexpr int nativeFrames = 384;
+    constexpr double targetRate = 48000.0;
+    constexpr double sourceRate = RenderCache::kSampleRate;
+    auto native = std::make_shared<juce::AudioBuffer<float>>(2, nativeFrames);
+    auto canonical = std::make_shared<juce::AudioBuffer<float>>(2, 2 * frames);
+    for (int channel = 0; channel < 2; ++channel) {
+        std::fill_n(native->getWritePointer(channel), nativeFrames, channel == 0 ? 0.1f : 0.4f);
+        canonical->copyFrom(channel, 0, *native, channel, origin, 2 * frames);
+    }
+
+    RenderCache cache;
+    cache.setCanonicalSource(canonical, origin, {native, sourceRate, 0});
+    if (!cache.prepareForPlaybackSampleRate(sourceRate))
+        return false;
+    cache.reconcileFullPlanAndRequest({{0, frames}, {frames, 2 * frames}}, {{0, 2 * frames}}, 1);
+    const auto jobs = cache.getPendingJobs();
+    if (jobs.size() != 2 || !cache.claimPendingJob(jobs[0]) || !cache.claimPendingJob(jobs[1]))
+        return false;
+    std::vector<float> stereo(2 * frames, 0.25f);
+    std::fill_n(stereo.begin() + frames, frames, -0.75f);
+    if (cache.completeChunkRenderWithAudio(0, frames, std::move(stereo), jobs[0].targetRevision, 2)
+            != RenderCache::ChunkRenderResult::Published
+        || cache.completeChunkRenderWithAudio(frames, 2 * frames,
+               std::vector<float>(frames, 0.5f), jobs[1].targetRevision)
+            != RenderCache::ChunkRenderResult::Published)
+        return false;
+
+    juce::AudioBuffer<float> output(2, 2 * frames);
+    for (bool prepared : {false, true}) {
+        output.clear();
+        if (prepared)
+            cache.overlayPreparedAudio(output, 0, 2 * frames, origin, sourceRate, 1);
+        else
+            cache.overlayCanonicalAudio(output, 0, 2 * frames, 0);
+        for (int channel = 0; channel < 2; ++channel)
+            for (int frame = 0; frame < 2 * frames; ++frame)
+                if (output.getSample(channel, frame) != (frame < frames ? (channel == 0 ? 0.25f : -0.75f) : 0.5f))
+                    return false;
+    }
+
+    if (!cache.prepareForPlaybackSampleRate(targetRate))
+        return false;
+    const auto start = projectToSample(origin * targetRate / sourceRate);
+    const int count = static_cast<int>(projectToSample((origin + 2 * frames) * targetRate / sourceRate) - start);
+    output.setSize(2, count);
+    output.clear();
+    cache.overlayPreparedAudio(output, 0, count, start, targetRate, 1);
+    OpenTune::ResamplingManager resampler;
+    for (int channel = 0; channel < 2; ++channel) {
+        // Both sides of the mixed-channel boundary must match continuous resampling.
+        const auto* dry = native->getReadPointer(channel);
+        std::vector<float> continuous(dry, dry + nativeFrames);
+        std::fill_n(continuous.begin() + origin, frames, channel == 0 ? 0.25f : -0.75f);
+        std::fill_n(continuous.begin() + origin + frames, frames, 0.5f);
+        const auto expected = resampler.resampleRange(continuous.data(), continuous.size(),
+            sourceRate, targetRate, 0, start, count);
+        for (int frame = 0; frame < count; ++frame)
+            if (!(std::abs(output.getSample(channel, frame) - expected[frame]) <= 1e-5f))
+                return false;
+    }
+    return true;
+}
+
 bool testClearRejectsOldTimeStretchBuild()
 {
     OpenTune::TimeStretchCache cache;
@@ -219,6 +289,10 @@ int main()
     }
     if (!testBlankPreparedBuildFailureRollsBack()) {
         std::fputs("FAIL: blank prepared-build failure rollback\n", stderr);
+        return 1;
+    }
+    if (!testStereoRenderCache()) {
+        std::fputs("FAIL: canonical and prepared render cache preserve stereo planes\n", stderr);
         return 1;
     }
     if (!testClearRejectsOldTimeStretchBuild()) {

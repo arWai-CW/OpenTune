@@ -21,6 +21,16 @@ double projectRenderSeconds(int64_t sample) {
     return TimeCoordinate::samplesToSeconds(sample, RenderCache::kSampleRate);
 }
 
+int channelOrFirst(int channel, size_t numChannels) noexcept
+{
+    return static_cast<size_t>(channel) < numChannels ? channel : 0;
+}
+
+const float* planarChannel(const std::vector<float>& audio, size_t frames, int channel) noexcept
+{
+    return audio.data() + channelOrFirst(channel, audio.size() / frames) * frames;
+}
+
 bool reserveRenderCacheBytes(size_t bytes) noexcept
 {
     // This counter covers only canonical/prepared PCM.  Other caches use the
@@ -211,7 +221,8 @@ void RenderCache::setCanonicalSource(
 void RenderCache::fillCanonicalContextFromNative(std::vector<float>& context,
                                                  int64_t globalBegin,
                                                  int64_t globalEnd,
-                                                 int64_t contextGlobalBegin)
+                                                 int64_t contextGlobalBegin,
+                                                 int channel)
 {
     if (globalEnd <= globalBegin)
         return;
@@ -227,7 +238,8 @@ void RenderCache::fillCanonicalContextFromNative(std::vector<float>& context,
         return;
 
     auto halo = preparedResampler_.resampleRange(
-        nativeBuffer->getReadPointer(0), nativeBuffer->getNumSamples(),
+        nativeBuffer->getReadPointer(channelOrFirst(channel, nativeBuffer->getNumChannels())),
+        nativeBuffer->getNumSamples(),
         nativeSource_.sampleRate, kSampleRate,
         nativeSource_.firstSourceSample, globalBegin, static_cast<int>(outputLength));
     std::copy(halo.begin(), halo.end(),
@@ -242,7 +254,8 @@ std::vector<float> RenderCache::resampleCanonicalRange(
     const PlaybackSampleGeometry::SampleSpan& support,
     int64_t targetBegin,
     int outputLength,
-    double targetSampleRate)
+    double targetSampleRate,
+    int channel)
 {
     const int64_t inputLength = support.end - support.begin;
     std::vector<float> context(static_cast<size_t>(inputLength), 0.0f);
@@ -257,18 +270,19 @@ std::vector<float> RenderCache::resampleCanonicalRange(
         && canonicalBuffer_->getNumChannels() > 0
         && copyEnd > copyBegin)
     {
-        std::copy_n(canonicalBuffer_->getReadPointer(0) + copyBegin,
+        const int sourceChannel = channelOrFirst(channel, canonicalBuffer_->getNumChannels());
+        std::copy_n(canonicalBuffer_->getReadPointer(sourceChannel) + copyBegin,
                     static_cast<size_t>(copyEnd - copyBegin),
                     context.data() + (copyBegin - localBegin));
     }
 
     if (support.begin < firstCanonicalSample_) {
         fillCanonicalContextFromNative(context, support.begin,
-            std::min(support.end, firstCanonicalSample_), support.begin);
+            std::min(support.end, firstCanonicalSample_), support.begin, channel);
     }
     if (support.end > canonicalGlobalEnd) {
         fillCanonicalContextFromNative(context, std::max(support.begin, canonicalGlobalEnd),
-            support.end, support.begin);
+            support.end, support.begin, channel);
     }
 
     for (const auto& edit : canonicalSnapshot.chunks) {
@@ -281,12 +295,9 @@ std::vector<float> RenderCache::resampleCanonicalRange(
         if (overlapEnd <= overlapBegin)
             continue;
         const int64_t sourceOffset = overlapBegin - editGlobalBegin;
-        const int64_t sourceLength = static_cast<int64_t>(edit.audio->size());
-        if (sourceOffset < 0 || sourceOffset >= sourceLength)
-            continue;
-        const size_t copyCount = static_cast<size_t>(std::min(
-            overlapEnd - overlapBegin, sourceLength - sourceOffset));
-        std::copy_n(edit.audio->data() + sourceOffset, copyCount,
+        const auto sourceLength = static_cast<size_t>(editGlobalEnd - editGlobalBegin);
+        std::copy_n(planarChannel(*edit.audio, sourceLength, channel) + sourceOffset,
+                    static_cast<size_t>(overlapEnd - overlapBegin),
                     context.data() + static_cast<size_t>(overlapBegin - support.begin));
     }
 
@@ -326,6 +337,8 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
     if (targetSr > 0.0 && canonicalSnapshot && !canonicalSnapshot->chunks.empty()) {
         using PlaybackSampleGeometry::projectToSample;
         const bool aliasCanonical = targetSr == kSampleRate;
+        const int64_t canonicalEnd = firstCanonicalSample_
+            + (canonicalBuffer_ != nullptr ? canonicalBuffer_->getNumSamples() : 0);
         preparedSnapshot->chunks.reserve(canonicalSnapshot->chunks.size());
 
         for (const auto& chunk : canonicalSnapshot->chunks) {
@@ -374,6 +387,18 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
             dependencies.canonicalBuffer = canonicalBuffer_;
             dependencies.firstCanonicalSample = firstCanonicalSample_;
             dependencies.nativeSource = nativeSource_;
+            // A mono edit can still have distinct channel values after SRC
+            // if the filter reaches a stereo neighbour or dry source.
+            size_t numChannels = 1;
+            int64_t coveredUntil = support.begin;
+            const auto includeDryChannels = [&](int64_t begin, int64_t end) {
+                if (end <= begin)
+                    return;
+                if (canonicalBuffer_ != nullptr && begin < canonicalEnd && end > firstCanonicalSample_)
+                    numChannels = std::max(numChannels, static_cast<size_t>(canonicalBuffer_->getNumChannels()));
+                if (nativeSource_.buffer != nullptr && (begin < firstCanonicalSample_ || end > canonicalEnd))
+                    numChannels = std::max(numChannels, static_cast<size_t>(nativeSource_.buffer->getNumChannels()));
+            };
             for (const auto& edit : canonicalSnapshot->chunks) {
                 if (!edit.audio || edit.audio->empty())
                     continue;
@@ -381,9 +406,14 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
                 const int64_t editGlobalEnd = firstCanonicalSample_ + edit.endSampleExclusive;
                 if (editGlobalEnd <= support.begin || editGlobalBegin >= support.end)
                     continue;
+                includeDryChannels(coveredUntil, editGlobalBegin);
+                coveredUntil = std::max(coveredUntil, editGlobalEnd);
+                numChannels = std::max(numChannels, edit.audio->size()
+                    / static_cast<size_t>(editGlobalEnd - editGlobalBegin));
                 dependencies.edits.push_back(
                     { edit.audio, edit.startSample, edit.endSampleExclusive, edit.audioRevision });
             }
+            includeDryChannels(coveredUntil, support.end);
 
             // Reuse only when every value dependency of this target chunk is
             // unchanged: canonical input identity/origin, native halo
@@ -402,14 +432,24 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
                 continue;
             }
 
-            const size_t reservedBytes = static_cast<size_t>(outputLength) * sizeof(float);
+            const size_t channelBytes = static_cast<size_t>(outputLength) * sizeof(float);
+            if (numChannels > std::numeric_limits<size_t>::max() / channelBytes)
+                return false;
+            const size_t reservedBytes = numChannels * channelBytes;
             if (!reserveRenderCacheBytes(reservedBytes))
                 return false;
 
             std::vector<float> resampled;
             try {
                 resampled = resampleCanonicalRange(
-                    *canonicalSnapshot, support, pc.startSample, outputLength, targetSr);
+                    *canonicalSnapshot, support, pc.startSample, outputLength, targetSr, 0);
+                if (numChannels > 1)
+                    resampled.reserve(numChannels * static_cast<size_t>(outputLength));
+                for (size_t channel = 1; channel < numChannels; ++channel) {
+                    auto plane = resampleCanonicalRange(*canonicalSnapshot, support,
+                        pc.startSample, outputLength, targetSr, static_cast<int>(channel));
+                    resampled.insert(resampled.end(), plane.begin(), plane.end());
+                }
             } catch (...) {
                 releaseRenderCacheBytes(reservedBytes);
                 throw;
@@ -522,14 +562,11 @@ void RenderCache::overlayPreparedAudio(juce::AudioBuffer<float>& destination,
         const int destOffset = destStartSample + static_cast<int>(overlapStart - requestStart);
 
         if (chunkSrcOffset < 0 || copyLen <= 0) continue;
-        if (chunkSrcOffset + copyLen > static_cast<int>(chunk.audio->size())) continue;
+        const auto frames = static_cast<size_t>(chunk.endSampleExclusive - chunk.startSample);
 
-        const float* srcData = chunk.audio->data() + chunkSrcOffset;
         for (int ch = 0; ch < destinationChannels; ++ch) {
-            float* dst = destination.getWritePointer(ch);
-            for (int i = 0; i < copyLen; ++i) {
-                dst[destOffset + i] = srcData[i];
-            }
+            const auto* source = planarChannel(*chunk.audio, frames, ch) + chunkSrcOffset;
+            destination.copyFrom(ch, destOffset, source, copyLen);
         }
     }
 }
@@ -579,14 +616,11 @@ void RenderCache::overlayCanonicalAudio(juce::AudioBuffer<float>& destination,
         const int destOffset = destStartSample + static_cast<int>(overlapStart - requestStart);
 
         if (chunkSrcOffset < 0 || copyLen <= 0) continue;
-        if (chunkSrcOffset + copyLen > static_cast<int>(chunk.audio->size())) continue;
+        const auto frames = static_cast<size_t>(chunk.endSampleExclusive - chunk.startSample);
 
-        const float* srcData = chunk.audio->data() + chunkSrcOffset;
         for (int ch = 0; ch < destinationChannels; ++ch) {
-            float* dst = destination.getWritePointer(ch);
-            for (int i = 0; i < copyLen; ++i) {
-                dst[destOffset + i] = srcData[i];
-            }
+            const auto* source = planarChannel(*chunk.audio, frames, ch) + chunkSrcOffset;
+            destination.copyFrom(ch, destOffset, source, copyLen);
         }
     }
 }
@@ -868,10 +902,11 @@ bool RenderCache::getRunningChunk(int64_t startSample, RunningChunkSnapshot& out
 RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(int64_t startSample,
                                                                            int64_t endSampleExclusive,
                                                                            std::vector<float>&& audio,
-                                                                           uint64_t revision) {
+                                                                           uint64_t revision,
+                                                                           int numChannels) {
     collectPlaybackSnapshots();
-    if (audio.empty() || revision == 0 || endSampleExclusive <= startSample) {
-        jassert(audio.empty() == false && revision != 0 && endSampleExclusive > startSample);
+    if (audio.empty() || revision == 0 || endSampleExclusive <= startSample || numChannels <= 0) {
+        jassert(!audio.empty() && revision != 0 && endSampleExclusive > startSample && numChannels > 0);
         AppLogger::log("RenderCache::completeChunkRenderWithAudio INVALID_INPUT"
             " startSample=" + juce::String(startSample)
             + " audioEmpty=" + juce::String(audio.empty() ? 1 : 0)
@@ -880,8 +915,10 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(int64_t
     }
 
     const int64_t expectedSamples = endSampleExclusive - startSample;
-    if (expectedSamples != static_cast<int64_t>(audio.size())) {
-        jassert(expectedSamples == static_cast<int64_t>(audio.size()));
+    const bool validLayout = audio.size() % numChannels == 0
+        && audio.size() / numChannels == static_cast<uint64_t>(expectedSamples);
+    if (!validLayout) {
+        jassert(validLayout);
         AppLogger::log("RenderCache::completeChunkRenderWithAudio SAMPLE_SPAN_MISMATCH"
             " expected=" + juce::String(expectedSamples)
             + " actual=" + juce::String(static_cast<int64_t>(audio.size())));

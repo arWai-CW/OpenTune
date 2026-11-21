@@ -383,11 +383,9 @@ bool chunkIntersectsActiveEqNote(const std::vector<Note>& notes,
     return false;
 }
 
-RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
-    RenderCache& renderCache,
+void applyPerNoteEq(
     const FrozenRenderBoundaries& boundaries,
-    std::vector<float> audio,
-    uint64_t revision,
+    float* audio,
     const std::vector<Note>& notes)
 {
     for (const auto& note : notes)
@@ -419,14 +417,14 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
 
         if (!fadeIn && !fadeOut)
         {
-            float* channelData[1] = { audio.data() + audioOffset };
+            float* channelData[1] = { audio + audioOffset };
             juce::AudioBuffer<float> noteBuffer(channelData, 1, noteSampleCount);
             processor.process(noteBuffer);
             continue;
         }
 
         std::vector<float> filtered(static_cast<size_t>(noteSampleCount));
-        std::copy_n(audio.data() + audioOffset, noteSampleCount, filtered.data());
+        std::copy_n(audio + audioOffset, noteSampleCount, filtered.data());
         float* filteredData[1] = { filtered.data() };
         juce::AudioBuffer<float> filteredBuffer(filteredData, 1, noteSampleCount);
         processor.process(filteredBuffer);
@@ -457,10 +455,22 @@ RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
             audio[audioOffset + static_cast<size_t>(i)] = dry + (wet - dry) * wetMix;
         }
     }
+}
 
+RenderCache::ChunkRenderResult publishChunkWithPerNoteEq(
+    RenderCache& renderCache,
+    const FrozenRenderBoundaries& boundaries,
+    std::vector<float> audio,
+    uint64_t revision,
+    const std::vector<Note>& notes,
+    int numChannels = 1)
+{
+    const auto frames = static_cast<size_t>(boundaries.publishSampleCount);
+    for (int channel = 0; channel < numChannels; ++channel)
+        applyPerNoteEq(boundaries, audio.data() + channel * frames, notes);
     return renderCache.completeChunkRenderWithAudio(
         boundaries.trueStartSample, boundaries.trueEndSample,
-        std::move(audio), revision);
+        std::move(audio), revision, numChannels);
 }
 
 } // namespace
@@ -2154,20 +2164,21 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     }
 
     // 契约 §6：边界冻结后立即计算当前 chunk 是否与 active-EQ Note 相交。
-    // 带 active EQ 的 Note 不得走 Blank：原 Blank/失败条件中若相交则发布原始
-    // monoAudio 的 publishSampleCount 部分并应用 EQ。
+    // 带 active EQ 的 Note 不得走 Blank：发布原始音频并应用 EQ。
     const bool intersectsActiveEqNote = chunkIntersectsActiveEqNote(
         contentSnap->notes, boundaries);
 
-    // 原始路径发布：monoAudio 的 publishSampleCount 部分 + per-note EQ（契约 §6）
+    const int numChannels = coreJob.audioBuffer->getNumChannels();
     const auto publishRawWithEq = [&]() {
-        std::vector<float> rawAudio(
-            monoAudio.begin(),
-            monoAudio.begin() + static_cast<size_t>(boundaries.publishSampleCount));
+        const auto frames = static_cast<size_t>(boundaries.publishSampleCount);
+        std::vector<float> rawAudio(frames * numChannels);
+        for (int channel = 0; channel < numChannels; ++channel)
+            std::copy_n(coreJob.audioBuffer->getReadPointer(channel) + boundaries.trueStartSample,
+                        frames, rawAudio.data() + channel * frames);
         const auto rawAudioSamples = rawAudio.size();
         const auto result = publishChunkWithPerNoteEq(
             *coreJob.renderCache, boundaries, std::move(rawAudio),
-            coreJob.targetRevision, contentSnap->notes);
+            coreJob.targetRevision, contentSnap->notes, numChannels);
         if (result == RenderCache::ChunkRenderResult::InvalidInput
             || result == RenderCache::ChunkRenderResult::MemoryLimitExceeded) {
             failChunk(completion, coreJob.renderCache.get(), coreJob.startSample,
@@ -2176,7 +2187,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                           ? "RenderCache rejected raw audio as invalid input (startSample="
                               + juce::String(boundaries.trueStartSample) + ", endSampleExclusive="
                               + juce::String(boundaries.trueEndSample) + ", expectedSamples="
-                              + juce::String(boundaries.publishSampleCount) + ", actualSamples="
+                              + juce::String(static_cast<juce::int64>(frames * numChannels)) + ", actualSamples="
                               + juce::String(static_cast<juce::int64>(rawAudioSamples))
                               + ", revision=" + juce::String(static_cast<juce::int64>(coreJob.targetRevision)) + ")"
                           : "RenderCache could not publish raw audio because its memory limit was exceeded (samples="
@@ -2412,17 +2423,39 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     shifterLookbehindSamples,
                     detectorFrames.data(),
                     detectorNumSamples,
-                    snapMode);
+                    snapMode,
+                    numChannels > 1);
+
+                const auto frames = static_cast<size_t>(boundaries.publishSampleCount);
+                const auto expectedSamples = frames * numChannels;
+                if (repair.success && repair.audio.size() == frames && numChannels > 1)
+                {
+                    repair.audio.reserve(expectedSamples);
+                    for (int channel = 1; channel < numChannels; ++channel)
+                    {
+                        const auto* source = coreJob.audioBuffer->getReadPointer(channel);
+                        AutoTunePitchShifter channelShifter(RenderCache::kSampleRate);
+                        auto plane = channelShifter.shiftChunkWithSharedPeriods(
+                            source + boundaries.trueStartSample, detectorNumSamples,
+                            autoTuneTargetF0.data(), safeNumF0Frames, f0FrameRate, firstSampleFramePhase,
+                            source + boundaries.trueEndSample, shifterLookaheadSamples,
+                            source + boundaries.trueStartSample - shifterLookbehindSamples,
+                            shifterLookbehindSamples, repair, snapMode);
+                        if (plane.size() != frames)
+                            break;
+                        repair.audio.insert(repair.audio.end(), plane.begin(), plane.end());
+                    }
+                }
 
                 // 轻量移调未满足 ±75 音分合同或输出长度不符时，记录失败
                 // 并沿自然 fall-through 进入 vocoder 全量渲染，不发布空音频。
                 const auto shiftedAudioSamples = repair.audio.size();
                 if (!repair.success
-                    || shiftedAudioSamples != static_cast<size_t>(boundaries.publishSampleCount))
+                    || shiftedAudioSamples != expectedSamples)
                 {
                     AppLogger::warn("RenderWorker: AutoTune pitch-shift contract not met, falling through to vocoder (startSample="
                         + juce::String(boundaries.trueStartSample)
-                        + ", expectedSamples=" + juce::String(boundaries.publishSampleCount)
+                        + ", expectedSamples=" + juce::String(static_cast<juce::int64>(expectedSamples))
                         + ", bestOctave=" + juce::String(repair.octave)
                         + ", targetErrorCents=" + juce::String(repair.targetErrorCents, 3)
                         + ", continuityCents=" + juce::String(repair.continuityCents, 3)
@@ -2434,7 +2467,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     const uint64_t objectId = coreJob.contentKey.objectId;
                     const auto result = publishChunkWithPerNoteEq(
                         *coreJob.renderCache, boundaries, std::move(repair.audio),
-                        coreJob.targetRevision, contentSnap->notes);
+                        coreJob.targetRevision, contentSnap->notes, numChannels);
 
                     if (result == RenderCache::ChunkRenderResult::InvalidInput
                         || result == RenderCache::ChunkRenderResult::MemoryLimitExceeded)
@@ -2445,7 +2478,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                                       ? "RenderCache rejected AutoTune audio as invalid input (startSample="
                                           + juce::String(boundaries.trueStartSample) + ", endSampleExclusive="
                                           + juce::String(boundaries.trueEndSample) + ", expectedSamples="
-                                          + juce::String(boundaries.publishSampleCount) + ", actualSamples="
+                                          + juce::String(static_cast<juce::int64>(expectedSamples)) + ", actualSamples="
                                           + juce::String(static_cast<juce::int64>(shiftedAudioSamples))
                                           + ", revision=" + juce::String(static_cast<juce::int64>(coreJob.targetRevision)) + ")"
                                       : "RenderCache could not publish AutoTune audio because its memory limit was exceeded (samples="
