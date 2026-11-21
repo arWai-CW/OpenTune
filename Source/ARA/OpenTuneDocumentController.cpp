@@ -1220,6 +1220,32 @@ OpenTuneDocumentController::getPlaybackRegionProjectionsFor(
     return projections;
 }
 
+std::vector<PitchReferenceSnapshot> OpenTuneDocumentController::readPitchReferences(
+    const juce::ARARegionSequence& track, ContentKey editedContent) const
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    std::vector<PitchReferenceSnapshot> references;
+    for (const auto& region : getPlaybackRegionProjectionsFor(track.getPlaybackRegions())) {
+        if (!region.contentProjection.isValid() || region.contentKey == editedContent)
+            continue;
+
+        const auto* modification = findAudioModificationByContentKey(region.contentKey);
+        if (modification == nullptr || !modification->hasContentState())
+            continue;
+
+        const auto& content = *modification->content;
+        if (content.analysis.pitchCurve == nullptr || content.timeGrid == nullptr)
+            continue;
+        auto curve = content.analysis.pitchCurve->getSnapshot();
+        if (curve == nullptr || curve->isEmpty())
+            continue;
+
+        references.push_back({region.contentProjection, content.timeGrid, std::move(curve),
+            static_cast<float>(content.pitchShiftSettings.getPitchRatio())});
+    }
+    return references;
+}
+
 int OpenTuneDocumentController::requestReadAudioForPlaybackRegion(
     juce::ARAPlaybackRegion* playbackRegion)
 {
@@ -2123,6 +2149,13 @@ OpenTuneDocumentController::makeProjection(const PlaybackRegion& placement) cons
         return projection;
 
     projection.contentKey = modification->contentKey();
+    if (modification->hasContentState()) {
+        projection.contentProjection = {
+            projection.startInPlaybackTime,
+            projection.durationInPlaybackTime,
+            projection.startInModificationTime - modification->content->sourceWindow.sourceStartSeconds,
+            projection.durationInModificationTime};
+    }
     return projection;
 }
 

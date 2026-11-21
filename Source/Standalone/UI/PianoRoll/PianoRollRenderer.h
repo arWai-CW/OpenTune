@@ -15,6 +15,7 @@
 #include "UI/ToolIds.h"
 #include "UI/ViewMapper.h"
 #include "Content/EditableContentSnapshot.h"
+#include "Content/PitchReferenceSnapshot.h"
 #include <algorithm>
 #include <vector>
 #include <array>
@@ -127,6 +128,8 @@ public:
                                     const ContentRenderItem& item,
                                     bool playheadHighlight = false);
     void drawF0Curve(juce::Graphics& g, const RenderContext& ctx, const ContentRenderItem& item);
+    void drawPitchReference(juce::Graphics& g, const RenderContext& ctx,
+                            const PitchReferenceSnapshot& reference);
     void drawF0SelectionHighlight(juce::Graphics& g, const RenderContext& ctx, const ContentRenderItem& item);
 
     // ⚡️ §8.5 — paint TimeGrid handles as vertical guide lines.

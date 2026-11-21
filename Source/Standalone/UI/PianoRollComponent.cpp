@@ -2823,6 +2823,9 @@ void PianoRollComponent::drawContent(juce::Graphics& g, const ViewportState& vie
     for (const auto& item : renderCtx.contents)
         renderer_->drawNotes(g, renderCtx, item);
 
+    for (const auto& reference : pitchReferences_)
+        renderer_->drawPitchReference(g, renderCtx, reference);
+
     for (const auto& item : renderCtx.contents)
         renderer_->drawF0Curve(g, renderCtx, item);
 
@@ -3698,6 +3701,16 @@ void PianoRollComponent::setTimelineContentPlacements(std::vector<TimelineConten
         pendingSingleContentProjection_ = activeContentProjection();
         requestContentRedraw();
     }
+}
+
+void PianoRollComponent::setPitchReferences(std::vector<PitchReferenceSnapshot> references)
+{
+    if (references == pitchReferences_)
+        return;
+    pitchReferences_ = std::move(references);
+    contentDirty_ = true;
+    rasterizeDirtySurfaces();
+    repaint();
 }
 
 void PianoRollComponent::setEditedContent(ContentKey contentKey,
@@ -6017,7 +6030,7 @@ std::optional<PianoRollRenderer::ContentRenderItem> PianoRollComponent::buildCon
             item.ownerSnapshot = previewSnap;
             item.displayNotes = &item.ownerSnapshot->notes;
         } else {
-            item.ownerSnapshot = readEditedSnapshot();
+            item.ownerSnapshot = snap;
             item.displayNotes = &getDisplayedNotes();  // includes live note draft when active
         }
         // 唯一 F0 来源：ownerSnapshot 的 pitchCurve（预览 = 烘焙 scratch，否则 = committed）

@@ -47,6 +47,7 @@ class OpenTuneAudioProcessorEditor : public juce::AudioProcessorEditor,
 #if JucePlugin_Enable_ARA
                                      public juce::AudioProcessorEditorARAExtension,
                                       public juce::ARAAudioModificationListener,
+                                      private juce::ARARegionSequenceListener,
 #endif
                                      public TimelineOverviewComponent::Listener,
                                      public ParameterPanel::Listener,
@@ -137,6 +138,9 @@ private:
         double timelineViewStartSeconds = 0.0;
         double timelineViewEndSeconds = 0.0;
         bool isRegularVst3Capture = false;
+#if JucePlugin_Enable_ARA
+        const juce::ARARegionSequence* focusedAraTrack = nullptr;
+#endif
 
         bool hasPlacements() const noexcept
         {
@@ -168,6 +172,11 @@ private:
     std::vector<juce::ARAPlaybackRegion*> resolveContentScopeRegions() const;
     void readScopeAudio();
 #if JucePlugin_Enable_ARA
+    void addPitchReferenceMenu(juce::PopupMenu& menu);
+    void setPitchReferenceTrack(juce::ARARegionSequence* track);
+    void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
+    juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
+
     void subscribePendingNoteGeneration(ContentKey key, juce::ARAAudioModification* modification,
                                         const NoteGeneratorParams& params);
     void queuePendingNoteGeneration(ContentKey key, juce::ARAAudioModification* modification);

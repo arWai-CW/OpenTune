@@ -1603,6 +1603,46 @@ void PianoRollRenderer::drawF0SelectionHighlight(juce::Graphics& g,
     }
 }
 
+void PianoRollRenderer::drawPitchReference(juce::Graphics& g, const RenderContext& ctx,
+                                           const PitchReferenceSnapshot& reference)
+{
+    const auto& placement = reference.projection;
+    const int left = std::max(ctx.contentStartX, ctx.coords.timeToX(placement.timelineStartSeconds));
+    const int right = std::min(ctx.width, ctx.coords.timeToX(placement.timelineEndSeconds()));
+    if (right <= left || reference.curve == nullptr || reference.timeGrid == nullptr)
+        return;
+
+    const auto& curve = *reference.curve;
+    const F0Timeline timeline(curve.getHopSize(), curve.getSampleRate(), static_cast<int>(curve.size()));
+    if (timeline.isEmpty())
+        return;
+
+    const PianoRollTimeMap map(placement, *reference.timeGrid, ctx.coords);
+    const auto frames = timeline.rangeForTimesWithMargin(map.xToSource(left), map.xToSource(right), 2);
+    const auto segments = buildF0VisualSegments(nullptr, frames.endFrameExclusive,
+        {ctx.pixelsPerSecond, timeline.timeAtFrame(1) - timeline.timeAtFrame(0)},
+        [&](int frame) { return static_cast<float>(map.sourceToX(timeline.timeAtFrame(frame))); },
+        [&](int, float frequency) { return ctx.coords.freqToY(frequency); },
+        [&](auto&& sink) {
+            curve.forEachEffectiveF0Span(frames.startFrame, frames.endFrameExclusive,
+                                          reference.originalPitchRatio, sink);
+        });
+
+    juce::Graphics::ScopedSaveState saved(g);
+    g.reduceClipRegion(left, 0, right - left, ctx.height);
+    g.setColour(juce::Colour(0xffa8adb5).withAlpha(0.72f));
+    juce::Path path;
+    for (const auto& segment : segments) {
+        if (segment.points.empty())
+            continue;
+        if (segment.useLinearPath)
+            appendLinearF0Path(path, segment.points, 0, segment.points.size() - 1);
+        else
+            appendSmoothedF0Path(path, segment.points, 0, segment.points.size() - 1);
+    }
+    g.strokePath(path, juce::PathStrokeType(1.4f));
+}
+
 void PianoRollRenderer::drawF0Curve(juce::Graphics& g,
                                      const RenderContext& ctx,
                                      const ContentRenderItem& item)

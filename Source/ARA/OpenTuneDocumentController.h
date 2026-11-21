@@ -24,6 +24,7 @@
 #include "../Services/F0ExtractionService.h"
 #include "../Content/ContentKey.h"
 #include "../Content/OriginalF0FailureEvent.h"
+#include "../Content/PitchReferenceSnapshot.h"
 #include "../Utils/Note.h"
 #include "../Utils/PlaybackSampleGeometry.h"
 #include "../Utils/PlayHeadState.h"
@@ -67,6 +68,7 @@ public:
         double durationInModificationTime{0.0};
 
         ContentKey contentKey;
+        ContentTimelineProjection contentProjection;
 
         bool isPlaybackRenderable() const noexcept;
     };
@@ -131,6 +133,8 @@ public:
 
     std::vector<PlaybackRegionProjection> getPlaybackRegionProjectionsFor(
         const std::vector<juce::ARAPlaybackRegion*>& playbackRegions) const;
+    std::vector<PitchReferenceSnapshot> readPitchReferences(
+        const juce::ARARegionSequence& track, ContentKey editedContent) const;
     // 用户 Read 入口：只读取当前内容范围内的首个 PlaybackRegion。
     // archive 恢复且已有有效 F0 的内容由 readRestoredAudio 自动读取，无需此入口。
     int requestReadAudioForPlaybackRegion(juce::ARAPlaybackRegion* playbackRegion);

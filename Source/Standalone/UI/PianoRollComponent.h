@@ -308,8 +308,7 @@ public:
     bool setContentProjection(const ContentTimelineProjection& projection);
     void setTimelineContentPlacements(std::vector<TimelineContentPlacement> placements);
 
-    /** 设置 reference overlay 数据（ghost notes + anchors）。
-     *  传入 std::nullopt 清除 overlay。 */
+    void setPitchReferences(std::vector<PitchReferenceSnapshot> references);
 
     void setPlayheadColour(juce::Colour colour) {
         playheadColour_ = colour;
@@ -760,6 +759,7 @@ private:
     std::vector<Note> getEditedContentNotesCopy() const;
 
     std::shared_ptr<const PitchCurveSnapshot> currentCurve_;
+    std::vector<PitchReferenceSnapshot> pitchReferences_;
     
     std::unique_ptr<PianoRollRenderer> renderer_;
     std::unique_ptr<PianoRollToolHandler> toolHandler_;

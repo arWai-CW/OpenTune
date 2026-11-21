@@ -56,6 +56,8 @@ Please visit the [Releases](https://github.com/YuFeng926/OpenTune/releases) page
 
 For detailed per-platform installation steps (Windows ZIP, macOS DMG install script and Gatekeeper handling, VST3 install location) and the runtime file structure, see [INSTALL.en.md](INSTALL.en.md).
 
+In an ARA editor, choose **View → Pitch Reference Track** to overlay another track's analyzed pitch while editing the focused region. The reference shows the track's pitch with any existing corrections, is read-only, and must be in the same ARA document. Analyze its regions first if no curve appears.
+
 To control local OpenTune from OpenCode, Claude Code, or Codex CLI, see the [MCP setup guide (Chinese)](Integrations/opentune-mcp/README.md).
 
 
