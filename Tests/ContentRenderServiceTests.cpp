@@ -360,6 +360,75 @@ bool testStaleCompletionCannotPassClearedCacheGeneration()
         && !cache.getStateSnapshot().hasPublishedAudio;
 }
 
+bool testStereoRenderCacheOverlays()
+{
+    constexpr int length = 1024;
+    constexpr uint64_t revision = 3;
+    RenderCache cache;
+    cache.reconcileFullPlanAndRequest({{0, length}}, 0, length, revision);
+    RenderCache::PendingJob pending;
+    if (!cache.claimPendingJob(0, pending))
+        return false;
+    std::vector<float> stereo(2 * length);
+    for (int i = 0; i < length; ++i) {
+        stereo[i] = static_cast<float>(0.2 * std::sin(i * 0.07));
+        stereo[length + i] = -0.5f * stereo[i];
+    }
+    if (cache.completeChunkRenderWithAudio(0, length, std::vector<float>(stereo),
+            pending.targetRevision, pending.generation, 2) != RenderCache::ChunkRenderResult::Published)
+        return false;
+    juce::AudioBuffer<float> canonical(2, length + 16);
+    canonical.clear();
+    cache.overlayCanonicalAudio(canonical, 8, length, 0);
+    for (int channel = 0; channel < 2; ++channel)
+        for (int i = 0; i < length; ++i)
+            if (canonical.getSample(channel, i + 8) != stereo[channel * length + i])
+                return false;
+    for (int rate : {44100, 48000}) {
+        cache.prepareForPlaybackSampleRate(rate);
+        const int outputLength = static_cast<int>(TimeCoordinate::sampleRateProject(
+            length, RenderCache::kSampleRate, rate));
+        juce::AudioBuffer<float> prepared(2, outputLength);
+        prepared.clear();
+        cache.overlayPreparedAudio(prepared, 0, outputLength, 0, rate, revision);
+        double energy = 0.0;
+        for (int i = 0; i < outputLength; ++i) {
+            const float left = prepared.getSample(0, i);
+            energy += left * left;
+            if (std::abs(prepared.getSample(1, i) + 0.5f * left) > 1e-6f)
+                return false;
+        }
+        if (energy < 0.1)
+            return false;
+        prepared.clear();
+        cache.overlayPreparedAudio(prepared, 0, outputLength, 0, rate, revision + 1);
+        if (prepared.getMagnitude(0, outputLength) != 0.0f)
+            return false;
+    }
+    cache.clear();
+    canonical.clear();
+    cache.overlayCanonicalAudio(canonical, 0, length, 0);
+    if (canonical.getMagnitude(0, length) != 0.0f)
+        return false;
+    cache.reconcileFullPlanAndRequest({{0, length}}, 0, length, revision);
+    if (!cache.claimPendingJob(0, pending)
+        || cache.completeChunkRenderWithAudio(0, length, std::vector<float>(length, 0.25f),
+            pending.targetRevision, pending.generation) != RenderCache::ChunkRenderResult::Published)
+        return false;
+    cache.overlayCanonicalAudio(canonical, 0, length, 0);
+    for (int i = 0; i < length; ++i)
+        if (canonical.getSample(0, i) != 0.25f || canonical.getSample(1, i) != 0.25f)
+            return false;
+    if (cache.completeChunkRenderWithAudio(0, length, {},
+            pending.targetRevision, pending.generation, 2) != RenderCache::ChunkRenderResult::InvalidInput
+        || cache.completeChunkRenderWithAudio(0, length, std::vector<float>(2 * length),
+            pending.targetRevision, pending.generation, 0) != RenderCache::ChunkRenderResult::InvalidInput
+        || cache.completeChunkRenderWithAudio(0, length, std::vector<float>(2 * length - 1),
+            pending.targetRevision, pending.generation, 2) != RenderCache::ChunkRenderResult::InvalidInput)
+        return false;
+    return true;
+}
+
 bool testTimeGridChangeReusesSettledStage1ForStage2()
 {
     auto firstGrid = makeWarpedGrid(1.0);
@@ -545,6 +614,8 @@ int main()
                 testSettlementEnqueuesStage2OnlyForNonAraContent());
     ok &= check("stale completion cannot pass cleared cache generation",
                 testStaleCompletionCannotPassClearedCacheGeneration());
+    ok &= check("stereo render cache preserves channels at canonical and playback rates",
+                testStereoRenderCacheOverlays());
     ok &= check("TimeGrid change reuses settled Stage1 for Stage2",
                 testTimeGridChangeReusesSettledStage1ForStage2());
     ok &= check("TimeStretch clear rejects old build",

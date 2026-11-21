@@ -52,6 +52,7 @@ void RenderCache::publishLocked() {
         pc.startSample = chunk.startSample;
         pc.endSampleExclusive = chunk.endSampleExclusive;
         pc.audio = chunk.audio;
+        pc.numChannels = chunk.numChannels;
         pc.contentRevision = chunk.lastRequestedContentRevision;
         snapshot->chunks.push_back(pc);
     }
@@ -110,6 +111,7 @@ void RenderCache::rebuildPrepared()
             PublishedPreparedChunk pc;
             pc.startSample = prepStart;
             pc.endSampleExclusive = prepEnd;
+            pc.numChannels = chunk.numChannels;
 
             // 增量复用：canonical 内容未变（同 span、同 contentRevision）时直接共享
             // 旧 prepared PCM，跳过 r8brain 重采样。条件从严：任何不匹配都重采样，
@@ -118,6 +120,7 @@ void RenderCache::rebuildPrepared()
             if (!aliasCanonical
                 && prevIt != previous.end()
                 && prevIt->second->endSampleExclusive == prepEnd
+                && prevIt->second->numChannels == chunk.numChannels
                 && prevIt->second->sourceRevision == chunk.contentRevision)
             {
                 pc.audio = prevIt->second->audio;
@@ -133,12 +136,16 @@ void RenderCache::rebuildPrepared()
                 const int outputLength = static_cast<int>(prepEnd - prepStart);
                 if (outputLength <= 0) continue;
 
-                std::vector<float> resampled = preparedResampler_.resampleExactLength(
-                    chunk.audio->data(),
-                    chunk.audio->size(),
-                    static_cast<int>(kSampleRate),
-                    static_cast<int>(targetSr),
-                    outputLength);
+                const size_t inputLength = chunk.audio->size() / chunk.numChannels;
+                std::vector<float> resampled;
+                resampled.reserve(static_cast<size_t>(outputLength) * chunk.numChannels);
+                for (int ch = 0; ch < chunk.numChannels; ++ch) {
+                    auto channel = preparedResampler_.resampleExactLength(
+                        chunk.audio->data() + static_cast<size_t>(ch) * inputLength,
+                        inputLength, static_cast<int>(kSampleRate),
+                        static_cast<int>(targetSr), outputLength);
+                    resampled.insert(resampled.end(), channel.begin(), channel.end());
+                }
 
                 pc.audio = std::make_shared<const std::vector<float>>(std::move(resampled));
                 pc.sourceRevision = chunk.contentRevision;
@@ -245,10 +252,12 @@ void RenderCache::overlayPreparedAudio(juce::AudioBuffer<float>& destination,
         const int destOffset = destStartSample + static_cast<int>(overlapStart - requestStart);
 
         if (chunkSrcOffset < 0 || copyLen <= 0) continue;
-        if (chunkSrcOffset + copyLen > static_cast<int>(chunk.audio->size())) continue;
+        const size_t channelLength = chunk.audio->size() / chunk.numChannels;
+        if (static_cast<size_t>(chunkSrcOffset + copyLen) > channelLength) continue;
 
-        const float* srcData = chunk.audio->data() + chunkSrcOffset;
         for (int ch = 0; ch < destinationChannels; ++ch) {
+            const float* srcData = chunk.audio->data() + chunkSrcOffset
+                + static_cast<size_t>(ch % chunk.numChannels) * channelLength;
             float* dst = destination.getWritePointer(ch);
             for (int i = 0; i < copyLen; ++i) {
                 dst[destOffset + i] = srcData[i];
@@ -302,10 +311,12 @@ void RenderCache::overlayCanonicalAudio(juce::AudioBuffer<float>& destination,
         const int destOffset = destStartSample + static_cast<int>(overlapStart - requestStart);
 
         if (chunkSrcOffset < 0 || copyLen <= 0) continue;
-        if (chunkSrcOffset + copyLen > static_cast<int>(chunk.audio->size())) continue;
+        const size_t channelLength = chunk.audio->size() / chunk.numChannels;
+        if (static_cast<size_t>(chunkSrcOffset + copyLen) > channelLength) continue;
 
-        const float* srcData = chunk.audio->data() + chunkSrcOffset;
         for (int ch = 0; ch < destinationChannels; ++ch) {
+            const float* srcData = chunk.audio->data() + chunkSrcOffset
+                + static_cast<size_t>(ch % chunk.numChannels) * channelLength;
             float* dst = destination.getWritePointer(ch);
             for (int i = 0; i < copyLen; ++i) {
                 dst[destOffset + i] = srcData[i];
@@ -594,9 +605,10 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(
     int64_t endSampleExclusive,
     std::vector<float>&& audio,
     uint64_t revision,
-    uint64_t generation) {
-    if (audio.empty() || revision == 0 || endSampleExclusive <= startSample) {
-        jassert(audio.empty() == false && revision != 0 && endSampleExclusive > startSample);
+    uint64_t generation,
+    int numChannels) {
+    if (audio.empty() || revision == 0 || endSampleExclusive <= startSample || numChannels <= 0) {
+        jassert(audio.empty() == false && revision != 0 && endSampleExclusive > startSample && numChannels > 0);
         AppLogger::log("RenderCache::completeChunkRenderWithAudio INVALID_INPUT"
             " startSample=" + juce::String(startSample)
             + " audioEmpty=" + juce::String(audio.empty() ? 1 : 0)
@@ -605,8 +617,10 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(
     }
 
     const int64_t expectedSamples = endSampleExclusive - startSample;
-    if (expectedSamples != static_cast<int64_t>(audio.size())) {
-        jassert(expectedSamples == static_cast<int64_t>(audio.size()));
+    if (audio.size() % static_cast<size_t>(numChannels) != 0
+        || expectedSamples != static_cast<int64_t>(audio.size() / numChannels)) {
+        jassert(expectedSamples == static_cast<int64_t>(audio.size() / numChannels)
+            && audio.size() % static_cast<size_t>(numChannels) == 0);
         AppLogger::log("RenderCache::completeChunkRenderWithAudio SAMPLE_SPAN_MISMATCH"
             " expected=" + juce::String(expectedSamples)
             + " actual=" + juce::String(static_cast<int64_t>(audio.size())));
@@ -640,6 +654,7 @@ RenderCache::ChunkRenderResult RenderCache::completeChunkRenderWithAudio(
         }
 
         chunk.audio = immutableAudio;
+        chunk.numChannels = numChannels;
         chunk.publishedRevision = revision;
         chunk.status = Chunk::Status::Idle;
         chunk.runningRevision = 0;
