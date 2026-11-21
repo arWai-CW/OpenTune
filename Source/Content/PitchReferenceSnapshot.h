@@ -24,4 +24,15 @@ struct PitchReferenceSnapshot
     }
 };
 
+struct PitchReferenceCorrection
+{
+    std::vector<PitchCorrectionSegment> segments;
+    bool hasVoicedOverlap = false;
+};
+
+PitchReferenceCorrection planPitchReferenceCorrection(
+    const PitchReferenceSnapshot& target,
+    const std::vector<PitchReferenceSnapshot>& references,
+    const std::vector<F0FrameRange>& ranges);
+
 } // namespace OpenTune

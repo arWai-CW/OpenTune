@@ -56,6 +56,8 @@ GPU 加速推理：Windows DirectML / macOS CoreML
 
 在 ARA 编辑器中，从**视图 → 音高参考轨**选择同一 ARA 文档中的另一条轨道，即可一边查看其音高曲线（含已有修正），一边编辑当前区域。参考轨只读；如果没有显示曲线，请先分析参考轨区域。
 
+使用**编辑 → 按音高参考轨修音**，按参考曲线修正已选音符或音高范围（未选择时修正当前区域），保留调外音。只修正播放时间上两轨都有有声音高的位置，可一步撤销。参考轨和原有的 **AUTO** 功能不受影响。
+
 各平台详细安装步骤（Windows 解压运行、macOS DMG 安装脚本与 Gatekeeper 处理、VST3 安装位置）及运行时文件结构，见 [INSTALL.md](INSTALL.md)。
 
 通过 OpenCode、Claude Code 和 Codex CLI 操作本机 OpenTune，见 [MCP 服务安装与配置](Integrations/opentune-mcp/README.md)。

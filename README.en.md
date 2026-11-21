@@ -58,6 +58,8 @@ For detailed per-platform installation steps (Windows ZIP, macOS DMG install scr
 
 In an ARA editor, choose **View → Pitch Reference Track** to overlay another track's analyzed pitch while editing the focused region. The reference shows the track's pitch with any existing corrections, is read-only, and must be in the same ARA document. Analyze its regions first if no curve appears.
 
+Choose **Edit → Tune to Pitch Reference** to match that contour, including notes outside the key. It tunes the selected notes or pitch ranges (or the focused region when nothing is selected), only where both tracks have voiced pitch at the same playback time. Undo reverses the edit in one step; the reference and the regular **AUTO** button are unchanged.
+
 To control local OpenTune from OpenCode, Claude Code, or Codex CLI, see the [MCP setup guide (Chinese)](Integrations/opentune-mcp/README.md).
 
 

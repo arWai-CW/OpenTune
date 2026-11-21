@@ -332,7 +332,8 @@ public:
         EmptyOriginalF0,
         EmptyTimeline,
         NoTargetSelection,
-        EmptyTargetRange
+        EmptyTargetRange,
+        NoVoicedReferenceOverlap
     };
 
     struct AutoTuneApplyResult
@@ -344,6 +345,7 @@ public:
     };
 
     AutoTuneApplyResult applyAutoTuneToSelection();
+    AutoTuneApplyResult tuneToPitchReference();
 
     // Note Copy / Paste / Duplicate
     void copySelectedNotes();
