@@ -8,11 +8,14 @@
 
 #include "DSP/AutoTunePeriodDetector.h"
 #include "DSP/AutoTunePitchShifter.h"
+#include "DSP/PitchShiftRateContract.h"
+#include "Inference/ChunkRenderStrategy.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -189,11 +192,60 @@ double meanAbsDiffRange(const std::vector<float>& a, const std::vector<float>& b
     return sum / static_cast<double>(endIndex - beginIndex);
 }
 
-// ---------------------------------------------------------------------------
-// 1. Identity ramp (correctedF0 == originalF0) must reproduce the input
-//    sample-by-sample within 1e-5. This explicitly rejects a 5-sample delayed
-//    output: cancelling that latency is the whole point of the lookahead feed.
-// ---------------------------------------------------------------------------
+// Integrate Hann-windowed DFT bins over disjoint windows. Goertzel keeps this
+// spectral regression self-contained; Parseval supplies the total energy.
+double bandEnergyRatio(const std::vector<float>& samples, int begin, int end,
+                       double sampleRate, double lowHz, double highHz)
+{
+    constexpr int windowSize = 1024;
+    double bandEnergy = 0.0;
+    double totalEnergy = 0.0;
+    const int firstBin = static_cast<int>(std::ceil(lowHz * windowSize / sampleRate));
+    const int lastBin = std::min(windowSize / 2 - 1,
+        static_cast<int>(std::floor(highHz * windowSize / sampleRate)));
+    double window[windowSize];
+    double frame[windowSize];
+    for (int i = 0; i < windowSize; ++i)
+        window[i] = 0.5 - 0.5 * std::cos(kTwoPi * i / windowSize);
+    for (int start = begin; start + windowSize <= end; start += windowSize) {
+        for (int i = 0; i < windowSize; ++i) {
+            frame[i] = samples[static_cast<size_t>(start + i)] * window[i];
+            totalEnergy += windowSize * frame[i] * frame[i];
+        }
+        for (int bin = firstBin; bin <= lastBin; ++bin) {
+            const double coefficient = 2.0 * std::cos(kTwoPi * bin / windowSize);
+            double previous = 0.0;
+            double previous2 = 0.0;
+            for (const double sample : frame) {
+                const double next = sample + coefficient * previous - previous2;
+                previous2 = previous;
+                previous = next;
+            }
+            bandEnergy += 2.0 * (previous * previous + previous2 * previous2
+                - coefficient * previous * previous2);
+        }
+    }
+    return bandEnergy / totalEnergy;
+}
+
+double toneAmplitude(const std::vector<float>& samples, int begin, int end,
+                     double sampleRate, double frequency)
+{
+    double real = 0.0;
+    double imag = 0.0;
+    double weightSum = 0.0;
+    for (int i = begin; i < end; ++i) {
+        const double weight = 0.5 - 0.5 * std::cos(kTwoPi * (i - begin) / (end - begin));
+        const double phase = kTwoPi * frequency * i / sampleRate;
+        real += weight * samples[static_cast<size_t>(i)] * std::cos(phase);
+        imag += weight * samples[static_cast<size_t>(i)] * std::sin(phase);
+        weightSum += weight;
+    }
+    return 2.0 * std::hypot(real, imag) / weightSum;
+}
+
+// Identity correction must reproduce every input sample. Feeding interpolation
+// lookahead must preserve the published sample alignment.
 void testIdentityRampSampleAlignment()
 {
     constexpr int kSampleRate = 44100;
@@ -205,7 +257,7 @@ void testIdentityRampSampleAlignment()
     const float* lookahead = input.data() + kNumSamples;
 
     // Guard the test itself: the signal must actually change across a
-    // 5-sample offset, otherwise alignment below could not detect latency.
+    // lookahead offset, otherwise alignment below could not detect latency.
     double fiveStepVariation = 0.0;
     for (int i = kLook; i < kNumSamples; ++i) {
         fiveStepVariation += std::fabs(static_cast<double>(
@@ -213,7 +265,7 @@ void testIdentityRampSampleAlignment()
     }
     fiveStepVariation /= static_cast<double>(kNumSamples - kLook);
     expectTrue(fiveStepVariation > 0.05,
-               "identity setup: test signal must vary over a 5-sample offset");
+               "identity setup: test signal must vary over the lookahead offset");
 
     Shifter shifter(static_cast<double>(kSampleRate));
     const float f0 = 220.0f;
@@ -230,11 +282,11 @@ void testIdentityRampSampleAlignment()
             out[static_cast<size_t>(i)] - input[static_cast<size_t>(i)])));
     }
     // Exact passthrough lands at ~0 here (integer read addresses), while any
-    // residual group delay such as the 5 lookahead samples would produce
+    // residual group delay such as the lookahead samples would produce
     // O(0.1..1) sample errors on this noise signal. Tolerance 1e-5.
     expectTrue(maxErr <= 1e-5,
                "identity: output[i] must match input[i] within 1e-5 "
-               "(rejects a 5-sample delayed result)");
+               "(rejects a lookahead-delayed result)");
 
     // Discrimination proof: the delayed hypothesis must fail badly on this
     // signal, demonstrating the assertion above really rejects latency.
@@ -298,7 +350,7 @@ void testNonIdentityShiftKeepsLengthFiniteAndSmooth(bool shiftUp)
     const std::vector<float> input =
         makeSine(220.0, kSampleRate, kNumSamples, kInputAmp);
     const float originalF0 = 220.0f;
-    // Both corrections remain below the production 50-cent vocoder gate.
+    // Both corrections remain inside the production 75-cent contract.
     const float correctedF0 = shiftUp ? 226.0f : 214.0f;
     const int historySamples = 220;
     const std::vector<float> history = makeSineSegment(
@@ -324,8 +376,7 @@ void testNonIdentityShiftKeepsLengthFiniteAndSmooth(bool shiftUp)
     expectTrue(static_cast<int>(out.size()) == kNumSamples, lengthMsg);
     expectTrue(allFinite(out), finiteMsg);
 
-    // Every output sample is an interpolation/blend of past input, so the
-    // magnitude cannot leave the input envelope by any meaningful amount.
+    // This band-limited sine should retain its original amplitude.
     expectTrue(maxAbs(out) <= kInputAmp + 0.05, outlierMsg);
 
     // Sample-to-sample slope of a 220 Hz sine at amp 0.5 is ~0.016. A large
@@ -419,6 +470,138 @@ void testFloatingCyclePeriodProducesTargetRate()
     const double expected = correctedF0 * duration;
     expectTrue(std::fabs(static_cast<double>(crossings) - expected) < expected * 0.03,
                "floating cycle period: output frequency follows corrected F0");
+}
+
+void testCycleTransitionsSuppressAddedHighFrequencies()
+{
+    constexpr int sampleRate = 44100;
+    constexpr int count = sampleRate * 2;
+    constexpr int history = 1024;
+    constexpr float sourceF0 = 200.0f;
+    constexpr float period = 220.5f;
+    std::vector<float> stream(history + count + Shifter::kLookaheadSamples);
+    for (int i = 0; i < static_cast<int>(stream.size()); ++i) {
+        const double t = static_cast<double>(i - history) / sampleRate;
+        double voice = 0.0;
+        for (int harmonic = 1; harmonic <= 20; ++harmonic)
+            voice += 0.2 / harmonic * std::sin(kTwoPi * sourceF0 * harmonic * t + 0.17 * harmonic);
+        voice *= 1.0 + 0.35 * std::sin(kTwoPi * 7.0 * t);
+        // Incommensurate, band-limited components model nonperiodic breath.
+        // The exact fundamental period leaves adjacent cycles different.
+        for (int partial = 0; partial < 17; ++partial)
+            voice += 0.006 * std::sin(kTwoPi * (731.3 + 173.17 * partial) * t + 0.71 * partial * partial);
+        stream[static_cast<size_t>(i)] = static_cast<float>(voice);
+    }
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> periods(count);
+    for (int i = 0; i < count; ++i)
+        periods[static_cast<size_t>(i)] = {period, true, i % 5 == 0};
+    const std::vector<float> input(stream.begin() + history, stream.begin() + history + count);
+    const double inputHigh = bandEnergyRatio(input, sampleRate / 2, count - 1024,
+                                            sampleRate, 8000.0, 22000.0);
+    expectTrue(inputHigh < 1e-10, "spectral setup: source is confined below 4 kHz");
+    for (const double cents : {-50.0, 50.0}) {
+        const float targetF0 = static_cast<float>(sourceF0 * std::exp2(cents / 1200.0));
+        Shifter shifter(sampleRate);
+        const auto output = shifter.shiftChunk(
+            stream.data() + history, count, &sourceF0, &targetF0, 1, 100.0, 0.0,
+            stream.data() + history + count, Shifter::kLookaheadSamples,
+            stream.data(), history, periods.data(), count, true);
+        expectTrue(output.size() == static_cast<size_t>(count), "spectral shift: duration preserved");
+        if (output.size() != static_cast<size_t>(count))
+            continue;
+        const double high = bandEnergyRatio(output, sampleRate / 2, count - 1024,
+                                            sampleRate, 8000.0, 22000.0);
+        std::printf("Cycle transition %+.0f cents: added 8-22 kHz %.1f dB\n", cents, 10.0 * std::log10(high));
+        expectTrue(high < 1e-8, "cycle transitions: added 8-22 kHz energy stays below -80 dB");
+        const double fundamental = toneAmplitude(output, sampleRate / 2, count - 1024,
+                                                 sampleRate, targetF0);
+        expectTrue(fundamental > 0.18 && fundamental < 0.22,
+                   "cycle transitions: target fundamental retains its amplitude and pitch");
+    }
+}
+
+void testResamplingPreservesHighHarmonicsAndRejectsAliases()
+{
+    constexpr int sampleRate = 44100;
+    constexpr int count = sampleRate;
+    constexpr int history = 1024;
+    constexpr float sourceF0 = 200.0f;
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> periods(count);
+    for (int i = 0; i < count; ++i)
+        periods[static_cast<size_t>(i)] = {220.5f, true, i % 5 == 0};
+    for (const double highFrequency : {16000.0, 21800.0}) {
+        std::vector<float> stream(history + count + Shifter::kLookaheadSamples);
+        for (int i = 0; i < static_cast<int>(stream.size()); ++i) {
+            const double t = static_cast<double>(i - history) / sampleRate;
+            stream[static_cast<size_t>(i)] = static_cast<float>(
+                0.2 * std::sin(kTwoPi * sourceF0 * t)
+                + 0.1 * std::sin(kTwoPi * highFrequency * t));
+        }
+        for (const double cents : {-74.0, 74.0}) {
+            const float targetF0 = static_cast<float>(sourceF0 * std::exp2(cents / 1200.0));
+            const double rate = targetF0 / static_cast<double>(sourceF0);
+            Shifter shifter(sampleRate);
+            const auto output = shifter.shiftChunk(
+                stream.data() + history, count, &sourceF0, &targetF0, 1, 100.0, 0.0,
+                stream.data() + history + count, Shifter::kLookaheadSamples,
+                stream.data(), history, periods.data(), count, true);
+            expectTrue(output.size() == static_cast<size_t>(count), "band-limited shift: duration preserved");
+            if (output.size() != static_cast<size_t>(count))
+                continue;
+            if (highFrequency == 16000.0) {
+                const double amplitude = toneAmplitude(output, 8192, count - 1024,
+                                                       sampleRate, highFrequency * rate);
+                expectTrue(amplitude > 0.094 && amplitude < 0.106,
+                           "band-limited shift: 16 kHz harmonic gain stays within 0.55 dB");
+            } else if (cents > 0.0) {
+                const double alias = toneAmplitude(output, 8192, count - 1024,
+                                                   sampleRate, sampleRate - highFrequency * rate);
+                std::printf("Upshift 21.8 kHz alias attenuation: %.1f dB\n", 20.0 * std::log10(alias / 0.1));
+                expectTrue(alias < 0.0032, "band-limited shift: above-Nyquist alias suppressed by 30 dB");
+            }
+        }
+    }
+}
+
+void testCycleTransitionRateReversals()
+{
+    constexpr int sampleRate = 44100;
+    constexpr int count = 12000;
+    constexpr int history = 2048;
+    constexpr int samplesPerFrame = 40;
+    constexpr int frameCount = count / samplesPerFrame;
+    for (const float period : {16.0f, 880.0f}) {
+        const double sourceFrequency = sampleRate / static_cast<double>(period);
+        const auto stream = makeSineSegment(sourceFrequency, sampleRate, -history,
+            history + count + Shifter::kLookaheadSamples, 0.3);
+        std::vector<float> original(frameCount, static_cast<float>(sourceFrequency));
+        std::vector<float> target(frameCount);
+        for (int frame = 0; frame < frameCount; ++frame) {
+            const double cents = frame % 4 == 0 ? 74.0 : -74.0;
+            target[static_cast<size_t>(frame)] = static_cast<float>(sourceFrequency * std::exp2(cents / 1200.0));
+        }
+        std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> periods(count);
+        for (int i = 0; i < count; ++i)
+            periods[static_cast<size_t>(i)] = {period, true, i % 5 == 0};
+        Shifter shifter(sampleRate);
+        const auto output = shifter.shiftChunk(
+            stream.data() + history, count, original.data(), target.data(), frameCount,
+            static_cast<double>(sampleRate) / samplesPerFrame, 0.0,
+            stream.data() + history + count, Shifter::kLookaheadSamples,
+            stream.data(), history, periods.data(), count, true);
+        expectTrue(output.size() == static_cast<size_t>(count), "rate reversal: duration preserved");
+        if (output.size() != static_cast<size_t>(count))
+            continue;
+        double position = -1.0;
+        double maxError = 0.0;
+        for (int i = 0; i < count; ++i) {
+            position += target[static_cast<size_t>(i / samplesPerFrame)] * static_cast<double>(period) / sampleRate;
+            const double expected = 0.3 * std::sin(kTwoPi * position / period);
+            maxError = std::max(maxError, std::fabs(output[static_cast<size_t>(i)] - expected));
+        }
+        expectTrue(maxError < 0.001,
+                   "rate reversal: overlapping cycle requests preserve phase and amplitude");
+    }
 }
 
 void testNonIdentityDoesNotMoveChunkStart()
@@ -517,8 +700,8 @@ void testF0FramePhaseUsesLaterFrames()
 }
 
 // ---------------------------------------------------------------------------
-// 5. Clip-final chunks with missing tail lookahead (0 or fewer than 5
-//    available samples): output length preserved and fully finite.
+// 5. Clip-final chunks with missing tail lookahead: output length preserved
+//    and fully finite.
 // ---------------------------------------------------------------------------
 void testTailChunksWithShortLookahead()
 {
@@ -551,9 +734,9 @@ void testTailChunksWithShortLookahead()
             input.data(), kNumSamples, &originalF0, &correctedF0, 1, 100.0,
             0.0, tail, 2, history.data(), historySamples);
         expectTrue(static_cast<int>(out.size()) == kNumSamples,
-                   "tail (2 of 5 lookahead): length preserved");
+                   "tail (2 lookahead): length preserved");
         expectTrue(allFinite(out),
-                   "tail (2 of 5 lookahead): all outputs finite");
+                   "tail (2 lookahead): all outputs finite");
     }
 }
 
@@ -717,17 +900,15 @@ void testDetectorDropsOutAcrossNoise()
                "detector transition: voiced period reacquires after noise");
 }
 
-// Diagnostic case for a short V -> UV -> V gap where the pitch curve still
-// carries positive source and target F0 values (for example, after a short
-// RMVPE gap fill). The detector trace and the shifter-vs-neutral trace are
-// printed so boundary behavior can be inspected without changing production
-// logic.
+// A short V -> UV -> V gap retains positive source and target F0 values. A
+// detector failure inside that voiced correction makes octave repair fail so
+// the runtime can route the chunk through the vocoder.
 void testShortUvGapWithPositiveCorrectedF0()
 {
     constexpr int kSampleRate = 44100;
     constexpr double kVoicedFrequency = 220.0;
     constexpr double kSourceF0 = 220.0;
-    constexpr double kCorrectedF0 = 240.0;
+    constexpr double kCorrectedF0 = 225.0;
     constexpr double kF0FrameRate = 100.0;
     constexpr int kPrefix = OpenTune::AutoTunePeriodDetector::kRequiredLookbehindSamples;
     constexpr int kLeadSamples = 2200;
@@ -735,8 +916,6 @@ void testShortUvGapWithPositiveCorrectedF0()
     constexpr int kTailSamples = 2200;
     constexpr int kLookahead = Shifter::kLookaheadSamples;
     constexpr int kNumSamples = kLeadSamples + kGapSamples + kTailSamples;
-    constexpr int kHistoryPrintRadius = 24;
-
     const std::vector<float> prefix = makeSineSegment(
         kVoicedFrequency, kSampleRate, -kPrefix, kPrefix, 0.5);
     const std::vector<float> lead = makeSineSegment(
@@ -763,6 +942,10 @@ void testShortUvGapWithPositiveCorrectedF0()
     const auto detected = OpenTune::AutoTunePeriodDetector::analyze(
         fullStream.data(), kPrefix, input.data(), kNumSamples,
         static_cast<double>(kSampleRate));
+    bool hasInvalidGapSample = false;
+    for (int i = kLeadSamples; i < kLeadSamples + kGapSamples; ++i)
+        hasInvalidGapSample = hasInvalidGapSample
+            || !detected[static_cast<size_t>(i)].valid;
 
     const int numF0Frames = static_cast<int>(std::ceil(
         static_cast<double>(kNumSamples) / kSampleRate * kF0FrameRate)) + 1;
@@ -771,181 +954,19 @@ void testShortUvGapWithPositiveCorrectedF0()
     std::vector<float> correctedF0(static_cast<size_t>(numF0Frames),
                                    static_cast<float>(kCorrectedF0));
 
-    Shifter actualShifter(static_cast<double>(kSampleRate));
-    const std::vector<float> actual = actualShifter.shiftChunk(
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const auto result = shifter.shiftChunkWithOctaveRepair(
         input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
         numF0Frames, kF0FrameRate, 0.0,
         fullStream.data() + kPrefix + kNumSamples, kLookahead,
         prefix.data(), kPrefix,
-        detected.data(), static_cast<int>(detected.size()));
-
-    // Isolate the effect of detector-valid samples inside the known UV gap.
-    // The voiced portions retain the real detector trace, so this is not an
-    // all-invalid reset comparison and does not discard the lead-in state.
-    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> masked = detected;
-    for (int i = kLeadSamples; i < kLeadSamples + kGapSamples; ++i)
-    {
-        masked[static_cast<size_t>(i)].periodSamples = 0.0f;
-        masked[static_cast<size_t>(i)].valid = false;
-        masked[static_cast<size_t>(i)].trackingUpdated = false;
-    }
-    Shifter maskedShifter(static_cast<double>(kSampleRate));
-    const std::vector<float> maskedOutput = maskedShifter.shiftChunk(
-        input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
-        numF0Frames, kF0FrameRate, 0.0,
-        fullStream.data() + kPrefix + kNumSamples, kLookahead,
-        prefix.data(), kPrefix,
-        masked.data(), static_cast<int>(masked.size()));
-
-    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> invalid(
-        static_cast<size_t>(kNumSamples));
-    Shifter neutralShifter(static_cast<double>(kSampleRate));
-    const std::vector<float> neutral = neutralShifter.shiftChunk(
-        input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
-        numF0Frames, kF0FrameRate, 0.0,
-        fullStream.data() + kPrefix + kNumSamples, kLookahead,
-        prefix.data(), kPrefix,
-        invalid.data(), static_cast<int>(invalid.size()));
-
-    int leadValid = 0;
-    int gapValid = 0;
-    int middleGapInvalid = 0;
-    int tailValid = 0;
-    int firstGapInvalid = -1;
-    int lastGapValid = -1;
-    int firstTailValid = -1;
-    int gapValidAfterFirstInvalid = 0;
-    int firstGapRelock = -1;
-    double gapInputDiff = 0.0;
-    double gapNeutralDiff = 0.0;
-    double gapMaxNeutralDiff = 0.0;
-    double gapMaskedDiff = 0.0;
-    double gapMaxMaskedDiff = 0.0;
-    for (int i = 0; i < kNumSamples; ++i)
-    {
-        const auto& frame = detected[static_cast<size_t>(i)];
-        if (i < kLeadSamples && frame.valid)
-            ++leadValid;
-        if (i >= kLeadSamples && i < kLeadSamples + kGapSamples)
-        {
-            if (frame.valid)
-            {
-                ++gapValid;
-                lastGapValid = i;
-                if (firstGapInvalid >= 0)
-                {
-                    ++gapValidAfterFirstInvalid;
-                    if (firstGapRelock < 0)
-                        firstGapRelock = i;
-                }
-            }
-            else if (firstGapInvalid < 0)
-                firstGapInvalid = i;
-            if (i >= kLeadSamples + kGapSamples / 3
-                && i < kLeadSamples + kGapSamples * 2 / 3
-                && !frame.valid)
-                ++middleGapInvalid;
-            gapInputDiff += std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)] - input[static_cast<size_t>(i)]));
-            const double neutralDiff = std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)] - neutral[static_cast<size_t>(i)]));
-            gapNeutralDiff += neutralDiff;
-            gapMaxNeutralDiff = std::max(gapMaxNeutralDiff, neutralDiff);
-            const double maskedDiff = std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)]
-                - maskedOutput[static_cast<size_t>(i)]));
-            gapMaskedDiff += maskedDiff;
-            gapMaxMaskedDiff = std::max(gapMaxMaskedDiff, maskedDiff);
-        }
-        if (i >= kLeadSamples + kGapSamples && frame.valid)
-        {
-            ++tailValid;
-            if (firstTailValid < 0)
-                firstTailValid = i;
-        }
-    }
-
-    std::printf(
-        "SHORT_UV_SUMMARY gap=[%d,%d) leadValid=%d/%d gapValid=%d/%d "
-        "firstGapInvalid=%d lastGapValid=%d firstTailValid=%d "
-        "gapValidAfterFirstInvalid=%d firstGapRelock=%d "
-        "middleGapInvalid=%d tailValid=%d/%d gapMeanAbsOutInput=%.9f "
-        "gapMeanAbsOutNeutral=%.9f gapMaxAbsOutNeutral=%.9f "
-        "gapMeanAbsActualMasked=%.9f gapMaxAbsActualMasked=%.9f\n",
-        kLeadSamples, kLeadSamples + kGapSamples,
-        leadValid, kLeadSamples, gapValid, kGapSamples,
-        firstGapInvalid, lastGapValid, firstTailValid,
-        gapValidAfterFirstInvalid, firstGapRelock,
-        middleGapInvalid, tailValid, kTailSamples,
-        gapInputDiff / static_cast<double>(kGapSamples),
-        gapNeutralDiff / static_cast<double>(kGapSamples),
-        gapMaxNeutralDiff,
-        gapMaskedDiff / static_cast<double>(kGapSamples),
-        gapMaxMaskedDiff);
-
-    const auto printTraceWindow = [&](int centre, const char* label) {
-        if (centre < 0)
-            return;
-        const int firstTrace = std::max(0, centre - kHistoryPrintRadius);
-        const int lastTrace = std::min(kNumSamples, centre + kHistoryPrintRadius + 1);
-        for (int i = firstTrace; i < lastTrace; ++i)
-        {
-            if (i != firstTrace && i != centre && i != lastTrace - 1
-                && ((i - firstTrace) % 8 != 0))
-                continue;
-            const int f0Frame = std::clamp(
-                static_cast<int>(std::floor(static_cast<double>(i) / kSampleRate
-                                            * kF0FrameRate)),
-                0, numF0Frames - 1);
-            const auto& frame = detected[static_cast<size_t>(i)];
-            const double outInputDiff = std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)] - input[static_cast<size_t>(i)]));
-            const double outNeutralDiff = std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)] - neutral[static_cast<size_t>(i)]));
-            const double outMaskedDiff = std::fabs(static_cast<double>(
-                actual[static_cast<size_t>(i)] - maskedOutput[static_cast<size_t>(i)]));
-            std::printf(
-                "SHORT_UV_TRACE label=%s i=%d region=%s valid=%d period=%.6f "
-                "trackingUpdated=%d "
-                "originalF0=%.3f correctedF0=%.3f outInputDiff=%.9f "
-                "outNeutralDiff=%.9f outMaskedDiff=%.9f\n",
-                label, i,
-                i < kLeadSamples ? "V1" : (i < kLeadSamples + kGapSamples ? "UV" : "V2"),
-                frame.valid ? 1 : 0, static_cast<double>(frame.periodSamples),
-                frame.trackingUpdated ? 1 : 0,
-                static_cast<double>(originalF0[static_cast<size_t>(f0Frame)]),
-                static_cast<double>(correctedF0[static_cast<size_t>(f0Frame)]),
-                outInputDiff, outNeutralDiff, outMaskedDiff);
-        }
-    };
-
-    printTraceWindow(kLeadSamples, "gap_start");
-    printTraceWindow(firstGapInvalid, "first_invalid");
-    printTraceWindow(kLeadSamples + kGapSamples, "gap_end");
-    printTraceWindow(firstTailValid, "tail_reacquire");
-
-    expectTrue(static_cast<int>(maskedOutput.size()) == kNumSamples,
-               "short UV: masked output length matches input");
-    expectTrue(allFinite(maskedOutput), "short UV: masked output is finite");
-    expectTrue(firstGapInvalid >= kLeadSamples,
-               "short UV: detector eventually reports an invalid gap sample");
-    expectTrue(firstTailValid >= kLeadSamples + kGapSamples,
-               "short UV: detector eventually reacquires the trailing voiced segment");
-    expectTrue(gapValidAfterFirstInvalid == 0,
-               "short UV: detector must not relock inside the same unvoiced gap");
+        detected.data(), static_cast<int>(detected.size()), false);
+    expectTrue(hasInvalidGapSample,
+               "short UV: detector reports an unconfirmed period inside the gap");
     expectTrue(originalF0.front() > 0.0f && correctedF0.front() > 0.0f,
-               "short UV: positive F0 guidance remains active through the gap");
-
-    expectTrue(leadValid > kLeadSamples * 3 / 4,
-               "short UV: leading voiced segment remains detected");
-    expectTrue(tailValid > kTailSamples / 2,
-               "short UV: trailing voiced segment reacquires");
-    expectTrue(middleGapInvalid > 0,
-               "short UV: middle of the unvoiced gap eventually becomes invalid");
-    expectTrue(static_cast<int>(detected.size()) == kNumSamples,
-               "short UV: detector result length matches input");
-    expectTrue(allFinite(actual), "short UV: actual output is finite");
-    expectTrue(allFinite(neutral), "short UV: neutral output is finite");
+               "short UV: positive source and target F0 span the gap");
+    expectTrue(!result.success && result.audio.empty(),
+               "short UV: voiced correction with an unconfirmed period fails repair");
 }
 
 void testDetectorRequiresCompleteHistory()
@@ -1048,7 +1069,7 @@ void testShifterUsesDetectorValidityForUv()
 {
     constexpr int kSampleRate = 44100;
     constexpr double kSourceFrequency = 220.0;
-    constexpr double kTargetFrequency = 240.0;
+    constexpr double kTargetFrequency = 225.0;
     constexpr int kPrefix = OpenTune::AutoTunePeriodDetector::kRequiredLookbehindSamples;
     constexpr int kNumSamples = 22050;
     constexpr int kLook = Shifter::kLookaheadSamples;
@@ -1155,7 +1176,7 @@ void testShifterUpdatesRateOnlyOnDetectorEvents()
     }
 
     const float originalF0 = 220.0f;  // voiced gate open throughout
-    const float correctedF0 = 240.0f; // demands an upward retune
+    const float correctedF0 = 225.0f; // demands an upward retune inside ±75c
 
     // A) Updates every 5 samples: the smoothed rate must leave 1.0 and chase
     //    the corrected target, clearly departing from passthrough.
@@ -1227,7 +1248,7 @@ void testShifterKeepsAddressContinuityThroughVoicedFailure()
     }
 
     const float originalF0 = 220.0f;  // voiced gate open: failures here are
-    const float correctedF0 = 240.0f; // detector failures, not UV neutrals
+    const float correctedF0 = 225.0f; // detector failures, not UV neutrals
 
     Shifter shifter(static_cast<double>(kSampleRate));
     const std::vector<float> out = shifter.shiftChunk(
@@ -1513,7 +1534,7 @@ void testDetectorShadowDoesNotRenderOctaveAtQuantizedBoundary()
                "octave guard: rendered output frequency is within 10% of 1000 Hz");
 }
 
-// 500 Hz sine on 44.1 kHz has an 88.2-sample period — exactly the 2× of the
+// 500 Hz sine on 44.1 kHz has an 88.2-sample period �?exactly the 2× of the
 // 1000 Hz test case. A detector bug that unconditionally halves the period
 // would lock onto ~44.1 and render ~1000 Hz. This test verifies the detector
 // reports the true ~88.2-sample period and the rendered output stays at 500 Hz.
@@ -1643,7 +1664,7 @@ void testDetectorWeakFundamentalLocksToTruePeriod()
 }
 
 // Regression test for the half-period waveform symmetry check: a 1000 Hz sine
-// with linearly increasing amplitude (0.1 → 1.0) over the coarse window.
+// with linearly increasing amplitude (0.1 �?1.0) over the coarse window.
 // Without the symmetry check, the 2P candidate (88 samples) would win because
 // EH(2P) benefits from the amplitude ramp's non-stationarity. With the check,
 // the two P-long halves are waveform-similar (high CC) so the detector must
@@ -1695,47 +1716,840 @@ void testDetectorResistsOctaveOnAmplitudeRamp()
                "not the 88-sample 2× harmonic");
     expectTrue(nearOctave < validCount / 10,
                "amplitude ramp: very few frames lock onto the 2× period");
+
+    const std::vector<float> f0Hint(16, static_cast<float>(kFreq));
+    const auto guidedFrames = OpenTune::AutoTunePeriodDetector::analyze(
+        stream.data(), kPrefix, stream.data() + kPrefix, kNumSamples,
+        static_cast<double>(kSampleRate), f0Hint.data(),
+        static_cast<int>(f0Hint.size()), 100.0);
+    int guidedValidCount = 0;
+    int guidedNearFundamental = 0;
+    int guidedNearOctave = 0;
+    for (const auto& frame : guidedFrames) {
+        if (!frame.valid)
+            continue;
+        ++guidedValidCount;
+        if (std::fabs(static_cast<double>(frame.periodSamples) - expectedPeriod)
+            < 4.0)
+            ++guidedNearFundamental;
+        if (std::fabs(static_cast<double>(frame.periodSamples)
+                      - 2.0 * expectedPeriod) < 4.0)
+            ++guidedNearOctave;
+    }
+
+    expectTrue(guidedValidCount > kNumSamples / 2,
+               "amplitude ramp prior: qualified candidates remain valid");
+    expectTrue(guidedNearFundamental > guidedValidCount / 2,
+               "amplitude ramp prior: closer fundamental wins over the lower "
+               "periodicity score at 2× period");
+    expectTrue(guidedNearOctave < guidedValidCount / 10,
+               "amplitude ramp prior: octave candidate is corrected by F0");
 }
 
-// RMVPE-style octave-fix regression: a 220 Hz sine whose detected period
-// has an isolated glitch (one frame at 2× the true period) must be
-// corrected by the post-processing forward+backward scan.
-void testPostProcessingFixesIsolatedOctaveGlitch()
+void testDetectorPriorSelectsAndTracksWaveformOctaves()
 {
-    constexpr double kPeriod = 200.45;  // 220 Hz at 44.1 kHz
-    const int kNumFrames = 100;
+    constexpr int kSampleRate = 44100;
+    constexpr double kFrequency = 220.0;
+    constexpr int kPrefix =
+        OpenTune::AutoTunePeriodDetector::kRequiredLookbehindSamples;
+    constexpr int kNumSamples = 5000;
+    constexpr double kFirstSampleFramePhase = 3.5;
+    constexpr double kFrameRate = 100.0;
+    constexpr int kRampStart = kPrefix - 1000;
+    constexpr int kRampEnd = kPrefix + 1000;
 
-    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> frames(
-        static_cast<size_t>(kNumFrames));
-
-    // Fill with consistent period, inject a single 2× glitch at frame 50.
-    for (int i = 0; i < kNumFrames; ++i) {
-        frames[static_cast<size_t>(i)].valid = true;
-        frames[static_cast<size_t>(i)].periodSamples =
-            static_cast<float>(kPeriod);
+    const int totalSamples = kPrefix + kNumSamples;
+    std::vector<float> stream(static_cast<size_t>(totalSamples));
+    for (int n = -kPrefix; n < kNumSamples; ++n) {
+        const int index = n + kPrefix;
+        double amplitude = 0.5;
+        if (index >= kRampStart && index < kRampEnd) {
+            const double ramp = static_cast<double>(index - kRampStart)
+                / static_cast<double>(kRampEnd - kRampStart);
+            amplitude += 0.7 * ramp;
+        }
+        else if (index >= kRampEnd) {
+            amplitude = 1.2;
+        }
+        const double phase = kTwoPi * kFrequency * n / kSampleRate;
+        stream[static_cast<size_t>(index)] =
+            static_cast<float>(amplitude * std::sin(phase));
     }
-    frames[50].periodSamples = static_cast<float>(kPeriod * 2.0);
 
-    // The post-processing inside analyze() cannot be tested directly on a
-    // pre-built frame array. This test verifies the forward+backward logic
-    // conceptually by checking that the period-doubled frame is exactly
-    // 2× and that the scan would snap it. Instead, we verify the key
-    // invariant: all periods are within 1% of the true period, proving
-    // the glitch is the only outlier.
-    const float glitchRatio =
-        frames[50].periodSamples / frames[49].periodSamples;
-    expectTrue(glitchRatio > 1.95f && glitchRatio < 2.05f,
-               "octave glitch: injected glitch is exactly 2×");
+    const auto detector = OpenTune::AutoTunePeriodDetector::analyze(
+        stream.data(), kPrefix, stream.data() + kPrefix, kNumSamples,
+        static_cast<double>(kSampleRate));
+    const double period = static_cast<double>(kSampleRate) / kFrequency;
 
-    // The other frames should all be consistent.
-    for (int i = 0; i < kNumFrames; ++i) {
-        if (i == 50) continue;
-        const float err = std::fabs(
-            frames[static_cast<size_t>(i)].periodSamples
-            - static_cast<float>(kPeriod));
-        expectTrue(err < 1.0f,
-                   "octave glitch: non-glitch frames are consistent");
+    const auto averagePeriod = [](const auto& frames, int begin, int end,
+                                  int& validCount) {
+        double sum = 0.0;
+        validCount = 0;
+        for (int i = begin; i < end; ++i) {
+            const auto& frame = frames[static_cast<size_t>(i)];
+            if (!frame.valid)
+                continue;
+            sum += static_cast<double>(frame.periodSamples);
+            ++validCount;
+        }
+        return validCount > 0 ? sum / static_cast<double>(validCount) : 0.0;
+    };
+
+    int noHintCount = 0;
+    const double noHintPeriod = averagePeriod(detector, 500, 1500, noHintCount);
+    expectTrue(noHintCount > 800,
+               "octave prior: no-hint tone remains waveform-confirmed");
+    expectTrue(std::fabs(noHintPeriod - period) < 3.0,
+               "octave prior: no hint retains the lower-EH fundamental");
+
+    // Verify that both periods pass the same full-rate confirmation while
+    // their E/H scores differ beyond the old tie-only prior margin.
+    const auto confirmedScore = [&](int endIndex, int centerLag,
+                                    double& score, double& energy) {
+        score = std::numeric_limits<double>::infinity();
+        energy = 0.0;
+        for (int lag = centerLag - 4; lag <= centerLag + 4; ++lag) {
+            double candidateEnergy = 0.0;
+            double correlation = 0.0;
+            const int energyBegin = endIndex - 2 * lag + 1;
+            const int correlationBegin = endIndex - lag + 1;
+            for (int i = energyBegin; i <= endIndex; ++i) {
+                const double value = stream[static_cast<size_t>(i)];
+                candidateEnergy += value * value;
+            }
+            for (int i = correlationBegin; i <= endIndex; ++i) {
+                correlation += static_cast<double>(stream[static_cast<size_t>(i)])
+                    * static_cast<double>(stream[static_cast<size_t>(i - lag)]);
+            }
+            const double candidateScore = candidateEnergy - 2.0 * correlation;
+            if (candidateEnergy > 1.0e-6
+                && candidateScore <= 0.1 * candidateEnergy
+                && candidateScore < score) {
+                score = candidateScore;
+                energy = candidateEnergy;
+            }
+        }
+        return std::isfinite(score);
+    };
+
+    double fundamentalScore = 0.0;
+    double fundamentalEnergy = 0.0;
+    double octaveScore = 0.0;
+    double octaveEnergy = 0.0;
+    const int firstPriorUpdateEnd = kPrefix + 225;
+    const bool fundamentalConfirmed = confirmedScore(
+        firstPriorUpdateEnd, static_cast<int>(std::lround(period)),
+        fundamentalScore, fundamentalEnergy);
+    const bool octaveConfirmed = confirmedScore(
+        firstPriorUpdateEnd, static_cast<int>(std::lround(2.0 * period)),
+        octaveScore, octaveEnergy);
+    expectTrue(fundamentalConfirmed && octaveConfirmed,
+               "octave prior: both P and 2P pass waveform confirmation");
+    expectTrue(std::fabs(fundamentalScore - octaveScore)
+                   > 0.005 * std::max(fundamentalEnergy, octaveEnergy),
+               "octave prior: P and 2P E/H scores are not tied");
+
+    constexpr int kNumHintFrames = 20;
+    std::vector<float> hints(static_cast<size_t>(kNumHintFrames), 224.0f);
+    for (int frame = 0; frame < 3; ++frame)
+        hints[static_cast<size_t>(frame)] = 108.0f;
+    hints[3] = 0.0f;
+    for (int frame = 4; frame < 8; ++frame)
+        hints[static_cast<size_t>(frame)] = 108.0f;
+
+    const auto guided = OpenTune::AutoTunePeriodDetector::analyze(
+        stream.data(), kPrefix, stream.data() + kPrefix, kNumSamples,
+        static_cast<double>(kSampleRate), hints.data(), kNumHintFrames,
+        kFrameRate, kFirstSampleFramePhase);
+
+    // Global hint frames 4 and 8 begin between tracking updates. The held
+    // sample keeps P; the next update selects the waveform-confirmed octave.
+    expectTrue(!guided[224].trackingUpdated
+                   && std::fabs(guided[224].periodSamples - period) < 3.0,
+               "octave prior: a held sample preserves the confirmed period");
+    expectTrue(guided[225].trackingUpdated
+                   && std::fabs(guided[225].periodSamples - 2.0 * period) < 3.0,
+               "octave prior: the first update selects the closer 2P candidate");
+    expectTrue(guided[1985].trackingUpdated
+                   && std::fabs(guided[1985].periodSamples - period) < 3.0,
+               "octave prior: the first update after the prior changes selects P");
+
+    int noPriorCount = 0;
+    const double noPriorPeriod = averagePeriod(guided, 30, 180, noPriorCount);
+    expectTrue(noPriorCount > 120,
+               "octave prior: unvoiced global hint frame behaves as no prior");
+    expectTrue(std::fabs(noPriorPeriod - period) < 3.0,
+               "octave prior: no-prior region retains the fundamental");
+
+    int octaveCount = 0;
+    const double octavePeriod = averagePeriod(guided, 500, 1500, octaveCount);
+    expectTrue(octaveCount > 800,
+               "octave prior: voiced prior keeps the 2P candidate valid");
+    expectTrue(std::fabs(octavePeriod - 2.0 * period) < 3.0,
+               "octave prior: closer 2P prior wins despite its different E/H score");
+    expectTrue(std::fabs(octavePeriod - kSampleRate / 108.0) > 3.0,
+               "octave prior: output remains the measured period, not the hint");
+
+    int switchedCount = 0;
+    const double switchedPeriod = averagePeriod(guided, 2500, 3400, switchedCount);
+    expectTrue(switchedCount > 700,
+               "octave prior: tracking remains valid after the prior changes");
+    expectTrue(std::fabs(switchedPeriod - period) < 3.0,
+               "octave prior: tracking switches back to P after the next update");
+    expectTrue(std::fabs(switchedPeriod - kSampleRate / 224.0) > 1.5,
+               "octave prior: switched result is not copied from the biased hint");
+}
+
+// A fractional harmonic tone with a short amplitude drop makes the rounded
+// half-period lag fail confirmation while its immediate neighbor qualifies.
+void testDetectorTrackingConfirmsNeighboringHalfPeriod()
+{
+    using Detector = OpenTune::AutoTunePeriodDetector;
+    constexpr double kSampleRate = 44100.0;
+    constexpr double kPeriod = 32.45;
+    constexpr double kPhaseCycles = 0.09375;
+    constexpr int kHarmonics = 12;
+    constexpr int kPrefix = Detector::kRequiredLookbehindSamples;
+    constexpr int kNumSamples = 5;
+
+    double amplitudeSum = 0.0;
+    for (int h = 1; h <= kHarmonics; ++h)
+        amplitudeSum += 1.0 / h;
+
+    std::vector<float> stream(static_cast<size_t>(kPrefix + kNumSamples));
+    for (int n = -kPrefix; n < kNumSamples; ++n) {
+        double waveform = 0.0;
+        for (int h = 1; h <= kHarmonics; ++h)
+            waveform += std::sin(kTwoPi * h * (kPhaseCycles + n / kPeriod)) / h;
+        const double envelope = 1.0 - 0.4 * std::clamp(
+            (n + 0.5 * kPeriod + 4.0) / 8.0, 0.0, 1.0);
+        stream[static_cast<size_t>(n + kPrefix)] =
+            static_cast<float>(waveform * envelope / amplitudeSum);
     }
+
+    const float hints[] = {
+        static_cast<float>(kSampleRate / (2.0 * kPeriod)),
+        static_cast<float>(kSampleRate / kPeriod)
+    };
+    // The final lookbehind sample uses the 2P hint; input[0] starts hint frame 1.
+    const auto frames = Detector::analyze(
+        stream.data(), kPrefix, stream.data() + kPrefix, kNumSamples,
+        kSampleRate, hints, 2, 100.0, 1.0);
+
+    const auto& first = frames[0];
+    expectTrue(first.valid,
+               "tracking neighbor: first sample has a confirmed period");
+    expectTrue(first.trackingUpdated,
+               "tracking neighbor: first sample publishes a tracking update");
+    expectTrue(std::fabs(first.periodSamples - kPeriod) < 0.3,
+               "tracking neighbor: first update selects the true half-period");
+    expectTrue(std::fabs(first.periodSamples - std::round(first.periodSamples)) > 0.1,
+               "tracking neighbor: corrected period retains fractional precision");
+
+    for (int i = 1; i < 5; ++i) {
+        const auto& held = frames[static_cast<size_t>(i)];
+        expectTrue(held.valid,
+                   "tracking neighbor: held samples remain valid");
+        expectTrue(!held.trackingUpdated,
+                   "tracking neighbor: samples 1 through 4 hold the last update");
+        expectTrue(held.periodSamples == first.periodSamples,
+                   "tracking neighbor: held samples preserve the period exactly");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 75-cent routing contract: the threshold itself belongs to the light
+// AutoTune path; anything beyond it selects the vocoder. Boundary ratios are
+// computed in double from exp2 so the comparison is exact.
+// ---------------------------------------------------------------------------
+void testPitchShiftRateContractAt75Cents()
+{
+    const double upper75 = std::exp2(75.0 / 1200.0);
+    const double lower75 = std::exp2(-75.0 / 1200.0);
+    const double above75 = std::exp2(75.5 / 1200.0);
+    const double below75 = std::exp2(-75.5 / 1200.0);
+
+    expectTrue(OpenTune::isPitchShiftRateWithinLightContract(upper75),
+               "contract: exactly +75 cents is inside");
+    expectTrue(OpenTune::isPitchShiftRateWithinLightContract(lower75),
+               "contract: exactly -75 cents is inside");
+    expectTrue(!OpenTune::isPitchShiftRateWithinLightContract(above75),
+               "contract: +75.5 cents is outside");
+    expectTrue(!OpenTune::isPitchShiftRateWithinLightContract(below75),
+               "contract: -75.5 cents is outside");
+
+    // 200 Hz keeps both float ratios on the inside of the exact boundary.
+    const std::vector<float> original = {200.0f};
+    const float atUpper = static_cast<float>(200.0 * upper75);
+    const float atLower = static_cast<float>(200.0 * lower75);
+    const float overUpper = static_cast<float>(200.0 * above75);
+    const float overLower = static_cast<float>(200.0 * below75);
+
+    expectTrue(!OpenTune::chunkNeedsVocoder(&atUpper, 1, original, 0),
+               "routing: exactly +75 cents stays in AutoTune");
+    expectTrue(!OpenTune::chunkNeedsVocoder(&atLower, 1, original, 0),
+               "routing: exactly -75 cents stays in AutoTune");
+    expectTrue(OpenTune::chunkNeedsVocoder(&overUpper, 1, original, 0),
+               "routing: +75.5 cents selects the vocoder");
+    expectTrue(OpenTune::chunkNeedsVocoder(&overLower, 1, original, 0),
+               "routing: -75.5 cents selects the vocoder");
+}
+
+std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod>
+makeLockedDetector(int numSamples, float periodSamples)
+{
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> detected(
+        static_cast<size_t>(numSamples));
+    for (int i = 0; i < numSamples; ++i) {
+        detected[static_cast<size_t>(i)].periodSamples = periodSamples;
+        detected[static_cast<size_t>(i)].valid = true;
+        detected[static_cast<size_t>(i)].trackingUpdated = (i % 5 == 0);
+    }
+    return detected;
+}
+
+Shifter::OctaveRepairResult runFixedToneOctaveRepair(float detectorPeriod)
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 256;
+    constexpr double kFreq = 220.0;
+
+    const std::vector<float> input = makeSineSegment(
+        kFreq, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kFreq, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kFreq, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+    const auto detected = makeLockedDetector(kNumSamples, detectorPeriod);
+
+    const float f0 = static_cast<float>(kFreq);
+    Shifter shifter(static_cast<double>(kSampleRate));
+    return shifter.shiftChunkWithOctaveRepair(
+        input.data(), kNumSamples, &f0, &f0, 1, 100.0, 0.0,
+        tail.data(), Shifter::kLookaheadSamples,
+        history.data(), kHistorySamples,
+        detected.data(), kNumSamples, false);
+}
+
+// Detector locked an octave too low: period 400 is 2P for a 220 Hz tone.
+// Repair must halve it and render the corrected 220 Hz target, never 440 Hz.
+void testOctaveRepairScalesDoublePeriod()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    const Shifter::OctaveRepairResult result =
+        runFixedToneOctaveRepair(400.0f);
+
+    expectTrue(result.success, "octave 2P: repair succeeds");
+    expectTrue(result.octave == -1,
+               "octave 2P: repair halves the detector period");
+    expectTrue(static_cast<int>(result.audio.size()) == kNumSamples,
+               "octave 2P: output length preserved");
+    expectTrue(allFinite(result.audio), "octave 2P: output finite");
+    if (static_cast<int>(result.audio.size()) != kNumSamples)
+        return;
+
+    constexpr int kBegin = 2048;
+    constexpr int kEnd = kNumSamples;
+    const int crossings =
+        countPositiveZeroCrossings(result.audio, kBegin, kEnd);
+    const double duration = static_cast<double>(kEnd - kBegin) / kSampleRate;
+    const double expected = 220.0 * duration;
+    expectTrue(std::fabs(static_cast<double>(crossings) - expected)
+                   < expected * 0.1,
+               "octave 2P: output is ~220 Hz, not ~440 Hz");
+}
+
+// Detector locked an octave too high: period 100 is P/2 for a 220 Hz tone.
+// Repair must double it and render the corrected 220 Hz target.
+void testOctaveRepairScalesHalfPeriod()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    const Shifter::OctaveRepairResult result =
+        runFixedToneOctaveRepair(100.0f);
+
+    expectTrue(result.success, "octave P/2: repair succeeds");
+    expectTrue(result.octave == 1,
+               "octave P/2: repair doubles the detector period");
+    expectTrue(static_cast<int>(result.audio.size()) == kNumSamples,
+               "octave P/2: output length preserved");
+    expectTrue(allFinite(result.audio), "octave P/2: output finite");
+    if (static_cast<int>(result.audio.size()) != kNumSamples)
+        return;
+
+    constexpr int kBegin = 2048;
+    constexpr int kEnd = kNumSamples;
+    const int crossings =
+        countPositiveZeroCrossings(result.audio, kBegin, kEnd);
+    const double duration = static_cast<double>(kEnd - kBegin) / kSampleRate;
+    const double expected = 220.0 * duration;
+    expectTrue(std::fabs(static_cast<double>(crossings) - expected)
+                   < expected * 0.1,
+               "octave P/2: output is ~220 Hz");
+}
+
+void testOctaveRepairRejectsNoTrustedDetectorPeriod()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 4096;
+    constexpr int kHistorySamples = 256;
+    constexpr double kFreq = 220.0;
+
+    const std::vector<float> input = makeSineSegment(
+        kFreq, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kFreq, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kFreq, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+    const std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> detected(
+        static_cast<size_t>(kNumSamples));
+
+    const float f0 = static_cast<float>(kFreq);
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, &f0, &f0, 1, 100.0, 0.0,
+            tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(!result.success && result.audio.empty(),
+               "untrusted detector: no valid periods means no DSP output");
+}
+
+void testOctaveRepairAcceptsLowFrequencyWithoutMeasurementWindow()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 512;
+    constexpr double kFrequency = 100.0;
+    constexpr float kCorrectedFrequency = 103.0f;
+
+    const std::vector<float> input = makeSineSegment(
+        kFrequency, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kFrequency, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kFrequency, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+    const auto detected = makeLockedDetector(
+        kNumSamples, static_cast<float>(kSampleRate / kFrequency));
+
+    const float originalF0 = static_cast<float>(kFrequency);
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, &originalF0, &kCorrectedFrequency,
+            1, 100.0, 0.0, tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(result.success,
+               "low frequency: trusted 100 Hz period succeeds without a 512-sample measurement window");
+    expectTrue(static_cast<int>(result.audio.size()) == kNumSamples,
+               "low frequency: output length preserved");
+}
+
+void testOctaveRepairKeepsUnvoicedAndUneditedRegionsNeutral()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr double kFrameRate = 100.0;
+    constexpr int kSamplesPerFrame = 441;
+    constexpr int kNumFrames = 20;
+    constexpr int kNumSamples = kSamplesPerFrame * kNumFrames;
+    constexpr int kHalfSamples = kNumSamples / 2;
+    constexpr int kHistorySamples = 256;
+
+    std::vector<float> input(static_cast<size_t>(kNumSamples), 0.0f);
+    for (int i = kHalfSamples; i < kNumSamples; ++i) {
+        const double phase = kTwoPi * 220.0 * i / kSampleRate;
+        input[static_cast<size_t>(i)] =
+            static_cast<float>(0.5 * std::sin(phase));
+    }
+    const std::vector<float> history(static_cast<size_t>(kHistorySamples), 0.0f);
+    const std::vector<float> tail = makeSineSegment(
+        220.0, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+
+    std::vector<float> originalF0(static_cast<size_t>(kNumFrames), 220.0f);
+    std::vector<float> correctedF0(static_cast<size_t>(kNumFrames), 220.0f);
+    for (int frame = 0; frame < kNumFrames / 2; ++frame) {
+        originalF0[static_cast<size_t>(frame)] = 0.0f;
+        correctedF0[static_cast<size_t>(frame)] = 225.0f;
+    }
+    for (int frame = kNumFrames / 2; frame < kNumFrames; ++frame)
+        correctedF0[static_cast<size_t>(frame)] = 0.0f;
+
+    const std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> invalid(
+        static_cast<size_t>(kNumSamples));
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
+            kNumFrames, kFrameRate, 0.0,
+            tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            invalid.data(), kNumSamples, false);
+
+    expectTrue(result.success,
+               "neutral regions: invalid detector periods are accepted for unvoiced and unedited F0");
+    expectTrue(static_cast<int>(result.audio.size()) == kNumSamples,
+               "neutral regions: output length preserved");
+    if (static_cast<int>(result.audio.size()) != kNumSamples)
+        return;
+    double maxError = 0.0;
+    for (int i = 0; i < kNumSamples; ++i) {
+        maxError = std::max(maxError, std::fabs(static_cast<double>(
+            result.audio[static_cast<size_t>(i)] - input[static_cast<size_t>(i)])));
+    }
+    expectTrue(maxError <= 1.0e-5,
+               "neutral regions: output remains sample-exact without a confirmed period");
+}
+
+// A genuine 220 -> 440 Hz transposition with a stale detector period in the
+// second half. Repair must scale only the second-half span: the first half
+// stays at 220 Hz and the second half stays at 440 Hz. Scaling the whole
+// detector block halves the first-half rate to 0.5 and breaks the 220 Hz
+// output, which whole-chunk validation rejects.
+void testOctaveRepairPreservesRealTransposition()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHalf = kNumSamples / 2;
+    constexpr int kHistorySamples = 256;
+    constexpr double kLowFreq = 220.0;
+    constexpr double kHighFreq = 440.0;
+    constexpr int kFrameRate = 100;
+
+    const double oldPeriod = static_cast<double>(kSampleRate) / kLowFreq;
+
+    // 440 * 2048 == 220 * 4096, so starting the 440 Hz half at firstSample
+    // 2048 continues the phase of the 220 Hz half exactly.
+    const std::vector<float> firstHalf = makeSineSegment(
+        kLowFreq, kSampleRate, 0, kHalf, 0.5);
+    const std::vector<float> secondHalf = makeSineSegment(
+        kHighFreq, kSampleRate, 2048, kHalf, 0.5);
+
+    std::vector<float> input(static_cast<size_t>(kNumSamples));
+    std::copy(firstHalf.begin(), firstHalf.end(), input.begin());
+    std::copy(secondHalf.begin(), secondHalf.end(), input.begin() + kHalf);
+
+    const std::vector<float> history = makeSineSegment(
+        kLowFreq, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kHighFreq, kSampleRate, 2048 + kHalf,
+        Shifter::kLookaheadSamples, 0.5);
+
+    const int numF0Frames = static_cast<int>(std::ceil(
+        static_cast<double>(kNumSamples) / kSampleRate * kFrameRate)) + 1;
+    const double samplesPerFrame =
+        static_cast<double>(kSampleRate) / kFrameRate;
+    std::vector<float> originalF0(static_cast<size_t>(numF0Frames));
+    std::vector<float> correctedF0(static_cast<size_t>(numF0Frames));
+    for (int k = 0; k < numF0Frames; ++k) {
+        const double frameCentre =
+            (static_cast<double>(k) + 0.5) * samplesPerFrame;
+        const float f0 = frameCentre < static_cast<double>(kHalf)
+            ? static_cast<float>(kLowFreq)
+            : static_cast<float>(kHighFreq);
+        originalF0[static_cast<size_t>(k)] = f0;
+        correctedF0[static_cast<size_t>(k)] = f0;
+    }
+
+    const auto detected = makeLockedDetector(
+        kNumSamples, static_cast<float>(oldPeriod));
+
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
+            numF0Frames, static_cast<double>(kFrameRate), 0.0,
+            tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(result.success, "real transposition: repair succeeds");
+    expectTrue(result.octave == -1,
+               "real transposition: repair halves only the stale 2P span");
+    expectTrue(static_cast<int>(result.audio.size()) == kNumSamples,
+               "real transposition: output length preserved");
+    expectTrue(allFinite(result.audio), "real transposition: output finite");
+    if (static_cast<int>(result.audio.size()) != kNumSamples)
+        return;
+
+    constexpr int kFirstBegin = 512;
+    constexpr int kFirstEnd = 3500;
+    const int firstCrossings = countPositiveZeroCrossings(
+        result.audio, kFirstBegin, kFirstEnd);
+    const double firstDuration =
+        static_cast<double>(kFirstEnd - kFirstBegin) / kSampleRate;
+    const double firstExpected = kLowFreq * firstDuration;
+    expectTrue(std::fabs(static_cast<double>(firstCrossings) - firstExpected)
+                   < firstExpected * 0.1,
+               "real transposition: first half stays at 220 Hz");
+
+    constexpr int kSecondBegin = 5000;
+    constexpr int kSecondEnd = 7800;
+    const int secondCrossings = countPositiveZeroCrossings(
+        result.audio, kSecondBegin, kSecondEnd);
+    const double secondDuration =
+        static_cast<double>(kSecondEnd - kSecondBegin) / kSampleRate;
+    const double secondExpected = kHighFreq * secondDuration;
+    expectTrue(std::fabs(static_cast<double>(secondCrossings) - secondExpected)
+                   < secondExpected * 0.1,
+               "real transposition: second half stays at 440 Hz");
+}
+
+// The corrected target is fixed: a 220 Hz source corrected to 440 Hz asks for
+// an octave of resampling that no detector-period scaling can deliver inside
+// the light contract. Repair must fail instead of publishing 220 Hz.
+void testOctaveRepairRejectsUnreachableTarget()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 256;
+    constexpr double kFreq = 220.0;
+
+    const std::vector<float> input = makeSineSegment(
+        kFreq, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kFreq, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kFreq, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+    const auto detected = makeLockedDetector(kNumSamples, 200.0f);
+
+    const float originalF0 = static_cast<float>(kFreq);
+    const float correctedF0 = 440.0f;
+
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, &originalF0, &correctedF0, 1, 100.0,
+            0.0, tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(!result.success,
+               "unreachable target: octave repair cannot reach 440 Hz from "
+               "a 220 Hz source inside the light contract");
+}
+
+// A real 220 Hz input with originalF0 == correctedF0 == 220 Hz but a detector
+// period of 210 samples (210 Hz) requests 220 * 210 / 44100 = +80.5 cents.
+// Holding the previous rate would leave the output +80.5 cents away from the
+// target, outside the light contract, so the light render is rejected.
+void testOctaveRepairRejectsDetectorRateAbove75Cents()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr double kFreq = 220.0;
+    constexpr float kDetectorPeriod = 210.0f;
+
+    const double requestedRate =
+        kFreq * static_cast<double>(kDetectorPeriod) / kSampleRate;
+    expectTrue(!OpenTune::isPitchShiftRateWithinLightContract(requestedRate),
+               "above 75: detector rate is outside the light contract");
+    expectTrue(!OpenTune::isPitchShiftRateWithinLightContract(
+                   requestedRate * 0.5)
+                   && !OpenTune::isPitchShiftRateWithinLightContract(
+                       requestedRate * 2.0),
+               "above 75: detector rate is not octave-repairable");
+
+    const Shifter::OctaveRepairResult result =
+        runFixedToneOctaveRepair(kDetectorPeriod);
+
+    expectTrue(!result.success || result.audio.empty(),
+               "above 75: unrepairable hold miss is not published");
+}
+
+// A 500-cent target step with a detector period that keeps reporting the
+// previous note requests 293.66 * 200 / 44100 = +500 cents. The target and
+// original tracks step together, so the runtime routes the chunk into the
+// light path; the shifter must not publish the stale-period render.
+void testTargetStepWithStalePeriodRejectsLightRender()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 256;
+    constexpr int kFrameRate = 100;
+    constexpr int kStepFrame = 10;
+    constexpr double kLowFreq = 220.0;
+    constexpr double kHighFreq = 293.66;
+
+    const std::vector<float> input = makeSineSegment(
+        200.0, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        200.0, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        200.0, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+
+    const int numF0Frames = 32;
+    const double samplesPerFrame = static_cast<double>(kSampleRate) / kFrameRate;
+    std::vector<float> originalF0(static_cast<size_t>(numF0Frames));
+    std::vector<float> correctedF0(static_cast<size_t>(numF0Frames));
+    for (int k = 0; k < numF0Frames; ++k) {
+        const bool afterStep = k >= kStepFrame;
+        originalF0[static_cast<size_t>(k)] =
+            static_cast<float>(afterStep ? kHighFreq : kLowFreq);
+        correctedF0[static_cast<size_t>(k)] = originalF0[static_cast<size_t>(k)];
+    }
+    expectTrue(!OpenTune::chunkNeedsVocoder(
+                   correctedF0.data(), numF0Frames, originalF0, 0),
+               "target step: both tracks step together inside the light contract");
+    expectTrue(static_cast<double>(kStepFrame) * samplesPerFrame
+                   < static_cast<double>(kNumSamples),
+               "target step: setup places the step inside the chunk");
+
+    const auto detected = makeLockedDetector(
+        kNumSamples, static_cast<float>(kSampleRate / kLowFreq));
+
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
+            numF0Frames, static_cast<double>(kFrameRate), 0.0,
+            tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(!result.success || result.audio.empty(),
+               "target step: stale-period request is not published");
+}
+
+// Low-frequency target change that the measurement window cannot see: the
+// target moves 100 -> 103 Hz, then 100 -> 97 Hz while the detector period
+// moves 441 -> 500. Holding 1.03 leaves the output ~104 cents above the 97 Hz
+// target; no measurement window fits the 454-sample target period, so only
+// the render-side contract can reject it.
+void testLowFrequencyHoldRejectsUnverifiableTarget()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 256;
+    constexpr int kFrameRate = 100;
+    constexpr int kStepFrame = 10;
+    constexpr double kOriginalF0 = 100.0;
+    constexpr double kFirstTargetF0 = 103.0;
+    constexpr double kSecondTargetF0 = 97.0;
+
+    const std::vector<float> input = makeSineSegment(
+        kOriginalF0, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kOriginalF0, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kOriginalF0, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+
+    const int numF0Frames = 32;
+    const double samplesPerFrame = static_cast<double>(kSampleRate) / kFrameRate;
+    std::vector<float> originalF0(static_cast<size_t>(numF0Frames),
+                                  static_cast<float>(kOriginalF0));
+    std::vector<float> correctedF0(static_cast<size_t>(numF0Frames));
+    for (int k = 0; k < numF0Frames; ++k) {
+        correctedF0[static_cast<size_t>(k)] = static_cast<float>(
+            k >= kStepFrame ? kSecondTargetF0 : kFirstTargetF0);
+    }
+    expectTrue(!OpenTune::chunkNeedsVocoder(
+                   correctedF0.data(), numF0Frames, originalF0, 0),
+               "low frequency: both targets stay inside the light contract");
+
+    const int stepSample = static_cast<int>(
+        static_cast<double>(kStepFrame) * samplesPerFrame);
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> detected(
+        static_cast<size_t>(kNumSamples));
+    for (int i = 0; i < kNumSamples; ++i) {
+        auto& frame = detected[static_cast<size_t>(i)];
+        frame.valid = true;
+        frame.trackingUpdated = (i % 5 == 0);
+        frame.periodSamples = static_cast<float>(i < stepSample
+            ? kSampleRate / kOriginalF0
+            : kSampleRate / (kOriginalF0 * 0.882));
+    }
+
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const Shifter::OctaveRepairResult result =
+        shifter.shiftChunkWithOctaveRepair(
+            input.data(), kNumSamples, originalF0.data(), correctedF0.data(),
+            numF0Frames, static_cast<double>(kFrameRate), 0.0,
+            tail.data(), Shifter::kLookaheadSamples,
+            history.data(), kHistorySamples,
+            detected.data(), kNumSamples, false);
+
+    expectTrue(!result.success || result.audio.empty(),
+               "low frequency: unverifiable held target is not published");
+}
+
+void testLightPitchRoutingBounds()
+{
+    const std::vector<float> original = {220.0f, 220.0f, 220.0f, 0.0f, 220.0f};
+    const float below = 220.0f * std::exp2(74.0f / 1200.0f);
+    const float above = 220.0f * std::exp2(76.0f / 1200.0f);
+    const float corrected[] = {below, above, 220.0f, 220.0f, above};
+
+    expectTrue(!OpenTune::chunkNeedsVocoder(corrected, 1, original, 0),
+               "routing: 74 cents stays in AutoTune");
+    expectTrue(OpenTune::chunkNeedsVocoder(corrected + 1, 1, original, 1),
+               "routing: 76 cents uses the vocoder");
+    expectTrue(OpenTune::chunkNeedsVocoder(corrected, 2, original, 0),
+               "routing: any frame above 75 cents selects the vocoder");
+    expectTrue(!OpenTune::chunkNeedsVocoder(corrected + 2, 1, original, 2),
+               "routing: neutral frame stays in AutoTune");
+    expectTrue(!OpenTune::chunkNeedsVocoder(corrected + 3, 1, original, 3),
+               "routing: unvoiced frame stays in AutoTune");
+    expectTrue(OpenTune::chunkNeedsVocoder(corrected + 4, 1, original, 4),
+               "routing: global F0 start offset is respected");
+}
+
+// Hop-held detector samples between tracking-update events carry a stale
+// period. The stale 230-sample period is outside ±75 cents (220 Hz target ->
+// +238 cents) and appears only on trackingUpdated == false samples, while
+// trackingUpdated == true samples keep the legal 200-sample period
+// (-3.9 cents). shiftChunk must judge the rate contract on the update events
+// and keep rendering instead of returning an empty chunk.
+void testShiftChunkSkipsStaleHeldPeriodForRateContract()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr int kNumSamples = 8192;
+    constexpr int kHistorySamples = 256;
+    constexpr double kFreq = 220.0;
+    constexpr float kUpdatedPeriod = 200.0f;
+    constexpr float kStalePeriod = 230.0f;
+
+    const double updatedRate =
+        kFreq * static_cast<double>(kUpdatedPeriod) / kSampleRate;
+    const double staleRate =
+        kFreq * static_cast<double>(kStalePeriod) / kSampleRate;
+    expectTrue(OpenTune::isPitchShiftRateWithinLightContract(updatedRate),
+               "stale held: update-event periods stay inside the ±75 contract");
+    expectTrue(!OpenTune::isPitchShiftRateWithinLightContract(staleRate),
+               "stale held: setup stale period is outside the ±75 contract");
+
+    const std::vector<float> input = makeSineSegment(
+        kFreq, kSampleRate, 0, kNumSamples, 0.5);
+    const std::vector<float> history = makeSineSegment(
+        kFreq, kSampleRate, -kHistorySamples, kHistorySamples, 0.5);
+    const std::vector<float> tail = makeSineSegment(
+        kFreq, kSampleRate, kNumSamples, Shifter::kLookaheadSamples, 0.5);
+
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> detected(
+        static_cast<size_t>(kNumSamples));
+    for (int i = 0; i < kNumSamples; ++i) {
+        auto& frame = detected[static_cast<size_t>(i)];
+        frame.valid = true;
+        frame.trackingUpdated = (i % 5 == 0);
+        frame.periodSamples =
+            frame.trackingUpdated ? kUpdatedPeriod : kStalePeriod;
+    }
+
+    const float f0 = static_cast<float>(kFreq);
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const std::vector<float> out = shifter.shiftChunk(
+        input.data(), kNumSamples, &f0, &f0, 1, 100.0, 0.0,
+        tail.data(), Shifter::kLookaheadSamples,
+        history.data(), kHistorySamples,
+        detected.data(), kNumSamples);
+
+    expectTrue(static_cast<int>(out.size()) == kNumSamples,
+               "stale held: stale non-update periods must not reject the chunk");
+    expectTrue(allFinite(out), "stale held: all outputs finite");
 }
 
 } // namespace
@@ -1748,6 +2562,9 @@ int main()
     testNonIdentityShiftKeepsLengthFiniteAndSmooth(false);
     testNonIntegerPeriodInputsStayFinite();
     testFloatingCyclePeriodProducesTargetRate();
+    testCycleTransitionsSuppressAddedHighFrequencies();
+    testResamplingPreservesHighHarmonicsAndRejectsAliases();
+    testCycleTransitionRateReversals();
     testNonIdentityDoesNotMoveChunkStart();
     testF0FramePhaseUsesLaterFrames();
     testTailChunksWithShortLookahead();
@@ -1769,7 +2586,21 @@ int main()
     testDetectorShadowDoesNotHalvePeriod();
     testDetectorWeakFundamentalLocksToTruePeriod();
     testDetectorResistsOctaveOnAmplitudeRamp();
-    testPostProcessingFixesIsolatedOctaveGlitch();
+    testDetectorPriorSelectsAndTracksWaveformOctaves();
+    testDetectorTrackingConfirmsNeighboringHalfPeriod();
+    testPitchShiftRateContractAt75Cents();
+    testOctaveRepairScalesDoublePeriod();
+    testOctaveRepairScalesHalfPeriod();
+    testOctaveRepairRejectsNoTrustedDetectorPeriod();
+    testOctaveRepairAcceptsLowFrequencyWithoutMeasurementWindow();
+    testOctaveRepairKeepsUnvoicedAndUneditedRegionsNeutral();
+    testOctaveRepairPreservesRealTransposition();
+    testOctaveRepairRejectsUnreachableTarget();
+    testOctaveRepairRejectsDetectorRateAbove75Cents();
+    testTargetStepWithStalePeriodRejectsLightRender();
+    testLowFrequencyHoldRejectsUnverifiableTarget();
+    testLightPitchRoutingBounds();
+    testShiftChunkSkipsStaleHeldPeriodForRateContract();
 
     if (g_failures == 0) {
         std::printf("All AutoTunePitchShifter tests passed.\n");
