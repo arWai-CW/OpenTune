@@ -90,7 +90,7 @@ This project requires **two** ONNX Runtime packages (Windows): the CPU version p
 
 | Package | Link | Extract to |
 |---------|------|------------|
-| ONNX Runtime CPU | [onnxruntime-win-x64-1.24.4.zip](https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip) | `ThirdParty/onnxruntime-win-x64-1.24.4/` |
+| ONNX Runtime CPU | [NuGet 1.24.4](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.24.4) | `ThirdParty/onnxruntime-win-x64-1.24.4/` (`build/native/include` → `include`, `runtimes/win-x64/native` → `lib`) |
 | ONNX Runtime DirectML | [Microsoft.ML.OnnxRuntime.DirectML.1.24.4.nupkg](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML/1.24.4) | `ThirdParty/onnxruntime-dml-1.24.4/` |
 
 > **Tip:** Rename `.nupkg` to `.zip` before extracting.

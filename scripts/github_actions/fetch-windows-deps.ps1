@@ -14,7 +14,7 @@ $SoundTouchArchiveSha256 = "ed714f84a3e748de87b24f385ec69d3bdc51ca47b7f4710d2048
 $OnnxRuntimeDirectMlSha256 = "57e9f11b73437bef7a309496135d4c1f96b1a8e9ddba60013fa27bfc1d788681"
 $DirectMlSha256 = "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9"
 $Direct3DSha256 = "0e9bcf32aac9a79343ede9b21e4864950ee54577e3d8e19bfcdf002bb4e9bfd6"
-$OnnxRuntimeCpuSha256 = "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357"
+$OnnxRuntimeCpuSha256 = "4b978d5065b85e7004b6c6f60ca494bd978fbe6836cbf0a0b52d82b61ab99638"
 $OnnxRuntimeDmlMtDllSha256 = "402856ef7f06a9c598eef0b14b62a6be242c63908b0811563f0d5d6a13ea2d51"
 
 $Work = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $env:TEMP "opentune-ci" }
@@ -250,25 +250,18 @@ Expand-Nupkg `
     (Join-Path $Root "ThirdParty\microsoft.direct3d.d3d12.1.619.5") `
     $Direct3DSha256
 
-$OrtZip = Join-Path $Work "onnxruntime-win-x64-1.24.4.zip"
-$OrtExtract = Join-Path $Work "onnxruntime-win-x64-1.24.4"
-Save-Url "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip" $OrtZip
-Assert-Sha256 -Path $OrtZip -Expected $OnnxRuntimeCpuSha256 -Label "ONNX Runtime CPU archive"
-if (Test-Path -LiteralPath $OrtExtract) {
-    Remove-Item -LiteralPath $OrtExtract -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $OrtExtract | Out-Null
-Invoke-Checked "tar.exe" @("-xf", $OrtZip, "-C", $OrtExtract)
-$header = Get-ChildItem -Path $OrtExtract -Recurse -Filter "onnxruntime_cxx_api.h" | Select-Object -First 1
-if (-not $header) {
-    throw "ONNX Runtime CPU package has no include/onnxruntime_cxx_api.h"
-}
-$packageRoot = $header.Directory.Parent.FullName
+$OrtExtract = Join-Path $Work "onnxruntime-cpu-1.24.4"
+Expand-Nupkg `
+    "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.24.4/microsoft.ml.onnxruntime.1.24.4.nupkg" `
+    $OrtExtract `
+    $OnnxRuntimeCpuSha256
 $ortTarget = Join-Path $Root "ThirdParty\onnxruntime-win-x64-1.24.4"
 if (Test-Path -LiteralPath $ortTarget) {
     Remove-Item -LiteralPath $ortTarget -Recurse -Force
 }
-Move-Item -LiteralPath $packageRoot -Destination $ortTarget
+New-Item -ItemType Directory -Path $ortTarget | Out-Null
+Copy-Item -Recurse -LiteralPath (Join-Path $OrtExtract "build\native\include") -Destination (Join-Path $ortTarget "include")
+Copy-Item -Recurse -LiteralPath (Join-Path $OrtExtract "runtimes\win-x64\native") -Destination (Join-Path $ortTarget "lib")
 
 # Replace the upstream NuGet onnxruntime.dll with the project-maintained
 # /MT RelWithDebInfo build tracked under scripts/github_actions/assets/.
