@@ -172,6 +172,19 @@ bool testIsolatedAttackStaysPut()
             return handle.id == 5 && handle.output_seconds == 5.0;
         });
 }
+
+bool testPeriodicAttacksDoNotSlipByASyllable()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    std::vector<TimingOnset> target, guide;
+    for (int i = 0; i < 7; ++i) {
+        const auto guideTime = 0.4 + i * 0.24;
+        guide.push_back({guideTime, false});
+        target.push_back({guideTime + 0.13, false});
+    }
+    return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
+}
 }
 
 int main()
@@ -190,6 +203,10 @@ int main()
     }
     if (!testIsolatedAttackStaysPut()) {
         std::fputs("Reference timing did not align a seeded grid while protecting isolated and manual anchors\n", stderr);
+        return 1;
+    }
+    if (!testPeriodicAttacksDoNotSlipByASyllable()) {
+        std::fputs("Reference timing incorrectly paired periodic attacks with the next syllable\n", stderr);
         return 1;
     }
     return 0;

@@ -35,11 +35,12 @@ std::vector<ProjectedOnset> projectOnsets(const std::vector<TimingOnset>& onsets
 
 int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>& candidates)
 {
-    auto it = std::lower_bound(candidates.begin(), candidates.end(), target.timeline - maxShift,
+    const auto first = std::lower_bound(candidates.begin(), candidates.end(), target.timeline - maxShift,
         [](const ProjectedOnset& onset, double time) { return onset.timeline < time; });
     int bestIndex = -1;
     double best = std::numeric_limits<double>::infinity();
     double runnerUp = best;
+    auto it = first;
     for (; it != candidates.end() && it->timeline <= target.timeline + maxShift; ++it) {
         const double score = std::abs(it->timeline - target.timeline)
             + (it->onset.highFrequencyDominant == target.onset.highFrequencyDominant ? 0.0 : 0.035);
@@ -51,7 +52,18 @@ int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>&
             runnerUp = std::min(runnerUp, score);
         }
     }
-    return runnerUp - best >= ambiguityMargin ? bestIndex : -1;
+    if (bestIndex < 0 || runnerUp - best < ambiguityMargin)
+        return -1;
+    const auto& chosen = candidates[static_cast<size_t>(bestIndex)];
+    const auto shift = chosen.timeline - target.timeline;
+    // Similar attacks on opposite sides can explain the same rhythm with
+    // opposite offsets. Nearest distance alone can't disambiguate the syllable.
+    if (std::any_of(first, it, [&](const auto& alternative) {
+            return alternative.onset.highFrequencyDominant == chosen.onset.highFrequencyDominant
+                && (alternative.timeline - target.timeline) * shift < 0.0;
+        }))
+        return -1;
+    return bestIndex;
 }
 
 bool validSpan(const TimeHandle& first, const TimeHandle& second)
