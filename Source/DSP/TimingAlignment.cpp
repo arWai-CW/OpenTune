@@ -35,12 +35,11 @@ std::vector<ProjectedOnset> projectOnsets(const std::vector<TimingOnset>& onsets
 
 int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>& candidates)
 {
-    const auto first = std::lower_bound(candidates.begin(), candidates.end(), target.timeline - maxShift,
+    auto it = std::lower_bound(candidates.begin(), candidates.end(), target.timeline - maxShift,
         [](const ProjectedOnset& onset, double time) { return onset.timeline < time; });
     int bestIndex = -1;
     double best = std::numeric_limits<double>::infinity();
     double runnerUp = best;
-    auto it = first;
     for (; it != candidates.end() && it->timeline <= target.timeline + maxShift; ++it) {
         const double score = std::abs(it->timeline - target.timeline)
             + (it->onset.highFrequencyDominant == target.onset.highFrequencyDominant ? 0.0 : 0.035);
@@ -52,19 +51,46 @@ int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>&
             runnerUp = std::min(runnerUp, score);
         }
     }
-    if (bestIndex < 0 || runnerUp - best < ambiguityMargin)
-        return -1;
-    const auto& chosen = candidates[static_cast<size_t>(bestIndex)];
-    const auto shift = chosen.timeline - target.timeline;
-    // Comparable offsets in either direction can explain the same rhythm.
-    if (std::any_of(first, it, [&](const auto& alternative) {
-            const double alternativeShift = alternative.timeline - target.timeline;
-            return alternative.onset.highFrequencyDominant == chosen.onset.highFrequencyDominant
-                && alternativeShift * shift < 0.0
-                && std::abs(alternativeShift) <= 1.5 * std::abs(shift);
-        }))
-        return -1;
-    return bestIndex;
+    return runnerUp - best >= ambiguityMargin ? bestIndex : -1;
+}
+
+bool hasSyllableSlip(const std::vector<ProjectedOnset>& targets,
+                     const std::vector<ProjectedOnset>& guides,
+                     const std::vector<int>& matches)
+{
+    // Compare coherent alternatives across several attacks, not just the
+    // nearest attack in isolation. A regular phrase can fit either phase.
+    for (const int direction : {-1, 1}) {
+        int run = 0;
+        double firstOffset = 0.0;
+        int previousGuide = -1;
+        for (size_t i = 0; i < matches.size(); ++i) {
+            const int guide = matches[i];
+            const int neighbor = guide + direction;
+            if (guide < 0 || neighbor < 0 || neighbor >= static_cast<int>(guides.size())) {
+                run = 0;
+                continue;
+            }
+            const auto& target = targets[i];
+            const auto& candidate = guides[static_cast<size_t>(neighbor)];
+            const double offset = guides[static_cast<size_t>(guide)].timeline - target.timeline;
+            const double alternative = candidate.timeline - target.timeline;
+            if (std::abs(offset) < 2.0 * ambiguityMargin || offset * alternative >= 0.0
+                || std::abs(alternative) > maxShift
+                || candidate.onset.highFrequencyDominant != target.onset.highFrequencyDominant) {
+                run = 0;
+                continue;
+            }
+            if (run == 0 || guide != previousGuide + 1 || std::abs(alternative - firstOffset) > ambiguityMargin) {
+                run = 0;
+                firstOffset = alternative;
+            }
+            previousGuide = guide;
+            if (++run >= 3)
+                return true;
+        }
+    }
+    return false;
 }
 
 bool validSpan(const TimeHandle& first, const TimeHandle& second)
@@ -194,7 +220,7 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         else
             ++matched;
     }
-    if (matched < 3 || matched * 2 < targets.size())
+    if (matched < 3 || matched * 2 < targets.size() || hasSyllableSlip(targets, guides, matches))
         return {};
 
     auto handles = targetGrid.handles();
