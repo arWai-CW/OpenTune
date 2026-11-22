@@ -81,6 +81,12 @@ public:
     static bool hasMinimumSourceSpacing(double previousSourceSeconds,
                                         double currentSourceSeconds) noexcept;
 
+    static bool supportsStretchRatio(double sourceDuration, double outputDuration) noexcept
+    {
+        return outputDuration >= 0.5 * sourceDuration - 1e-9
+            && outputDuration <= 2.0 * sourceDuration + 1e-9;
+    }
+
     /**
      * 构造一个恒等映射 snapshot (output==source 全部 handle, τ=identity)。
      * 仅含 ClipStart + ClipEnd 两个端点.

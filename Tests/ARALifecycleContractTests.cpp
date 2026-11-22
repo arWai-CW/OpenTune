@@ -4,6 +4,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/ARA/OpenTuneDocumentController.h"
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
+#include "../Source/Utils/TimeGridEditAction.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -194,7 +195,9 @@ bool check (bool value, const char* name)
 bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef documentControllerRef,
                                             ARA::Host::DocumentController& hostDocumentController,
                                             ARA::ARAAudioSourceRef audioSource,
-                                            ARA::ARAPlaybackRegionRef playbackRegionRef)
+                                            ARA::ARAPlaybackRegionRef playbackRegionRef,
+                                            ARA::ARAPlaybackRegionRef& secondTargetRef,
+                                            ARA::ARAAudioModificationRef& secondModificationRef)
 {
     constexpr double initialSampleRate = 48000.0;
     constexpr double switchedSampleRate = 44100.0;
@@ -334,6 +337,78 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                    && undone->timeGridRevision > after->timeGridRevision,
                "stretch_undo_did_not_restore_identity");
         expectAudible(*firstRenderer, "undo_did_not_restore_unwarped_playback", true);
+
+        auto* secondTarget = ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(secondTargetRef);
+        const auto secondRegions = controller->getPlaybackRegionProjectionsFor({secondTarget});
+        if (!expect(secondRegions.size() == 1
+                        && controller->requestReadAudioForPlaybackRegion(secondTarget) == 1,
+                    "second_timing_target_not_ready"))
+            return false;
+        const auto secondKey = secondRegions.front().contentKey;
+        const auto secondBefore = controller->readContentSnapshot(secondKey);
+        if (!expect(secondKey != key && secondBefore && secondBefore->timeGrid,
+                    "second_timing_grid_missing"))
+            return false;
+
+        const auto hasGrid = [&](ContentKey content, const auto& grid) {
+            const auto snapshot = controller->readContentSnapshot(content);
+            return snapshot && snapshot->timeGrid == grid;
+        };
+        auto& history = firstProcessor.getUndoManager();
+        const auto priorUndo = history.peekUndo();
+        expect(!firstProcessor.commitTimeGridEdits({
+                   {key, before->timeGrid, warp}, {secondKey, secondBefore->timeGrid, invalid}}, "Align")
+                   && history.peekUndo() == priorUndo
+                   && hasGrid(key, before->timeGrid) && hasGrid(secondKey, secondBefore->timeGrid),
+               "rejected_timing_batch_left_partial_edit");
+        const auto* group = firstProcessor.commitTimeGridEdits({
+            {key, before->timeGrid, warp}, {secondKey, secondBefore->timeGrid, warp}}, "Align");
+        if (!expect(group && hasGrid(key, warp) && hasGrid(secondKey, warp),
+                    "timing_batch_not_committed"))
+            return false;
+        expect(history.undo() == group && hasGrid(key, before->timeGrid)
+                   && hasGrid(secondKey, secondBefore->timeGrid), "timing_batch_undo_failed");
+        expect(history.redo() == group && hasGrid(key, warp)
+                   && hasGrid(secondKey, warp), "timing_batch_redo_failed");
+        const auto laterWarp = TimeGridSnapshot::makeFromHandles({
+            {1, 0.0, 0.0, HandleKind::ClipStart},
+            {2, 0.5, 0.55, HandleKind::UserAdded},
+            {3, 1.0, 1.0, HandleKind::ClipEnd}
+        });
+        expect(secondProcessor.applyTimeGridEdit(key, warp, laterWarp, "Manual timing"),
+               "other_instance_timing_edit_failed");
+        auto& otherHistory = secondProcessor.getUndoManager();
+        const auto* manual = otherHistory.peekUndo();
+        expect(history.undo() == nullptr && history.peekUndo() == group
+                   && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+               "blocked_batch_undo_changed_content_or_history");
+        expect(manual != nullptr && otherHistory.undo() == manual
+                   && history.undo() == group, "batch_undo_could_not_be_retried");
+        expect(otherHistory.redo() == nullptr && otherHistory.peekRedo() == manual
+                   && hasGrid(key, before->timeGrid),
+               "blocked_manual_redo_changed_content_or_history");
+        expect(history.redo() == group && otherHistory.redo() == manual
+                   && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+               "manual_redo_could_not_be_retried");
+        otherHistory.undo();
+        history.undo();
+
+        expect(firstProcessor.applyTimeGridEdit(key, before->timeGrid, warp, "Earlier timing"),
+               "earlier_timing_edit_failed");
+        const auto* earlier = history.peekUndo();
+        const auto* beforeDelete = firstProcessor.commitTimeGridEdits({
+            {key, warp, laterWarp}, {secondKey, secondBefore->timeGrid, warp}}, "Align");
+        if (!expect(beforeDelete && earlier && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+                    "delete_fixture_alignment_failed"))
+            return false;
+        hostDocumentController.destroyPlaybackRegion(secondTargetRef);
+        secondTargetRef = nullptr;
+        hostDocumentController.destroyAudioModification(secondModificationRef);
+        secondModificationRef = nullptr;
+        expect(!controller->readContentSnapshot(secondKey)
+                   && history.undo() == beforeDelete && hasGrid(key, warp)
+                   && history.undo() == earlier && hasGrid(key, before->timeGrid),
+               "deleted_target_blocked_remaining_timing_history");
     }
 
     auto* route = controller->getAuditionRoute();
@@ -615,15 +690,23 @@ int runChild(int argc, char** argv)
     const auto region = documentController.createPlaybackRegion (modification, nullptr, &regionProperties);
     if (! check (region != nullptr, "playback_region_create_failed"))
         return 1;
+    regionProperties.startInPlaybackTime = 1.0;
+    auto secondTarget = documentController.createPlaybackRegion(
+        extraModifications.front(), nullptr, &regionProperties);
+    if (!check(secondTarget != nullptr, "second_timing_region_create_failed"))
+        return 1;
 
     const bool rendererLifecyclePassed = runPlaybackRendererLifecycleRegression(
-        instance->documentControllerRef, documentController, source, region);
+        instance->documentControllerRef, documentController, source, region, secondTarget, extraModifications.front());
     documentController.enableAudioSourceSamplesAccess(source, false);
 
     documentController.destroyPlaybackRegion (region);
+    if (secondTarget != nullptr)
+        documentController.destroyPlaybackRegion (secondTarget);
     documentController.destroyAudioModification (modification);
     for (auto* extra : extraModifications)
-        documentController.destroyAudioModification (extra);
+        if (extra != nullptr)
+            documentController.destroyAudioModification (extra);
 
     const auto rebuiltStableModification = documentController.createAudioModification(
         source, nullptr, &modificationProperties);

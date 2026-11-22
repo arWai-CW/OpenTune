@@ -38,6 +38,15 @@ public:
     virtual ~UndoAction() = default;
     virtual void undo() = 0;
     virtual void redo() = 0;
+    // A refused replay must leave the edit state and history position unchanged.
+    virtual bool tryReplay(bool isUndo)
+    {
+        if (isUndo)
+            undo();
+        else
+            redo();
+        return true;
+    }
     virtual juce::String getDescription() const = 0;
     // False leaves state unchanged. Composite actions must simulate on a candidate copy.
     virtual bool replayStructure(UndoReplayState& state, bool undo) const

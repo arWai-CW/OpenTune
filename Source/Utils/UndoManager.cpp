@@ -34,26 +34,28 @@ void UndoManager::addAction(std::unique_ptr<UndoAction> action)
 UndoAction* UndoManager::undo()
 {
     jassert(juce::MessageManager::existsAndIsCurrentThread());
-    if (!canUndo())
+    if (isPerformingUndoRedo_ || !canUndo())
         return nullptr;
 
-    isPerformingUndoRedo_ = true;
-    auto* action = actions_[--cursor_].get();
-    action->undo();
-    isPerformingUndoRedo_ = false;
+    juce::ScopedValueSetter<bool> replaying(isPerformingUndoRedo_, true);
+    auto* action = peekUndo();
+    if (!action->tryReplay(true))
+        return nullptr;
+    --cursor_;
     return action;
 }
 
 UndoAction* UndoManager::redo()
 {
     jassert(juce::MessageManager::existsAndIsCurrentThread());
-    if (!canRedo())
+    if (isPerformingUndoRedo_ || !canRedo())
         return nullptr;
 
-    isPerformingUndoRedo_ = true;
-    auto* action = actions_[cursor_++].get();
-    action->redo();
-    isPerformingUndoRedo_ = false;
+    juce::ScopedValueSetter<bool> replaying(isPerformingUndoRedo_, true);
+    auto* action = peekRedo();
+    if (!action->tryReplay(false))
+        return nullptr;
+    ++cursor_;
     return action;
 }
 

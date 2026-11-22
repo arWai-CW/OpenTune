@@ -133,7 +133,7 @@ bool AudioModification::supportsTimeGrid(const TimeGridSnapshot& grid, const Sou
     for (size_t i = 1; i < handles.size(); ++i) {
         const double source = handles[i].source_seconds - handles[i - 1].source_seconds;
         const double output = handles[i].output_seconds - handles[i - 1].output_seconds;
-        if (output < 0.5 * source - 1e-9 || output > 2.0 * source + 1e-9)
+        if (!TimeGridSnapshot::supportsStretchRatio(source, output))
             return false;
     }
     return true;

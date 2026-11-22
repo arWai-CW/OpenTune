@@ -175,8 +175,12 @@ private:
     void addPitchReferenceMenu(juce::PopupMenu& menu);
     void setPitchReferenceTrack(juce::ARARegionSequence* track);
     void tuneToPitchReference();
+    void alignTimingToPitchReference();
     void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
     juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
+    std::unique_ptr<juce::ThreadPool> timingAlignmentWorker_;
+    std::unique_ptr<juce::AlertWindow> timingAlignmentPreview_;
+    bool timingAlignmentRunning_ = false;
 
     void subscribePendingNoteGeneration(ContentKey key, juce::ARAAudioModification* modification,
                                         const NoteGeneratorParams& params);

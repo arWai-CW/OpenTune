@@ -1,4 +1,5 @@
 #include "Inference/SoundTouchStretcher.h"
+#include "DSP/TimingAlignment.h"
 
 #include <cmath>
 #include <cstdio>
@@ -77,12 +78,193 @@ bool testAnchorPlacementAndStereoPitch()
         && unwarped.getSample(0, sampleRate) == input.getSample(0, sampleRate)
         && unwarped.getSample(1, sampleRate) == input.getSample(1, sampleRate);
 }
+
+bool testReferenceAlignment()
+{
+    const auto target = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 3.5, 3.48, HandleKind::UserAdded},
+        {3, 4.0, 4.0, HandleKind::ClipEnd}
+    });
+    const auto guide = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 1.04, HandleKind::UserAdded},
+        {3, 4.5, 4.5, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection targetPlacement{10.05, 4.0, 0, 4.0};
+    const ContentTimelineProjection guidePlacement{9.8, 4.2, 0.3, 4.2};
+    const std::vector<TimingOnset> targetOnsets{{0.5, false}, {1.1, true}, {1.97, false}, {2.8, true}};
+    const std::vector<TimingOnset> guideOnsets{{1.10, false}, {1.68, true}, {2.56, false}};
+    const auto align = [&](const auto& guides, double strength) {
+        return alignTimingToReference(targetOnsets, *target, targetPlacement,
+                                      guides, *guide, guidePlacement, strength);
+    };
+    const auto tight = align(guideOnsets, 1.0);
+    const auto gentle = align(guideOnsets, 0.5);
+    if (!tight.grid || !gentle.grid || tight.movedAnchors != 3 || gentle.movedAnchors != 3)
+        return false;
+    for (size_t i = 0; i < guideOnsets.size(); ++i) {
+        const double source = targetOnsets[i].sourceSeconds;
+        const double expected = targetPlacement.projectTimelineTimeToContent(
+            guidePlacement.projectContentTimeToTimeline(guide->tauForward(guideOnsets[i].sourceSeconds)));
+        if (std::abs(tight.grid->tauForward(source) - expected) > 1e-9
+            || std::abs(gentle.grid->tauForward(source)
+                - (target->tauForward(source) + expected) * 0.5) > 1e-9)
+            return false;
+    }
+    const std::vector<TimingOnset> ambiguous{{0.96, false}, {1.052, false}, {1.68, true}, {2.56, false}};
+    const auto& handles = tight.grid->handles();
+    for (size_t i = 1; i < handles.size(); ++i)
+        if (!TimeGridSnapshot::supportsStretchRatio(
+            handles[i].source_seconds - handles[i - 1].source_seconds,
+            handles[i].output_seconds - handles[i - 1].output_seconds))
+            return false;
+    return tight.grid->totalDurationSeconds() == 4.0
+        && std::abs(tight.grid->tauForward(2.8) - target->tauForward(2.8)) < 1e-9
+        && tight.grid->tauForward(3.5) == 3.48
+        && !align(ambiguous, 1.0).grid
+        && !align(guideOnsets, 0.0).grid;
+}
+
+bool testDetectAttacksAcrossPitch()
+{
+    constexpr int rate = 16000;
+    const std::vector<double> attacks{0.35, 0.82, 1.44};
+    for (const int pitch : {180, 320}) {
+        juce::AudioBuffer<float> audio(2, 2 * rate);
+        audio.clear();
+        for (const double onset : attacks) {
+            for (int i = 0; i < rate / 8; ++i) {
+                const float value = static_cast<float>(std::min(1.0, i / (rate * 0.01))
+                    * std::sin(2.0 * pi * pitch * i / rate));
+                const int sample = static_cast<int>(onset * rate) + i;
+                audio.setSample(0, sample, value);
+                audio.setSample(1, sample, -value);
+            }
+        }
+        const auto onsets = detectTimingOnsets(audio, rate);
+        if (onsets.size() != attacks.size())
+            return false;
+        for (size_t i = 0; i < attacks.size(); ++i)
+            if (std::abs(onsets[i].sourceSeconds - attacks[i]) > 0.01)
+                return false;
+    }
+    return true;
+}
+
+bool testIsolatedAttackStaysPut()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.5, 0.5, HandleKind::InternalOnset},
+        {3, 1.0, 1.0, HandleKind::InternalOnset},
+        {4, 1.8, 1.8, HandleKind::InternalOnset},
+        {5, 5.0, 5.0, HandleKind::UserAdded},
+        {6, 6.0, 6.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 6.0, 0.0, 6.0};
+    const std::vector<TimingOnset> target{{0.5, true}, {1.0, false}, {1.8, true}, {4.1, false}};
+    const std::vector<TimingOnset> guide{{0.6, true}, {1.1, false}, {1.9, true}, {4.2, false}};
+    const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    return result.grid && result.movedAnchors == 3
+        && std::abs(result.grid->tauForward(4.1) - 4.1) < 1e-9
+        && std::any_of(result.grid->handles().begin(), result.grid->handles().end(), [](const auto& handle) {
+            return handle.id == 5 && handle.output_seconds == 5.0;
+        });
+}
+
+bool testPeriodicAttacksDoNotSlipByASyllable()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    for (const auto& [spacing, delay] : {std::pair{0.24, 0.13}, std::pair{0.18, 0.125}, std::pair{0.18, 0.162}}) {
+        std::vector<TimingOnset> target, guide;
+        for (int i = 0; i < 7; ++i) {
+            const auto guideTime = 0.4 + i * spacing;
+            guide.push_back({guideTime, false});
+            target.push_back({guideTime + delay, false});
+        }
+        if (alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid)
+            return false;
+    }
+    return true;
+}
+
+bool testDenseAttacksPreferClearlyCloserSyllables()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    for (const double delay : {0.025, 0.040}) {
+        std::vector<TimingOnset> target, guide;
+        for (int i = 0; i < 7; ++i) {
+            const auto guideTime = 0.4 + i * 0.18;
+            guide.push_back({guideTime, false});
+            target.push_back({guideTime + delay, false});
+        }
+        const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+        if (!result.grid || result.movedAnchors != static_cast<int>(target.size())
+            || std::abs(result.grid->tauForward(target[3].sourceSeconds) - guide[3].sourceSeconds) >= 1e-9)
+            return false;
+    }
+    return true;
+}
+
+bool testExtraLeadingAttackDoesNotHidePhaseAmbiguity()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(2.5);
+    const ContentTimelineProjection placement{0.0, 2.5, 0.0, 2.5};
+    std::vector<TimingOnset> target{{0.345, false}}, guide;
+    for (int i = 0; i < 7; ++i) {
+        const double onset = 0.4 + i * 0.18;
+        guide.push_back({onset, false});
+        if (i < 6)
+            target.push_back({onset + 0.125, false});
+    }
+    return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
+}
+
+bool testBlockedAnchorDoesNotDriftAway()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(2.5);
+    const ContentTimelineProjection placement{0.0, 2.5, 0.0, 2.5};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {1.25, true}, {1.85, false}};
+    const std::vector<TimingOnset> guide{{0.46, true}, {0.69, false}, {1.25, true}, {1.85, false}};
+    return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
+}
 }
 
 int main()
 {
     if (!testAnchorPlacementAndStereoPitch()) {
         std::fputs("Time stretch failed anchor, stereo or pitch preservation\n", stderr);
+        return 1;
+    }
+    if (!testReferenceAlignment()) {
+        std::fputs("Reference timing failed placement, strength, or preservation\n", stderr);
+        return 1;
+    }
+    if (!testDetectAttacksAcrossPitch()) {
+        std::fputs("Timing onset detection did not find synthetic attacks\n", stderr);
+        return 1;
+    }
+    if (!testIsolatedAttackStaysPut()) {
+        std::fputs("Reference timing did not align a seeded grid while protecting isolated and manual anchors\n", stderr);
+        return 1;
+    }
+    if (!testPeriodicAttacksDoNotSlipByASyllable()) {
+        std::fputs("Reference timing incorrectly paired periodic attacks with the next syllable\n", stderr);
+        return 1;
+    }
+    if (!testDenseAttacksPreferClearlyCloserSyllables()) {
+        std::fputs("Reference timing rejected clearly closer attacks in a dense phrase\n", stderr);
+        return 1;
+    }
+    if (!testExtraLeadingAttackDoesNotHidePhaseAmbiguity()) {
+        std::fputs("An extra leading attack hid a competing timing phase\n", stderr);
+        return 1;
+    }
+    if (!testBlockedAnchorDoesNotDriftAway()) {
+        std::fputs("Reference timing moved an unanchored attack away from its guide\n", stderr);
         return 1;
     }
     return 0;
