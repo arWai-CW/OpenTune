@@ -152,6 +152,7 @@ public:
         // Pitch Tool 拖拽吸附配置；nullopt = 无配置（默认 Chromatic，即 round 半音）。
         std::function<std::optional<ScaleSnapConfig>()> getActiveScaleSnap;
         std::function<bool()> shouldSnapWholeNoteMoveToStandardPitch;
+        std::function<bool()> isOutOfScaleDragEnabled;
 
         std::function<std::shared_ptr<const EditableContentSnapshot>()> getEditableContentSnapshot;
         std::function<ContentNoteValueEditPlan(const std::vector<Note>&,

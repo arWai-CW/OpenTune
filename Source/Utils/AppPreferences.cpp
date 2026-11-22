@@ -42,6 +42,7 @@ constexpr const char* kSharedTuningHzKey = "shared.tuning.hz";
 constexpr const char* kSharedGridStyleKey = "shared.pianoRoll.gridStyle";
 constexpr const char* kSharedWholeNoteMoveSnapModeKey = "shared.pianoRoll.wholeNoteMoveSnapMode";
 constexpr const char* kSharedNoteTransposePreviewEnabledKey = "shared.editing.noteTransposePreview";
+constexpr const char* kSharedOutOfScaleDragEnabledKey = "shared.editing.outOfScaleDrag";
 constexpr const char* kSharedAccessibilityModeEnabledKey = "shared.editing.accessibilityMode";
 constexpr const char* kSharedPitchLaneVisualModeKey = "shared.pianoRoll.pitchLaneVisualMode";
 constexpr const char* kSharedEqSuppressRemoveConfirmationKey = "shared.eq.suppressRemoveConfirmation";
@@ -481,6 +482,8 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     state.shared.araF0AnalysisCacheEnabled = properties.getBoolValue(
         kSharedAraF0AnalysisCacheEnabledKey,
         state.shared.araF0AnalysisCacheEnabled);
+    state.shared.outOfScaleDragEnabled = properties.getBoolValue(
+        kSharedOutOfScaleDragEnabledKey, state.shared.outOfScaleDragEnabled);
     state.shared.noteTransposePreviewEnabled = properties.getBoolValue(
         kSharedNoteTransposePreviewEnabledKey,
         state.shared.noteTransposePreviewEnabled);
@@ -557,6 +560,7 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
                         state.shared.lightPitchCorrectionEnabled);
     properties.setValue(kSharedAraF0AnalysisCacheEnabledKey,
                         state.shared.araF0AnalysisCacheEnabled);
+    properties.setValue(kSharedOutOfScaleDragEnabledKey, state.shared.outOfScaleDragEnabled);
     properties.setValue(kSharedNoteTransposePreviewEnabledKey,
                         state.shared.noteTransposePreviewEnabled);
     properties.setValue(kSharedAccessibilityModeEnabledKey,
@@ -1075,6 +1079,19 @@ bool AppPreferences::getNoteTransposePreviewEnabled() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     return state_.shared.noteTransposePreviewEnabled;
+}
+
+void AppPreferences::setOutOfScaleDragEnabled(bool enabled)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    state_.shared.outOfScaleDragEnabled = enabled;
+    saveLocked();
+}
+
+bool AppPreferences::getOutOfScaleDragEnabled() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return state_.shared.outOfScaleDragEnabled;
 }
 
 void AppPreferences::setAccessibilityModeEnabled(bool enabled)
