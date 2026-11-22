@@ -320,8 +320,9 @@ void TimeStretchCache::clear()
 
 void TimeStretchCache::collectPlaybackSnapshots()
 {
-    std::lock_guard<std::mutex> lg(mutex_);
-    readerMap_.collect();
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (lock.owns_lock())
+        readerMap_.collect();
 }
 
 } // namespace OpenTune

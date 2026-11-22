@@ -58,8 +58,9 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
 
     const double sampleRate = request.audioSampleRate;
     auto stage1 = crs.getRenderCache(contentKey);
+    const auto stage1State = stage1 ? stage1->getStateSnapshot() : RenderCache::StateSnapshot{};
     if (contentKey.domainKind == DomainKind::ARAAudioModification
-        && (!stage1 || stage1->getChunkStats().hasActiveWork()))
+        && stage1State.chunkStats.hasActiveWork())
         return false;
     const int channels = request.audioBuffer->getNumChannels();
     auto stretcher = crs.getStretcher(contentKey, sampleRate, channels);
@@ -67,13 +68,19 @@ bool Stage2TimeStretchRebuilder::rebuild(ContentRenderService& crs,
         return false;
 
     const uint32_t buildGen = crs.getTimeStretchCache().beginBuild(contentKey);
-    const int totalSamples = request.audioBuffer->getNumSamples();
-    juce::AudioBuffer<float> input(channels, totalSamples);
-    if (readCanonicalAudio({request.audioBuffer, std::move(stage1), 0, totalSamples},
-                           input, 0) != totalSamples)
-        return false;
+    juce::AudioBuffer<float> editedInput;
+    const auto* input = request.audioBuffer.get();
+    if (stage1State.hasPublishedAudio)
+    {
+        const int totalSamples = input->getNumSamples();
+        editedInput.setSize(channels, totalSamples);
+        if (readCanonicalAudio({request.audioBuffer, std::move(stage1), 0, totalSamples},
+                               editedInput, 0) != totalSamples)
+            return false;
+        input = &editedInput;
+    }
 
-    auto output = stretcher->stretch(input, *snapshot.timeGrid);
+    auto output = stretcher->stretch(*input, *snapshot.timeGrid);
     if (output.getNumSamples() == 0 || !isCurrentPublishedRequest())
         return false;
 
