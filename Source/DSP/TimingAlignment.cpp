@@ -58,10 +58,11 @@ bool hasCompetingSyllablePhase(const std::vector<ProjectedOnset>& targets,
                               const std::vector<ProjectedOnset>& guides,
                               const std::vector<int>& matches, size_t matched)
 {
-    // Compare coherent alternatives across several attacks, not just the
-    // nearest attack in isolation. A regular phrase can fit either phase.
-    const double minimumOffset = matched < std::min(targets.size(), guides.size())
-        ? 0.0 : 2.0 * ambiguityMargin;
+    // A complete, ordered one-to-one match has no competing phase.
+    if (matched == targets.size() && matched == guides.size())
+        return false;
+
+    const bool fullCoverage = matched == std::min(targets.size(), guides.size());
     for (const int direction : {-1, 1}) {
         int run = 0;
         double firstOffset = 0.0;
@@ -77,8 +78,9 @@ bool hasCompetingSyllablePhase(const std::vector<ProjectedOnset>& targets,
             const auto& candidate = guides[static_cast<size_t>(neighbor)];
             const double offset = guides[static_cast<size_t>(guide)].timeline - target.timeline;
             const double alternative = candidate.timeline - target.timeline;
-            if (std::abs(offset) < minimumOffset || offset * alternative >= 0.0
+            if (offset * alternative >= 0.0
                 || std::abs(alternative) > maxShift
+                || (fullCoverage && std::abs(alternative) > 1.5 * std::abs(offset))
                 || candidate.onset.highFrequencyDominant != target.onset.highFrequencyDominant) {
                 run = 0;
                 continue;

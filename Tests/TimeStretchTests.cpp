@@ -194,15 +194,19 @@ bool testDenseAttacksPreferClearlyCloserSyllables()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(3.0);
     const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
-    std::vector<TimingOnset> target, guide;
-    for (int i = 0; i < 7; ++i) {
-        const auto guideTime = 0.4 + i * 0.18;
-        guide.push_back({guideTime, false});
-        target.push_back({guideTime + 0.025, false});
+    for (const double delay : {0.025, 0.040}) {
+        std::vector<TimingOnset> target, guide;
+        for (int i = 0; i < 7; ++i) {
+            const auto guideTime = 0.4 + i * 0.18;
+            guide.push_back({guideTime, false});
+            target.push_back({guideTime + delay, false});
+        }
+        const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+        if (!result.grid || result.movedAnchors != static_cast<int>(target.size())
+            || std::abs(result.grid->tauForward(target[3].sourceSeconds) - guide[3].sourceSeconds) >= 1e-9)
+            return false;
     }
-    const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
-    return result.grid && result.movedAnchors == static_cast<int>(target.size())
-        && std::abs(result.grid->tauForward(target[3].sourceSeconds) - guide[3].sourceSeconds) < 1e-9;
+    return true;
 }
 
 bool testBlockedAnchorDoesNotDriftAway()
