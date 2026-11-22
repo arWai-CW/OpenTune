@@ -168,8 +168,9 @@ public:
         const EditableContentSnapshot& snapshot,
         const NoteGeneratorParams& params) const = 0;
 
-    virtual bool setTimeGrid(ContentKey key,
-                             std::shared_ptr<const TimeGridSnapshot> grid) = 0;
+    virtual bool replaceTimeGridIfCurrent(ContentKey key,
+                                          const std::shared_ptr<const TimeGridSnapshot>& expected,
+                                          std::shared_ptr<const TimeGridSnapshot> replacement) = 0;
 
     // Commits the grid and pushes the action; the returned pointer is non-owning.
     virtual TimeGridEditAction* commitTimeGridEdit(

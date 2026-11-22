@@ -17,13 +17,13 @@ TimeGridEditAction::TimeGridEditAction(std::shared_ptr<ContentEditCommands> comm
 void TimeGridEditAction::undo()
 {
     for (auto it = changes_.rbegin(); it != changes_.rend(); ++it)
-        commands_->setTimeGrid(it->key, it->before);
+        commands_->replaceTimeGridIfCurrent(it->key, it->after, it->before);
 }
 
 void TimeGridEditAction::redo()
 {
     for (const auto& change : changes_)
-        commands_->setTimeGrid(change.key, change.after);
+        commands_->replaceTimeGridIfCurrent(change.key, change.before, change.after);
 }
 
 bool TimeGridEditAction::dependsOnContent(ContentKey key) const noexcept

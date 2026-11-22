@@ -369,7 +369,19 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                    && hasGrid(secondKey, secondBefore->timeGrid), "timing_batch_undo_failed");
         expect(history.redo() == group && hasGrid(key, warp)
                    && hasGrid(secondKey, warp), "timing_batch_redo_failed");
+        const auto laterWarp = TimeGridSnapshot::makeFromHandles({
+            {1, 0.0, 0.0, HandleKind::ClipStart},
+            {2, 0.5, 0.55, HandleKind::UserAdded},
+            {3, 1.0, 1.0, HandleKind::ClipEnd}
+        });
+        expect(secondProcessor.applyTimeGridEdit(secondKey, warp, laterWarp, "Manual timing"),
+               "other_instance_timing_edit_failed");
+        expect(history.undo() == group && hasGrid(key, before->timeGrid)
+                   && hasGrid(secondKey, laterWarp), "batch_undo_overwrote_newer_timing");
+        expect(history.redo() == group && hasGrid(key, warp)
+                   && hasGrid(secondKey, laterWarp), "batch_redo_overwrote_newer_timing");
         history.undo();
+        secondProcessor.setContentTimeGrid(secondKey, secondBefore->timeGrid);
     }
 
     auto* route = controller->getAuditionRoute();
