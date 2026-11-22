@@ -57,6 +57,8 @@ const char* controlLanguageTag(Language language)
             return "en";
         case Language::Chinese:
             return "zh";
+        case Language::TraditionalChinese:
+            return "zh-Hant";
         case Language::Japanese:
             return "ja";
         case Language::Russian:

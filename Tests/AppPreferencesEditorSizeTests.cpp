@@ -75,6 +75,31 @@ bool testSharedModelsDirectory()
     return passed;
 }
 
+bool testTraditionalChinesePreference()
+{
+    using namespace OpenTune;
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("OpenTuneAppPreferences-" + juce::Uuid().toString());
+    AppPreferences::StorageOptions options;
+    options.settingsDirectory = directory;
+
+    bool passed = true;
+    for (const auto language : { Language::Chinese, Language::TraditionalChinese }) {
+        {
+            AppPreferences writer(options);
+            writer.setLanguage(language);
+        }
+        AppPreferences reader(options);
+        passed = passed && reader.getState().shared.language == language;
+    }
+    directory.deleteRecursively();
+    return passed
+        && getLanguageNativeName(Language::TraditionalChinese) == juce::String::fromUTF8("繁體中文")
+        && Loc::get(Language::TraditionalChinese, Loc::Keys::kEdit) == juce::String::fromUTF8("編輯")
+        && Loc::get(Language::Chinese, Loc::Keys::kEdit) == juce::String::fromUTF8("编辑")
+        && Loc::get(Language::TraditionalChinese, "Untranslated string") == "Untranslated string";
+}
+
 bool testShortcutScopesAndConflicts()
 {
     using namespace OpenTune::KeyShortcutConfig;
@@ -568,6 +593,11 @@ int main()
 
     if (!testSharedModelsDirectory()) {
         std::fputs("FAIL: shared models directory preference\n", stderr);
+        return 1;
+    }
+
+    if (!testTraditionalChinesePreference()) {
+        std::fputs("FAIL: Traditional Chinese selection and localization\n", stderr);
         return 1;
     }
 
