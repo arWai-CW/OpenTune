@@ -35,7 +35,7 @@ bool TimeGridEditAction::tryReplay(bool isUndo)
             reverse ? change.before : change.after);
     };
     for (std::size_t i = 0; i < changes_.size(); ++i) {
-        if (!replace(changeAt(i), isUndo)) {
+        if (replace(changeAt(i), isUndo) == TimeGridReplayResult::Conflict) {
             while (i > 0)
                 replace(changeAt(--i), !isUndo);
             return false;

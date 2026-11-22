@@ -176,8 +176,8 @@ public:
     ContentCommitSnapshot commitNotesAndSegmentsWithOriginalF0(
         ContentKey, std::vector<Note>, std::vector<PitchCorrectionSegment>, ContentEditRangeFrames,
         std::vector<float>, std::optional<std::vector<F0FrameRange>>) override { return {}; }
-    bool replaceTimeGridIfCurrent(ContentKey, const std::shared_ptr<const TimeGridSnapshot>&,
-                                  std::shared_ptr<const TimeGridSnapshot>) override { return false; }
+    TimeGridReplayResult replaceTimeGridIfCurrent(ContentKey, const std::shared_ptr<const TimeGridSnapshot>&,
+        std::shared_ptr<const TimeGridSnapshot>) override { return TimeGridReplayResult::Conflict; }
     bool applyPitchShiftState(ContentKey, const PitchShiftEditState&) override { return false; }
 };
 

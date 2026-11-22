@@ -41,8 +41,8 @@ public:
         const std::optional<ScaleSnapConfig>&) const override { return std::nullopt; }
     std::optional<ContentNoteRangePatch> planGenerateNotesOnly(
         const EditableContentSnapshot&, const NoteGeneratorParams&) const override { return std::nullopt; }
-    bool replaceTimeGridIfCurrent(ContentKey, const std::shared_ptr<const TimeGridSnapshot>&,
-                                  std::shared_ptr<const TimeGridSnapshot>) override { return false; }
+    TimeGridReplayResult replaceTimeGridIfCurrent(ContentKey, const std::shared_ptr<const TimeGridSnapshot>&,
+        std::shared_ptr<const TimeGridSnapshot>) override { return TimeGridReplayResult::Conflict; }
     TimeGridEditAction* commitTimeGridEdit(
         ContentKey, std::shared_ptr<const TimeGridSnapshot>, std::shared_ptr<const TimeGridSnapshot>,
         const juce::String&) override { return nullptr; }

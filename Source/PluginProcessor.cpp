@@ -1197,13 +1197,16 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             return patch;
         }
 
-        bool replaceTimeGridIfCurrent(ContentKey key,
-                                      const std::shared_ptr<const TimeGridSnapshot>& expected,
-                                      std::shared_ptr<const TimeGridSnapshot> replacement) override
+        TimeGridReplayResult replaceTimeGridIfCurrent(
+            ContentKey key, const std::shared_ptr<const TimeGridSnapshot>& expected,
+            std::shared_ptr<const TimeGridSnapshot> replacement) override
         {
             const auto snapshot = proc_.getContentSnapshot(key);
-            return snapshot && snapshot->timeGrid == expected
-                && proc_.setContentTimeGrid(key, std::move(replacement));
+            if (!snapshot)
+                return TimeGridReplayResult::Missing;
+            return snapshot->timeGrid == expected
+                && proc_.setContentTimeGrid(key, std::move(replacement))
+                ? TimeGridReplayResult::Applied : TimeGridReplayResult::Conflict;
         }
 
         TimeGridEditAction* commitTimeGridEdit(

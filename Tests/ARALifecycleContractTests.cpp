@@ -196,7 +196,8 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                                             ARA::Host::DocumentController& hostDocumentController,
                                             ARA::ARAAudioSourceRef audioSource,
                                             ARA::ARAPlaybackRegionRef playbackRegionRef,
-                                            ARA::ARAPlaybackRegionRef secondTargetRef)
+                                            ARA::ARAPlaybackRegionRef& secondTargetRef,
+                                            ARA::ARAAudioModificationRef& secondModificationRef)
 {
     constexpr double initialSampleRate = 48000.0;
     constexpr double switchedSampleRate = 44100.0;
@@ -391,6 +392,23 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                "manual_redo_could_not_be_retried");
         otherHistory.undo();
         history.undo();
+
+        expect(firstProcessor.applyTimeGridEdit(key, before->timeGrid, warp, "Earlier timing"),
+               "earlier_timing_edit_failed");
+        const auto* earlier = history.peekUndo();
+        const auto* beforeDelete = firstProcessor.commitTimeGridEdits({
+            {key, warp, laterWarp}, {secondKey, secondBefore->timeGrid, warp}}, "Align");
+        if (!expect(beforeDelete && earlier && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+                    "delete_fixture_alignment_failed"))
+            return false;
+        hostDocumentController.destroyPlaybackRegion(secondTargetRef);
+        secondTargetRef = nullptr;
+        hostDocumentController.destroyAudioModification(secondModificationRef);
+        secondModificationRef = nullptr;
+        expect(!controller->readContentSnapshot(secondKey)
+                   && history.undo() == beforeDelete && hasGrid(key, warp)
+                   && history.undo() == earlier && hasGrid(key, before->timeGrid),
+               "deleted_target_blocked_remaining_timing_history");
     }
 
     auto* route = controller->getAuditionRoute();
@@ -673,20 +691,22 @@ int runChild(int argc, char** argv)
     if (! check (region != nullptr, "playback_region_create_failed"))
         return 1;
     regionProperties.startInPlaybackTime = 1.0;
-    const auto secondTarget = documentController.createPlaybackRegion(
+    auto secondTarget = documentController.createPlaybackRegion(
         extraModifications.front(), nullptr, &regionProperties);
     if (!check(secondTarget != nullptr, "second_timing_region_create_failed"))
         return 1;
 
     const bool rendererLifecyclePassed = runPlaybackRendererLifecycleRegression(
-        instance->documentControllerRef, documentController, source, region, secondTarget);
+        instance->documentControllerRef, documentController, source, region, secondTarget, extraModifications.front());
     documentController.enableAudioSourceSamplesAccess(source, false);
 
     documentController.destroyPlaybackRegion (region);
-    documentController.destroyPlaybackRegion (secondTarget);
+    if (secondTarget != nullptr)
+        documentController.destroyPlaybackRegion (secondTarget);
     documentController.destroyAudioModification (modification);
     for (auto* extra : extraModifications)
-        documentController.destroyAudioModification (extra);
+        if (extra != nullptr)
+            documentController.destroyAudioModification (extra);
 
     const auto rebuiltStableModification = documentController.createAudioModification(
         source, nullptr, &modificationProperties);
