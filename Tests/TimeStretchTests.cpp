@@ -151,6 +151,17 @@ bool testDetectAttacksAcrossPitch()
     }
     return true;
 }
+
+bool testIsolatedAttackStaysPut()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(6.0);
+    const ContentTimelineProjection placement{0.0, 6.0, 0.0, 6.0};
+    const std::vector<TimingOnset> target{{0.5, true}, {1.0, false}, {1.8, true}, {4.1, false}};
+    const std::vector<TimingOnset> guide{{0.6, true}, {1.1, false}, {1.9, true}, {4.2, false}};
+    const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    return result.grid && result.movedAnchors == 3
+        && std::abs(result.grid->tauForward(4.1) - 4.1) < 1e-9;
+}
 }
 
 int main()
@@ -165,6 +176,10 @@ int main()
     }
     if (!testDetectAttacksAcrossPitch()) {
         std::fputs("Timing onset detection did not find synthetic attacks\n", stderr);
+        return 1;
+    }
+    if (!testIsolatedAttackStaysPut()) {
+        std::fputs("Reference timing moved an isolated attack\n", stderr);
         return 1;
     }
     return 0;

@@ -9,7 +9,7 @@ namespace OpenTune {
 struct TimingOnset
 {
     double sourceSeconds;
-    bool broadband;
+    bool highFrequencyDominant;
 };
 
 struct TimingAlignment

@@ -42,7 +42,7 @@ int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>&
     double runnerUp = best;
     for (; it != candidates.end() && it->timeline <= target.timeline + maxShift; ++it) {
         const double score = std::abs(it->timeline - target.timeline)
-            + (it->onset.broadband == target.onset.broadband ? 0.0 : 0.035);
+            + (it->onset.highFrequencyDominant == target.onset.highFrequencyDominant ? 0.0 : 0.035);
         if (score < best) {
             runnerUp = best;
             best = score;
@@ -153,15 +153,35 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     const auto targets = projectOnsets(target, targetGrid, targetPlacement, begin, end);
     const auto guides = projectOnsets(guide, guideGrid, guidePlacement, begin, end);
     std::vector<int> matches(targets.size(), -1);
-    int matched = 0, previous = -1;
+    int previous = -1;
     for (size_t i = 0; i < targets.size(); ++i) {
         const int index = uniqueMatch(targets[i], guides);
         if (index <= previous || uniqueMatch(guides[static_cast<size_t>(index)], targets) != static_cast<int>(i))
             continue;
         matches[i] = previous = index;
-        ++matched;
     }
-    if (matched < 3 || static_cast<size_t>(matched) * 2 < targets.size())
+    // An isolated coincidence after a break isn't evidence of the same phrase.
+    std::vector<bool> corroborated(targets.size());
+    size_t lastMatch = targets.size();
+    for (size_t i = 0; i < matches.size(); ++i) {
+        if (matches[i] < 0)
+            continue;
+        if (lastMatch != targets.size()) {
+            const double targetGap = targets[i].timeline - targets[lastMatch].timeline;
+            const double guideGap = guides[matches[i]].timeline - guides[matches[lastMatch]].timeline;
+            if (std::max(targetGap, guideGap) <= 1.0 && std::abs(targetGap - guideGap) <= 0.12)
+                corroborated[lastMatch] = corroborated[i] = true;
+        }
+        lastMatch = i;
+    }
+    size_t matched = 0;
+    for (size_t i = 0; i < matches.size(); ++i) {
+        if (!corroborated[i])
+            matches[i] = -1;
+        else
+            ++matched;
+    }
+    if (matched < 3 || matched * 2 < targets.size())
         return {};
 
     auto handles = targetGrid.handles();
