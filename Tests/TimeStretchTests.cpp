@@ -186,6 +186,21 @@ bool testPeriodicAttacksDoNotSlipByASyllable()
     return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
 }
 
+bool testDenseAttacksPreferClearlyCloserSyllables()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    std::vector<TimingOnset> target, guide;
+    for (int i = 0; i < 7; ++i) {
+        const auto guideTime = 0.4 + i * 0.18;
+        guide.push_back({guideTime, false});
+        target.push_back({guideTime + 0.025, false});
+    }
+    const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    return result.grid && result.movedAnchors == static_cast<int>(target.size())
+        && std::abs(result.grid->tauForward(target[3].sourceSeconds) - guide[3].sourceSeconds) < 1e-9;
+}
+
 bool testBlockedAnchorDoesNotDriftAway()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(2.5);
@@ -216,6 +231,10 @@ int main()
     }
     if (!testPeriodicAttacksDoNotSlipByASyllable()) {
         std::fputs("Reference timing incorrectly paired periodic attacks with the next syllable\n", stderr);
+        return 1;
+    }
+    if (!testDenseAttacksPreferClearlyCloserSyllables()) {
+        std::fputs("Reference timing rejected clearly closer attacks in a dense phrase\n", stderr);
         return 1;
     }
     if (!testBlockedAnchorDoesNotDriftAway()) {

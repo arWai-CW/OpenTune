@@ -56,11 +56,12 @@ int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>&
         return -1;
     const auto& chosen = candidates[static_cast<size_t>(bestIndex)];
     const auto shift = chosen.timeline - target.timeline;
-    // Similar attacks on opposite sides can explain the same rhythm with
-    // opposite offsets. Nearest distance alone can't disambiguate the syllable.
+    // Comparable offsets in either direction can explain the same rhythm.
     if (std::any_of(first, it, [&](const auto& alternative) {
+            const double alternativeShift = alternative.timeline - target.timeline;
             return alternative.onset.highFrequencyDominant == chosen.onset.highFrequencyDominant
-                && (alternative.timeline - target.timeline) * shift < 0.0;
+                && alternativeShift * shift < 0.0
+                && std::abs(alternativeShift) <= 1.5 * std::abs(shift);
         }))
         return -1;
     return bestIndex;
