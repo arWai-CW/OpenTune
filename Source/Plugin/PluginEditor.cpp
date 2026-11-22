@@ -1802,7 +1802,9 @@ void OpenTuneAudioProcessorEditor::undoRequested()
         pianoRoll_.onNotesRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Undone: {0}"), action->getDescription()));
     } else {
-        a11y::announce(pianoRoll_, LOC_RAW("Nothing to undo"));
+        a11y::announce(pianoRoll_, processorRef_.getUndoManager().canUndo()
+            ? LOC_RAW("Cannot undo: the clip timing has changed.")
+            : LOC_RAW("Nothing to undo"));
     }
 }
 
@@ -1814,7 +1816,9 @@ void OpenTuneAudioProcessorEditor::redoRequested()
         pianoRoll_.onNotesRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Redone: {0}"), action->getDescription()));
     } else {
-        a11y::announce(pianoRoll_, LOC_RAW("Nothing to redo"));
+        a11y::announce(pianoRoll_, processorRef_.getUndoManager().canRedo()
+            ? LOC_RAW("Cannot redo: the clip timing has changed.")
+            : LOC_RAW("Nothing to redo"));
     }
 }
 

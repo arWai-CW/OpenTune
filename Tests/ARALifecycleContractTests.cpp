@@ -374,14 +374,23 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
             {2, 0.5, 0.55, HandleKind::UserAdded},
             {3, 1.0, 1.0, HandleKind::ClipEnd}
         });
-        expect(secondProcessor.applyTimeGridEdit(secondKey, warp, laterWarp, "Manual timing"),
+        expect(secondProcessor.applyTimeGridEdit(key, warp, laterWarp, "Manual timing"),
                "other_instance_timing_edit_failed");
-        expect(history.undo() == group && hasGrid(key, before->timeGrid)
-                   && hasGrid(secondKey, laterWarp), "batch_undo_overwrote_newer_timing");
-        expect(history.redo() == group && hasGrid(key, warp)
-                   && hasGrid(secondKey, laterWarp), "batch_redo_overwrote_newer_timing");
+        auto& otherHistory = secondProcessor.getUndoManager();
+        const auto* manual = otherHistory.peekUndo();
+        expect(history.undo() == nullptr && history.peekUndo() == group
+                   && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+               "blocked_batch_undo_changed_content_or_history");
+        expect(manual != nullptr && otherHistory.undo() == manual
+                   && history.undo() == group, "batch_undo_could_not_be_retried");
+        expect(otherHistory.redo() == nullptr && otherHistory.peekRedo() == manual
+                   && hasGrid(key, before->timeGrid),
+               "blocked_manual_redo_changed_content_or_history");
+        expect(history.redo() == group && otherHistory.redo() == manual
+                   && hasGrid(key, laterWarp) && hasGrid(secondKey, warp),
+               "manual_redo_could_not_be_retried");
+        otherHistory.undo();
         history.undo();
-        secondProcessor.setContentTimeGrid(secondKey, secondBefore->timeGrid);
     }
 
     auto* route = controller->getAuditionRoute();

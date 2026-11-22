@@ -16,14 +16,32 @@ TimeGridEditAction::TimeGridEditAction(std::shared_ptr<ContentEditCommands> comm
 
 void TimeGridEditAction::undo()
 {
-    for (auto it = changes_.rbegin(); it != changes_.rend(); ++it)
-        commands_->replaceTimeGridIfCurrent(it->key, it->after, it->before);
+    tryReplay(true);
 }
 
 void TimeGridEditAction::redo()
 {
-    for (const auto& change : changes_)
-        commands_->replaceTimeGridIfCurrent(change.key, change.before, change.after);
+    tryReplay(false);
+}
+
+bool TimeGridEditAction::tryReplay(bool isUndo)
+{
+    const auto changeAt = [&](std::size_t index) -> const TimeGridChange& {
+        return changes_[isUndo ? changes_.size() - 1 - index : index];
+    };
+    const auto replace = [&](const TimeGridChange& change, bool reverse) {
+        return commands_->replaceTimeGridIfCurrent(change.key,
+            reverse ? change.after : change.before,
+            reverse ? change.before : change.after);
+    };
+    for (std::size_t i = 0; i < changes_.size(); ++i) {
+        if (!replace(changeAt(i), isUndo)) {
+            while (i > 0)
+                replace(changeAt(--i), !isUndo);
+            return false;
+        }
+    }
+    return true;
 }
 
 bool TimeGridEditAction::dependsOnContent(ContentKey key) const noexcept

@@ -23,6 +23,7 @@ public:
 
     void undo() override;
     void redo() override;
+    bool tryReplay(bool isUndo) override;
     juce::String getDescription() const override { return description_; }
     bool dependsOnContent(ContentKey key) const noexcept override;
 

@@ -157,6 +157,9 @@ Result<JsonValue> runStep(ControlOpContext& context, const StepParams& params, b
     if (applied == nullptr) {
         if (refusal)
             return *refusal;
+        if (selectedTop != nullptr)
+            return controlOpError("UNDO_CONFLICT", "replay_conflict",
+                                  "Content changed since the history entry was recorded");
         return controlOpError("UNDO_CONFLICT", "history_empty", std::string("there is nothing to ") + what);
     }
     jassert(applied == selectedTop);
