@@ -39,7 +39,7 @@ AI 引擎：FCPE 音高提取 + PC-NSF HifiGAN 声码器（ONNX Runtime 推理�
 
 GPU 加速推理：Windows DirectML / macOS CoreML
 
-多语言界面：中 / 英 / 日 / 俄 / 西
+多语言界面：简体中文 / 繁體中文 / 英 / 日 / 俄 / 西
 
 开源免费：永久免费，社区驱动，持续迭代
 

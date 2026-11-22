@@ -180,17 +180,18 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         auto menu = menuBar_.getMenuForIndex(menuIndex, menuIndex < menuNames.size() ? menuNames[menuIndex]
                                                                                     : juce::String());
 #if JucePlugin_Enable_ARA
-        if (menuIndex == 2)
-            addPitchReferenceMenu(menu);
+        if (menuIndex == 2) {
+            auto references = createPitchReferenceMenu();
+            if (references.getNumItems() > 1 || pitchReferenceTrack_ != nullptr)
+                menu.addSubMenu(LOC(kReferenceTrack), references);
+        }
         else if (menuIndex == 1 && processorRef_.getDocumentController() != nullptr) {
             menu.addSeparator();
             menu.addItem(LOC(kTuneToPitchReference), pitchReferenceTrack_ != nullptr, false, [safeEditor] {
                 if (safeEditor != nullptr)
                     safeEditor->tuneToPitchReference();
             });
-            menu.addItem(LOC(kAlignTimingToReference),
-                pitchReferenceTrack_ != nullptr && !timingAlignmentRunning_ && timingAlignmentPreview_ == nullptr,
-                false, [safeEditor] {
+            menu.addItem(LOC(kAlignTimingToReference), canAlignTimingToReference(), false, [safeEditor] {
                     if (safeEditor != nullptr)
                         safeEditor->alignTimingToPitchReference();
                 });
@@ -256,6 +257,25 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     // content root 是 editor 的唯一直接子组件，承载全部主 UI（§7.3）。
     addAndMakeVisible(contentRoot_);
     contentRoot_.addAndMakeVisible(topBar_);
+#if JucePlugin_Enable_ARA
+    referenceTrackButton_.onClick = [this] {
+        auto menu = createPitchReferenceMenu();
+        if (menu.getNumItems() <= 1 && pitchReferenceTrack_ == nullptr) {
+            menu.clear();
+            menu.addItem(LOC_RAW("No other track with audio clips in this ARA document."), false, false, [] {});
+        }
+        auto options = juce::PopupMenu::Options().withTargetComponent(&referenceTrackButton_)
+                           .withParentComponent(&contentRoot_);
+        if (const int firstId = a11y::firstSelectableItemId(menu); firstId != 0)
+            options = options.withInitiallySelectedItem(firstId);
+        menu.showMenuAsync(options);
+    };
+    tuneToReferenceButton_.onClick = [this] { tuneToPitchReference(); };
+    alignTimingButton_.onClick = [this] { alignTimingToPitchReference(); };
+    for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
+        contentRoot_.addChildComponent(*button);
+    refreshReferenceControls();
+#endif
     contentRoot_.addAndMakeVisible(parameterPanel_);
     parameterPanel_.addListener(this);
     parameterPanel_.onPitchGridModeChanged = [this](PitchGridMode mode) {
@@ -418,6 +438,19 @@ void OpenTuneAudioProcessorEditor::resized()
     topBar_.setBounds(bounds.removeFromTop(topBarHeight));
     bounds.removeFromTop(gap);
 
+#if JucePlugin_Enable_ARA
+    if (referenceTrackButton_.isVisible()) {
+        auto row = bounds.removeFromTop(28);
+        const int actionWidth = juce::jmax(0, row.getWidth() - 2 * gap) / 3;
+        referenceTrackButton_.setBounds(row.removeFromLeft(actionWidth));
+        row.removeFromLeft(gap);
+        tuneToReferenceButton_.setBounds(row.removeFromLeft(actionWidth));
+        row.removeFromLeft(gap);
+        alignTimingButton_.setBounds(row);
+        bounds.removeFromTop(gap);
+    }
+#endif
+
     // 右侧 ParameterPanel
     constexpr int paramPanelWidth = PARAMETER_PANEL_WIDTH;
     parameterPanel_.setBounds(bounds.removeFromRight(paramPanelWidth));
@@ -570,6 +603,9 @@ void OpenTuneAudioProcessorEditor::timerCallback()
 #if JucePlugin_Enable_ARA
     if (processorRef_.isBoundToARA())
         processorRef_.collectPlaybackSnapshots();
+    const bool hasAraController = processorRef_.getDocumentController() != nullptr;
+    if (hasAraController != referenceTrackButton_.isVisible())
+        refreshReferenceControls();
 #endif
     applyUiZoomIfNeeded();
 
@@ -938,6 +974,9 @@ void OpenTuneAudioProcessorEditor::languageChanged(Language newLanguage)
     topBar_.refreshLocalizedText();
     parameterPanel_.refreshLocalizedText();
     pianoRoll_.refreshLocalizedText();
+#if JucePlugin_Enable_ARA
+    refreshReferenceControls();
+#endif
 
     repaint();
     if (onboardingOverlay_ != nullptr)
@@ -986,15 +1025,23 @@ OpenTuneAudioProcessorEditor::resolveContentScopeRegions() const
 }
 
 #if JucePlugin_Enable_ARA
-void OpenTuneAudioProcessorEditor::addPitchReferenceMenu(juce::PopupMenu& menu)
+namespace {
+juce::String referenceTrackName(const juce::ARARegionSequence& track)
 {
+    const auto name = juce::String::fromUTF8(track.getName());
+    return name.isEmpty() ? LOC(kUnnamedReferenceTrack) : name;
+}
+}
+
+juce::PopupMenu OpenTuneAudioProcessorEditor::createPitchReferenceMenu()
+{
+    juce::PopupMenu references;
     auto* dc = processorRef_.getDocumentController();
     auto* document = dc != nullptr ? dc->getDocument() : nullptr;
     if (document == nullptr)
-        return;
+        return references;
 
     const auto focused = resolveCurrentContentSync().focusedAraTrack;
-    juce::PopupMenu references;
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safeThis(this);
     references.addItem(LOC(kOff), true, pitchReferenceTrack_ == nullptr, [safeThis] {
         if (safeThis != nullptr)
@@ -1006,10 +1053,7 @@ void OpenTuneAudioProcessorEditor::addPitchReferenceMenu(juce::PopupMenu& menu)
         if (track == focused || track->getPlaybackRegions().empty())
             continue;
 
-        auto name = juce::String::fromUTF8(track->getName());
-        if (name.isEmpty())
-            name = LOC(kUnnamedReferenceTrack);
-        references.addItem(juce::String(index) + ". " + name, true, track == pitchReferenceTrack_,
+        references.addItem(juce::String(index) + ". " + referenceTrackName(*track), true, track == pitchReferenceTrack_,
             [safeThis, track] {
                 if (safeThis == nullptr)
                     return;
@@ -1021,8 +1065,40 @@ void OpenTuneAudioProcessorEditor::addPitchReferenceMenu(juce::PopupMenu& menu)
                 }
             });
     }
-    if (references.getNumItems() > 1 || pitchReferenceTrack_ != nullptr)
-        menu.addSubMenu(LOC(kReferenceTrack), references);
+    return references;
+}
+
+bool OpenTuneAudioProcessorEditor::canAlignTimingToReference() const
+{
+    return pitchReferenceTrack_ != nullptr && !timingAlignmentRunning_ && timingAlignmentPreview_ == nullptr;
+}
+
+void OpenTuneAudioProcessorEditor::refreshReferenceControls()
+{
+    const bool visible = processorRef_.getDocumentController() != nullptr;
+    const bool visibilityChanged = visible != referenceTrackButton_.isVisible();
+    for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
+        button->setVisible(visible);
+    if (visible) {
+        referenceTrackButton_.setButtonText(LOC(kReferenceTrack) + ": "
+            + (pitchReferenceTrack_ != nullptr ? referenceTrackName(*pitchReferenceTrack_) : LOC(kOff)));
+        referenceTrackButton_.setTooltip(referenceTrackButton_.getButtonText());
+        tuneToReferenceButton_.setButtonText(LOC(kTuneToPitchReference));
+        alignTimingButton_.setButtonText(LOC(kAlignTimingToReference));
+
+        const bool hasReference = pitchReferenceTrack_ != nullptr;
+        const bool canAlign = canAlignTimingToReference();
+        const auto chooseReference = LOC_RAW("Choose a reference track first.");
+        tuneToReferenceButton_.setEnabled(hasReference);
+        tuneToReferenceButton_.setAlpha(hasReference ? 1.0f : 0.55f);
+        tuneToReferenceButton_.setTooltip(hasReference ? tuneToReferenceButton_.getButtonText() : chooseReference);
+        alignTimingButton_.setEnabled(canAlign);
+        alignTimingButton_.setAlpha(canAlign ? 1.0f : 0.55f);
+        alignTimingButton_.setTooltip(!hasReference ? chooseReference
+            : timingAlignmentRunning_ ? LOC_RAW("Analyzing timing") : alignTimingButton_.getButtonText());
+    }
+    if (visibilityChanged)
+        resized();
 }
 
 void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequence* track)
@@ -1035,6 +1111,7 @@ void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequenc
     if (pitchReferenceTrack_ != nullptr)
         pitchReferenceTrack_->addListener(this);
     pianoRoll_.setPitchReferences({});
+    refreshReferenceControls();
 }
 
 void OpenTuneAudioProcessorEditor::tuneToPitchReference()
@@ -1053,7 +1130,7 @@ void OpenTuneAudioProcessorEditor::tuneToPitchReference()
 void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
 {
     auto* dc = processorRef_.getDocumentController();
-    if (dc == nullptr || pitchReferenceTrack_ == nullptr || timingAlignmentRunning_ || timingAlignmentPreview_)
+    if (dc == nullptr || !canAlignTimingToReference())
         return;
 
     using Region = OpenTuneDocumentController::PlaybackRegionProjection;
@@ -1146,6 +1223,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     if (!timingAlignmentWorker_)
         timingAlignmentWorker_ = std::make_unique<juce::ThreadPool>(1);
     timingAlignmentRunning_ = true;
+    refreshReferenceControls();
     a11y::announce(pianoRoll_, LOC_RAW("Analyzing timing"));
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
@@ -1180,22 +1258,25 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
-            if (safe->pitchReferenceTrack_ != guideTrack)
+            if (safe->pitchReferenceTrack_ != guideTrack) {
+                safe->refreshReferenceControls();
                 return;
+            }
             if (targets.empty()) {
+                safe->refreshReferenceControls();
                 ConfirmDialogContent::showMessage(&safe->contentRoot_, title, noAlignment);
                 return;
             }
 
             auto detail = LOC_RAW("Choose alignment strength per clip. Pitch and the reference track are not edited.");
             if (count != targets.size())
-                detail += "\n" + juce::String(static_cast<int>(count - targets.size()))
-                    + " " + LOC_RAW("selected clips have no safe alignment and will be skipped.");
+                detail += "\n" + Loc::format(LOC_RAW("{0} selected clips have no safe alignment and will be skipped."),
+                                             juce::String(static_cast<int>(count - targets.size())));
             auto preview = std::make_unique<juce::AlertWindow>(title, detail,
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
             const auto label = [](const juce::String& mode, const TimingAlignment& plan) {
-                return mode + " — " + juce::String(plan.movedAnchors) + " " + LOC_RAW("anchors")
-                    + ", " + juce::String(static_cast<int>(std::lround(plan.maxMoveSeconds * 1000))) + " ms max";
+                return Loc::format(LOC_RAW("{0} — {1} anchors, {2} ms max"), mode, juce::String(plan.movedAnchors),
+                    juce::String(static_cast<int>(std::lround(plan.maxMoveSeconds * 1000))));
             };
             for (size_t i = 0; i < targets.size(); ++i) {
                 const auto id = juce::String(static_cast<int>(i));
@@ -1211,6 +1292,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             preview->addButton(LOC_RAW("Apply"), 1, juce::KeyPress(juce::KeyPress::returnKey));
             preview->addButton(LOC(kCancel), 0, juce::KeyPress(juce::KeyPress::escapeKey));
             safe->timingAlignmentPreview_ = std::move(preview);
+            safe->refreshReferenceControls();
             auto& window = *safe->timingAlignmentPreview_;
             const auto bounds = safe->contentRoot_.getLocalBounds();
             window.setCentrePosition(bounds.getCentreX(), bounds.getCentreY());
@@ -1220,6 +1302,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                     if (safe == nullptr)
                         return;
                     const auto dialog = std::move(safe->timingAlignmentPreview_);
+                    safe->refreshReferenceControls();
                     if (choice != 1 || !dialog)
                         return;
                     auto* dc = safe->processorRef_.getDocumentController();
@@ -1266,6 +1349,12 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                 }));
         });
     });
+}
+
+void OpenTuneAudioProcessorEditor::didUpdateRegionSequenceProperties(juce::ARARegionSequence* track)
+{
+    if (pitchReferenceTrack_ == track)
+        refreshReferenceControls();
 }
 
 void OpenTuneAudioProcessorEditor::willDestroyRegionSequence(juce::ARARegionSequence* track)

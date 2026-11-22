@@ -39,7 +39,7 @@ Dual-format output: Standalone executable + VST3 plugin (with ARA2 extension sup
 
 GPU-accelerated inference: Windows DirectML / macOS CoreML
 
-Multi-language interface: Chinese / English / Japanese / Russian / Spanish
+Multi-language interface: Simplified Chinese / Traditional Chinese / English / Japanese / Russian / Spanish
 
 Open source and free: Permanently free, community-driven, continuously iterating
 

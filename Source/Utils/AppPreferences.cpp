@@ -135,6 +135,7 @@ const char* toLanguageToken(Language language)
         case Language::Japanese: return "japanese";
         case Language::Russian: return "russian";
         case Language::Spanish: return "spanish";
+        case Language::TraditionalChinese: return "chinese-traditional";
         case Language::Count: break;
     }
 
@@ -148,6 +149,7 @@ Language languageFromToken(const juce::String& token)
     if (token == "japanese") return Language::Japanese;
     if (token == "russian") return Language::Russian;
     if (token == "spanish") return Language::Spanish;
+    if (token == "chinese-traditional") return Language::TraditionalChinese;
     return Language::Chinese;
 }
 
@@ -404,7 +406,10 @@ PluginEditorSize readDefaultPluginEditorSize(const juce::PropertiesFile& propert
 #if JUCE_IOS
 Language languageFromSystemLocale()
 {
-    const auto code = juce::SystemStats::getDisplayLanguage().toLowerCase();
+    const auto code = juce::SystemStats::getDisplayLanguage().toLowerCase().replaceCharacter('_', '-');
+    if (code == "zh-hant" || code.startsWith("zh-hant-")
+        || code == "zh-hk" || code == "zh-mo" || code == "zh-tw")
+        return Language::TraditionalChinese;
     if (code.startsWith("zh")) return Language::Chinese;
     if (code.startsWith("ja")) return Language::Japanese;
     if (code.startsWith("ru")) return Language::Russian;

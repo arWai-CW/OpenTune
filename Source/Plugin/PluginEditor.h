@@ -172,11 +172,15 @@ private:
     std::vector<juce::ARAPlaybackRegion*> resolveContentScopeRegions() const;
     void readScopeAudio();
 #if JucePlugin_Enable_ARA
-    void addPitchReferenceMenu(juce::PopupMenu& menu);
+    juce::PopupMenu createPitchReferenceMenu();
+    void refreshReferenceControls();
+    bool canAlignTimingToReference() const;
     void setPitchReferenceTrack(juce::ARARegionSequence* track);
     void tuneToPitchReference();
     void alignTimingToPitchReference();
+    void didUpdateRegionSequenceProperties(juce::ARARegionSequence* track) override;
     void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
+    juce::TextButton referenceTrackButton_, tuneToReferenceButton_, alignTimingButton_;
     juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
     std::unique_ptr<juce::ThreadPool> timingAlignmentWorker_;
     std::unique_ptr<juce::AlertWindow> timingAlignmentPreview_;

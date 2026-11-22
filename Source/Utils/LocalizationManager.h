@@ -18,6 +18,7 @@ enum class Language
     Japanese,
     Russian,
     Spanish,
+    TraditionalChinese,
     Count
 };
 
@@ -30,6 +31,7 @@ inline juce::String getLanguageName(Language lang)
         case Language::Japanese: return "日本語";
         case Language::Russian:  return "Русский";
         case Language::Spanish:  return "Español";
+        case Language::TraditionalChinese: return juce::String::fromUTF8("繁體中文");
         default: return "English";
     }
 }
@@ -43,6 +45,7 @@ inline juce::String getLanguageNativeName(Language lang)
         case Language::Japanese: return juce::String::fromUTF8("\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e");  // 日本語
         case Language::Russian:  return juce::String::fromUTF8("\xd0\xa0\xd1\x83\xd1\x81\xd1\x81\xd0\xba\xd0\xb8\xd0\xb9");  // Русский
         case Language::Spanish:  return juce::String::fromUTF8("Espa\xc3\xb1ol");  // Español
+        case Language::TraditionalChinese: return juce::String::fromUTF8("繁體中文");
         default: return juce::String::fromUTF8("English");
     }
 }
@@ -527,6 +530,19 @@ constexpr const char* kTooltipEqClose = "Close EQ Editor";
 
 inline juce::String get(Language lang, const char* key)
 {
+    if (lang == Language::TraditionalChinese)
+    {
+        static constexpr struct Entry {
+            const char* key;
+            const char* text;
+        } traditionalChinese[] = {
+#include "TraditionalChineseStrings.inc"
+        };
+        for (const auto& entry : traditionalChinese)
+            if (std::strcmp(entry.key, key) == 0)
+                return juce::String::fromUTF8(entry.text);
+    }
+
     static const struct Entry {
         const char* key;
         const char* en;
@@ -1120,6 +1136,7 @@ inline juce::String get(Language lang, const char* key)
             switch (lang)
             {
                 case Language::English:  return juce::String::fromUTF8(t.en);
+                case Language::TraditionalChinese: return juce::String::fromUTF8(t.en);
                 case Language::Chinese:  return juce::String::fromUTF8(t.zh);
                 case Language::Japanese: return juce::String::fromUTF8(t.ja);
                 case Language::Russian:  return juce::String::fromUTF8(t.ru);

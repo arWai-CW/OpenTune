@@ -116,11 +116,8 @@ public:
         initialiseLabel(languageLabel_, LOC(kLanguageLabel));
         addAndMakeVisible(languageLabel_);
 
-        languageSelector_.addItem(getLanguageNativeName(Language::English), 1);
-        languageSelector_.addItem(getLanguageNativeName(Language::Chinese), 2);
-        languageSelector_.addItem(getLanguageNativeName(Language::Japanese), 3);
-        languageSelector_.addItem(getLanguageNativeName(Language::Russian), 4);
-        languageSelector_.addItem(getLanguageNativeName(Language::Spanish), 5);
+        for (int i = 0; i < static_cast<int>(Language::Count); ++i)
+            languageSelector_.addItem(getLanguageNativeName(static_cast<Language>(i)), i + 1);
         languageSelector_.setSelectedId(static_cast<int>(state.shared.language) + 1, juce::dontSendNotification);
         languageSelector_.onChange = [this] {
             appPreferences_.setLanguage(static_cast<Language>(languageSelector_.getSelectedId() - 1));
