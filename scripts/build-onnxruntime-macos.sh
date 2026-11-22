@@ -11,6 +11,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="1.20.0"
 TAG="v${VERSION}"
+# Microsoft's 1.20.0 NuGet package records this exact upstream revision.
+ORT_COMMIT="c4fb724e810bb496165b9015c77f402727392933"
 THIRDPARTY_DIR="${ROOT_DIR}/ThirdParty"
 SOURCE_DIR="${THIRDPARTY_DIR}/.onnxruntime-${VERSION}-src"
 BUILD_ROOT="${THIRDPARTY_DIR}/.onnxruntime-${VERSION}-build"
@@ -60,16 +62,26 @@ fi
 if [ ! -d "${SOURCE_DIR}/.git" ]; then
     echo "▶ 获取 ONNX Runtime ${TAG} 源码（含子模块）"
     rm -rf "$SOURCE_DIR"
-    git clone --depth 1 --branch "$TAG" --recurse-submodules \
-        https://github.com/microsoft/onnxruntime.git "$SOURCE_DIR"
-else
-    actual_tag="$(git -C "$SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)"
-    if [ "$actual_tag" != "$TAG" ]; then
-        echo "❌ ORT 源码目录不是 ${TAG}: ${SOURCE_DIR}"
-        echo "   请使用 --clean 重新获取固定版本。"
-        exit 1
-    fi
+    git init --quiet "$SOURCE_DIR"
 fi
+
+actual_commit="$(git -C "$SOURCE_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+if [ -z "$actual_commit" ]; then
+    if ! GIT_TERMINAL_PROMPT=0 git -C "$SOURCE_DIR" fetch --depth 1 \
+        https://github.com/microsoft/onnxruntime.git "$ORT_COMMIT"; then
+        # Intel's release branch contains the same upstream commit, not a patched build.
+        GIT_TERMINAL_PROMPT=0 git -C "$SOURCE_DIR" fetch --depth 1 \
+            https://github.com/intel/onnxruntime.git "$ORT_COMMIT"
+    fi
+    git -C "$SOURCE_DIR" checkout --detach FETCH_HEAD
+    actual_commit="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
+fi
+if [ "$actual_commit" != "$ORT_COMMIT" ]; then
+    echo "❌ ORT 源码目录不是 ${TAG} (${ORT_COMMIT}): ${SOURCE_DIR}"
+    echo "   请使用 --clean 重新获取固定版本。"
+    exit 1
+fi
+git -C "$SOURCE_DIR" submodule update --init --recursive --depth 1
 
 if [ ! -d "$EIGEN_DIR" ]; then
     echo "▶ 获取 Eigen ${EIGEN_REV}（规避 CMake 4.x 对 GitLab 下载的兼容问题）"
