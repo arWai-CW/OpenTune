@@ -333,6 +333,8 @@ public:
         EmptyTimeline,
         NoTargetSelection,
         EmptyTargetRange,
+        NoAnalyzedReferencePitch,
+        NoReferenceClipOverlap,
         NoVoicedReferenceOverlap
     };
 

@@ -1008,17 +1008,7 @@ OpenTuneAudioProcessorEditor::resolveContentScopeRegions() const
     if (selectedRegions.empty() && view != nullptr)
         selectedRegions = view->getViewSelection().getEffectivePlaybackRegions<juce::ARAPlaybackRegion>();
 
-    auto regions = processorRef_.getAssignedPlaybackRegions();
-    if (regions.empty())
-        return selectedRegions;
-
-    if (!selectedRegions.empty())
-    {
-        const auto focused = std::find(regions.begin(), regions.end(), selectedRegions.front());
-        if (focused != regions.end())
-            std::rotate(regions.begin(), focused, focused + 1);
-    }
-    return regions;
+    return resolveEditorPlaybackScope(processorRef_.getAssignedPlaybackRegions(), selectedRegions);
 #else
     return {};
 #endif
@@ -1117,14 +1107,28 @@ void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequenc
 void OpenTuneAudioProcessorEditor::tuneToPitchReference()
 {
     parameterPanel_.commitPendingEdits();
-    syncContentProjectionToPianoRoll();
+    const auto sync = syncContentProjectionToPianoRoll();
+    const auto title = LOC(kTuneToPitchReference);
+    if (pitchReferenceTrack_ != nullptr && pitchReferenceTrack_ == sync.focusedAraTrack) {
+        OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, title,
+            LOC_RAW("Select the clip you want to tune in the DAW, not the reference track."));
+        return;
+    }
     const auto result = pianoRoll_.tuneToPitchReference();
     if (result.applied())
-        a11y::announce(pianoRoll_, LOC(kTuneToPitchReference));
+        a11y::announce(pianoRoll_, title);
     else if (result.status == PianoRollComponent::AutoTuneApplyStatus::NoChange)
-        a11y::announce(pianoRoll_, LOC_RAW("Already corrected"));
-    else
-        OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, LOC(kTuneToPitchReference), result.message());
+        OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, title,
+            LOC_RAW("The selected pitch already matches the reference."));
+    else {
+        auto detail = result.message();
+        if (sync.focusedAraTrack != nullptr && sync.activePlacementIdentity) {
+            detail += "\n\n" + Loc::format(LOC_RAW("Active clip: {0} @ {1} s"),
+                referenceTrackName(*sync.focusedAraTrack),
+                juce::String(sync.activePlacementIdentity->projection.timelineStartSeconds, 2));
+        }
+        OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, title, detail);
+    }
 }
 
 void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
@@ -1250,11 +1254,15 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             AppLogger::warn("Timing alignment: " + juce::String(error.what()));
             targets.clear();
         }
+        const bool alreadyAligned = targets.size() == count
+            && std::all_of(targets.begin(), targets.end(), [](const auto& target) {
+                return target.tight.alreadyAligned;
+            });
         targets.erase(std::remove_if(targets.begin(), targets.end(), [](const auto& target) {
             return !target.gentle.grid && !target.tight.grid;
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
-                targets = std::move(targets), title, noAlignment]() mutable {
+                targets = std::move(targets), title, noAlignment, alreadyAligned]() mutable {
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
@@ -1264,7 +1272,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             }
             if (targets.empty()) {
                 safe->refreshReferenceControls();
-                ConfirmDialogContent::showMessage(&safe->contentRoot_, title, noAlignment);
+                ConfirmDialogContent::showMessage(&safe->contentRoot_, title, alreadyAligned
+                    ? LOC_RAW("The matched attacks are already aligned. No timing change was applied.") : noAlignment);
                 return;
             }
 

@@ -1,12 +1,31 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace OpenTune {
 
-// Pure UI decisions shared by the Standalone and Plugin editors.
+// Pure UI decisions for the editors.
 // No component access, no state, no timer ordering.
+
+template <typename Region>
+std::vector<Region*> resolveEditorPlaybackScope(std::vector<Region*> assigned,
+                                                const std::vector<Region*>& selected)
+{
+    if (assigned.empty())
+        return selected;
+
+    for (const auto* region : selected) {
+        const auto match = std::find(assigned.begin(), assigned.end(), region);
+        if (match != assigned.end()) {
+            std::rotate(assigned.begin(), match, match + 1);
+            break;
+        }
+    }
+    return assigned;
+}
 
 // ---------------------------------------------------------------------------
 // UI zoom

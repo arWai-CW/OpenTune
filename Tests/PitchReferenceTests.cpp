@@ -1,5 +1,6 @@
 #include "Content/PitchReferenceSnapshot.h"
 #include "UI/PianoRoll/PianoRollTimeMap.h"
+#include "Utils/EditorUiSync.h"
 
 #include <cmath>
 #include <cstdio>
@@ -59,6 +60,29 @@ auto makeCurve(std::vector<float> original, std::vector<PitchCorrectionSegment> 
                                                       std::move(segments), hopSize, 4.0);
 }
 
+bool testReferenceFirstSelectionStillFocusesTheSelectedTarget()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(1.0);
+    const PitchReferenceSnapshot earlier{{0.0, 1.0, 0.0, 1.0}, grid, makeCurve({200, 200, 200, 200})};
+    const PitchReferenceSnapshot target{{2.0, 1.0, 0.0, 1.0}, grid, makeCurve({200, 200, 200, 200})};
+    const PitchReferenceSnapshot guide{{2.0, 1.0, 0.0, 1.0}, grid, makeCurve({225, 225, 225, 225})};
+    const std::vector assigned{&earlier, &target};
+    const auto scope = resolveEditorPlaybackScope(assigned, {&guide, &target});
+    if (scope != std::vector{&target, &earlier}
+        || resolveEditorPlaybackScope(assigned, {&guide}) != assigned
+        || resolveEditorPlaybackScope<PitchReferenceSnapshot const>({}, {&target}) != std::vector{&target})
+        return false;
+
+    const auto plan = planPitchReferenceCorrection(*scope.front(), {guide}, {{0, 4}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1)
+        return false;
+
+    auto corrected = target;
+    corrected.curve = makeCurve({200, 200, 200, 200}, plan.segments);
+    const auto repeated = planPitchReferenceCorrection(corrected, {guide}, {{0, 4}});
+    return repeated.hasVoicedOverlap && repeated.segments.empty();
+}
+
 bool testTuneMatchesChromaticPitchAcrossTrimAndWarp()
 {
     const auto targetGrid = TimeGridSnapshot::makeFromHandles({
@@ -109,12 +133,15 @@ bool testTuneNoOpWithoutVoicedOverlapOrPitchChanges()
     const PitchReferenceSnapshot target{{1.0, 1.0, 0.0, 1.0}, grid, makeCurve({150, 150, 0, 150}), 2.0f};
     const PitchReferenceSnapshot adjacent{{2.0, 1.0, 0.0, 1.0}, grid, makeCurve({500, 500, 500, 500})};
     const PitchReferenceSnapshot matched{{1.0, 1.0, 0.0, 1.0}, grid, makeCurve({300, 0, 400, 300})};
+    const PitchReferenceSnapshot unvoiced{{1.0, 1.0, 0.0, 1.0}, grid, makeCurve({0, 0, 0, 0})};
     const auto none = planPitchReferenceCorrection(target, {}, {{0, 4}});
     const auto noOverlap = planPitchReferenceCorrection(target, {adjacent}, {{0, 4}});
+    const auto noVoicedOverlap = planPitchReferenceCorrection(target, {unvoiced}, {{0, 4}});
     const auto equal = planPitchReferenceCorrection(target, {matched}, {{0, 4}});
-    return !none.hasVoicedOverlap && none.segments.empty()
-        && !noOverlap.hasVoicedOverlap && noOverlap.segments.empty()
-        && equal.hasVoicedOverlap && equal.segments.empty();
+    return !none.hasClipOverlap && !none.hasVoicedOverlap && none.segments.empty()
+        && !noOverlap.hasClipOverlap && !noOverlap.hasVoicedOverlap && noOverlap.segments.empty()
+        && noVoicedOverlap.hasClipOverlap && !noVoicedOverlap.hasVoicedOverlap && noVoicedOverlap.segments.empty()
+        && equal.hasClipOverlap && equal.hasVoicedOverlap && equal.segments.empty();
 }
 } // namespace
 
@@ -138,6 +165,10 @@ int main()
     }
     if (!testTuneNoOpWithoutVoicedOverlapOrPitchChanges()) {
         std::fputs("FAIL: Reference tuning does not edit without a different voiced target\n", stderr);
+        return 1;
+    }
+    if (!testReferenceFirstSelectionStillFocusesTheSelectedTarget()) {
+        std::fputs("FAIL: A reference selected first must not steal focus from the selected target\n", stderr);
         return 1;
     }
     std::puts("PitchReference tests passed.");

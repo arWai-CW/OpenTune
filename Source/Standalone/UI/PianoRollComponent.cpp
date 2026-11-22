@@ -6196,6 +6196,10 @@ juce::String PianoRollComponent::AutoTuneApplyResult::message() const
             return LOC(kAutoNeedsSelection);
         case AutoTuneApplyStatus::EmptyTargetRange:
             return LOC(kAutoTargetRangeEmpty);
+        case AutoTuneApplyStatus::NoAnalyzedReferencePitch:
+            return LOC_RAW("No separate reference clip has pitch data. Use Read Audio on the reference clip, not AUTO.");
+        case AutoTuneApplyStatus::NoReferenceClipOverlap:
+            return LOC_RAW("No analyzed reference clip overlaps the active clip. Select the target clip in the DAW.");
         case AutoTuneApplyStatus::NoVoicedReferenceOverlap:
             return LOC(kNoVoicedReferenceOverlap);
     }
@@ -6213,6 +6217,9 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::tuneToPitchReference
         || !snapshot->hasUsableOriginalF0())
         return { AutoTuneApplyStatus::OriginalF0NotReady };
 
+    if (pitchReferences_.empty())
+        return { AutoTuneApplyStatus::NoAnalyzedReferencePitch };
+
     std::vector<F0FrameRange> ranges;
     const auto selection = toolHandler_->collectSelectedFrameRanges();
     for (const auto& [start, end] : selection.ranges)
@@ -6224,6 +6231,8 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::tuneToPitchReference
         {activeContentProjection(), snapshot->timeGrid, snapshot->pitchCurve,
          static_cast<float>(snapshot->pitchShiftSettings.getPitchRatio())},
         pitchReferences_, ranges);
+    if (!plan.hasClipOverlap)
+        return { AutoTuneApplyStatus::NoReferenceClipOverlap };
     if (!plan.hasVoicedOverlap)
         return { AutoTuneApplyStatus::NoVoicedReferenceOverlap };
     if (plan.segments.empty())

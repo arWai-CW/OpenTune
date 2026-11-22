@@ -113,6 +113,9 @@ bool testReferenceAlignment()
             return false;
     }
     const std::vector<TimingOnset> ambiguous{{0.96, false}, {1.052, false}, {1.68, true}, {2.56, false}};
+    const auto repeated = alignTimingToReference(targetOnsets, *tight.grid, targetPlacement,
+                                                  guideOnsets, *guide, guidePlacement, 1.0);
+    const auto unreliable = align(ambiguous, 1.0);
     const auto& handles = tight.grid->handles();
     for (size_t i = 1; i < handles.size(); ++i)
         if (!TimeGridSnapshot::supportsStretchRatio(
@@ -122,7 +125,8 @@ bool testReferenceAlignment()
     return tight.grid->totalDurationSeconds() == 4.0
         && std::abs(tight.grid->tauForward(2.8) - target->tauForward(2.8)) < 1e-9
         && tight.grid->tauForward(3.5) == 3.48
-        && !align(ambiguous, 1.0).grid
+        && repeated.alreadyAligned && !repeated.grid
+        && !unreliable.alreadyAligned && !unreliable.grid
         && !align(guideOnsets, 0.0).grid;
 }
 
