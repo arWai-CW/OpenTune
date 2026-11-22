@@ -154,13 +154,23 @@ bool testDetectAttacksAcrossPitch()
 
 bool testIsolatedAttackStaysPut()
 {
-    const auto grid = TimeGridSnapshot::makeIdentity(6.0);
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.5, 0.5, HandleKind::InternalOnset},
+        {3, 1.0, 1.0, HandleKind::InternalOnset},
+        {4, 1.8, 1.8, HandleKind::InternalOnset},
+        {5, 5.0, 5.0, HandleKind::UserAdded},
+        {6, 6.0, 6.0, HandleKind::ClipEnd}
+    });
     const ContentTimelineProjection placement{0.0, 6.0, 0.0, 6.0};
     const std::vector<TimingOnset> target{{0.5, true}, {1.0, false}, {1.8, true}, {4.1, false}};
     const std::vector<TimingOnset> guide{{0.6, true}, {1.1, false}, {1.9, true}, {4.2, false}};
     const auto result = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
     return result.grid && result.movedAnchors == 3
-        && std::abs(result.grid->tauForward(4.1) - 4.1) < 1e-9;
+        && std::abs(result.grid->tauForward(4.1) - 4.1) < 1e-9
+        && std::any_of(result.grid->handles().begin(), result.grid->handles().end(), [](const auto& handle) {
+            return handle.id == 5 && handle.output_seconds == 5.0;
+        });
 }
 }
 
@@ -179,7 +189,7 @@ int main()
         return 1;
     }
     if (!testIsolatedAttackStaysPut()) {
-        std::fputs("Reference timing moved an isolated attack\n", stderr);
+        std::fputs("Reference timing did not align a seeded grid while protecting isolated and manual anchors\n", stderr);
         return 1;
     }
     return 0;

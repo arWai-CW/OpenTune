@@ -185,8 +185,16 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         return {};
 
     auto handles = targetGrid.handles();
+    // Opening the time tool can seed an untouched identity grid. Those seeds
+    // aren't manual edits and shouldn't block detected attacks in the overlap.
+    if (targetGrid.isIdentity()) {
+        handles.erase(std::remove_if(handles.begin(), handles.end(), [&](const auto& handle) {
+            const auto time = targetPlacement.projectContentTimeToTimeline(handle.output_seconds);
+            return handle.kind == HandleKind::InternalOnset && time > begin && time < end;
+        }), handles.end());
+    }
     uint64_t id = 0;
-    for (const auto& handle : handles)
+    for (const auto& handle : targetGrid.handles())
         id = std::max(id, handle.id);
 
     // Freeze the map outside the overlap and at attacks without a reliable guide.
@@ -233,7 +241,8 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         const double output = targetPlacement.projectTimelineTimeToContent(time + move);
         if (oldOutput <= *firstLock || oldOutput >= *lastLock || output <= *firstLock || output >= *lastLock)
             continue;
-        if (insertAnchor(handles, {++id, source, output, HandleKind::OnsetVoiced, Confidence::High})) {
+        const auto kind = targets[i].onset.highFrequencyDominant ? HandleKind::OnsetSibilant : HandleKind::OnsetVoiced;
+        if (insertAnchor(handles, {++id, source, output, kind, Confidence::High})) {
             ++result.movedAnchors;
             result.maxMoveSeconds = std::max(result.maxMoveSeconds, std::abs(output - oldOutput));
         }
