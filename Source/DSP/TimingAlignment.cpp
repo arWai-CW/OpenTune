@@ -264,10 +264,18 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         result.grid = TimeGridSnapshot::makeFromHandles(std::move(handles));
         if (!result.grid)
             return {};
-        for (size_t i = 0; i < targets.size(); ++i)
-            if (std::abs(moveFor(i)) < minMove && std::abs(result.grid->tauForward(targets[i].onset.sourceSeconds)
-                - targetGrid.tauForward(targets[i].onset.sourceSeconds)) > 0.008)
+        for (size_t i = 0; i < targets.size(); ++i) {
+            const double after = targetPlacement.projectContentTimeToTimeline(
+                result.grid->tauForward(targets[i].onset.sourceSeconds));
+            const double before = targets[i].timeline;
+            if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
                 return {};
+            if (matches[i] >= 0) {
+                const double reference = guides[static_cast<size_t>(matches[i])].timeline;
+                if (std::abs(after - reference) > std::abs(before - reference) + 1e-6)
+                    return {};
+            }
+        }
     }
     return result;
 }

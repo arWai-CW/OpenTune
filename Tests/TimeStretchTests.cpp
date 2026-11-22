@@ -185,6 +185,15 @@ bool testPeriodicAttacksDoNotSlipByASyllable()
     }
     return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
 }
+
+bool testBlockedAnchorDoesNotDriftAway()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(2.5);
+    const ContentTimelineProjection placement{0.0, 2.5, 0.0, 2.5};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {1.25, true}, {1.85, false}};
+    const std::vector<TimingOnset> guide{{0.46, true}, {0.69, false}, {1.25, true}, {1.85, false}};
+    return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
+}
 }
 
 int main()
@@ -207,6 +216,10 @@ int main()
     }
     if (!testPeriodicAttacksDoNotSlipByASyllable()) {
         std::fputs("Reference timing incorrectly paired periodic attacks with the next syllable\n", stderr);
+        return 1;
+    }
+    if (!testBlockedAnchorDoesNotDriftAway()) {
+        std::fputs("Reference timing moved an unanchored attack away from its guide\n", stderr);
         return 1;
     }
     return 0;
