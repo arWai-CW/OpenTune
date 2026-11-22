@@ -282,6 +282,60 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
     expectAudible(*firstRenderer, "same_rate_first_renderer_pcm_missing", true);
     expectAudible(*secondRenderer, "same_rate_second_renderer_pcm_missing", true);
 
+    {
+        using namespace OpenTune;
+        const auto regions = controller->getPlaybackRegionProjectionsFor({playbackRegion});
+        if (!expect(regions.size() == 1, "stretch_region_projection_unavailable"))
+            return false;
+        const auto key = regions.front().contentKey;
+        const auto before = controller->readContentSnapshot(key);
+        if (!expect(before && before->timeGrid && before->timeGrid->isIdentity(),
+                    "stretch_initial_grid_unavailable"))
+            return false;
+        const auto warp = TimeGridSnapshot::makeFromHandles({
+            {1, 0.0, 0.0, HandleKind::ClipStart},
+            {2, 0.5, 0.65, HandleKind::UserAdded},
+            {3, 1.0, 1.0, HandleKind::ClipEnd}
+        });
+        if (!expect(firstProcessor.applyTimeGridEdit(key, before->timeGrid, warp, "Stretch"),
+                    "stretch_grid_commit_failed"))
+            return false;
+
+        const auto after = controller->readContentSnapshot(key);
+        if (!expect(after && after->timeGrid == warp
+                        && after->timeGridRevision > before->timeGridRevision
+                        && after->contentRevision == before->contentRevision
+                        && after->pitchRevision == before->pitchRevision,
+                    "stretch_changed_canonical_or_pitch_state"))
+            return false;
+
+        auto service = controller->getContentRenderServiceShared();
+        service->drainRenderWorker();
+        juce::AudioBuffer<float> rendered(1, blockSize);
+        expect(service->getTimeStretchCache().sliceForOutputRange(key,
+                   after->contentRevision, after->timeGridRevision, 4800, rendered,
+                   0, blockSize, initialSampleRate) == blockSize,
+               "stretch_worker_did_not_publish_host_rate_pcm");
+        expectAudible(*firstRenderer, "stretched_first_renderer_pcm_missing", false);
+        expectAudible(*secondRenderer, "stretched_second_renderer_pcm_missing", false);
+
+        const auto invalid = TimeGridSnapshot::makeFromHandles({
+            {1, 0.0, 0.0, HandleKind::ClipStart},
+            {2, 0.5, 0.1, HandleKind::UserAdded},
+            {3, 1.0, 1.0, HandleKind::ClipEnd}
+        });
+        expect(invalid != nullptr && !controller->applyTimeGridToModification(key, invalid),
+               "stretch_unsupported_ratio_accepted");
+        if (!expect(firstProcessor.getUndoManager().undo() != nullptr,
+                    "stretch_undo_action_missing"))
+            return false;
+        const auto undone = controller->readContentSnapshot(key);
+        expect(undone && undone->timeGrid == before->timeGrid
+                   && undone->timeGridRevision > after->timeGridRevision,
+               "stretch_undo_did_not_restore_identity");
+        expectAudible(*firstRenderer, "undo_did_not_restore_unwarped_playback", true);
+    }
+
     auto* route = controller->getAuditionRoute();
     auto& audition = controller->getNotePitchAudition();
     static int ownerTokenStorage = 0;

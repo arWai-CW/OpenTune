@@ -471,15 +471,28 @@ bool OpenTunePlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
 
         playbackScratch_.clear();
         int copied = readPlaybackAudio(request, playbackScratch_, 0);
-        // A warp is built asynchronously. Keep unwarped audio audible until
-        // the matching revision is ready instead of muting the host region.
-        if (copied == 0 && !item.source.contentSnapshot->timeGrid->isIdentity())
+        if (!item.source.contentSnapshot->timeGrid->isIdentity())
         {
-            const int64_t unwarpedStart = PlaybackSampleGeometry::projectToSample(
-                item.startInModificationTime * planSampleRate)
-                + (overlap.begin - item.placement.playbackBeginSample);
-            copied = readPlaybackAudio({item.source, unwarpedStart, planSampleRate,
-                                        samplesToCopy, outputStartSeconds, true}, playbackScratch_, 0);
+            const int64_t sourceOrigin = PlaybackSampleGeometry::projectToSample(
+                item.source.contentSnapshot->sourceWindow.sourceStartSeconds * planSampleRate);
+            const auto readUnwarped = [&](int offset, int count) {
+                return readPlaybackAudio({item.source, address.preparedGlobalIndex + sourceOrigin + offset,
+                    planSampleRate, count, outputStartSeconds + offset / planSampleRate, true},
+                    playbackScratch_, offset);
+            };
+
+            // During rebuild, or outside the original edited window after a
+            // host trim is extended, keep unwarped audio instead of silence.
+            if (copied == 0)
+                copied = readUnwarped(0, samplesToCopy);
+            else
+            {
+                const int prefix = static_cast<int>(std::clamp<int64_t>(-address.preparedGlobalIndex, 0, copied));
+                if (prefix > 0)
+                    readUnwarped(0, prefix);
+                if (copied < samplesToCopy)
+                    copied += readUnwarped(copied, samplesToCopy - copied);
+            }
         }
         const int mixSamples = juce::jmin(juce::jmin(copied, samplesToCopy),
                                           buffer.getNumSamples() - destinationStartSample);

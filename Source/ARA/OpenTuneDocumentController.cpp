@@ -2192,7 +2192,7 @@ bool OpenTuneDocumentController::publishPlaybackReadSourceForModification(
         contentRenderService_->getTimeStretchCache());
 
     contentRenderService_->publishPlaybackSource(key, std::move(readSource));
-    enqueueModificationTimeStretch(key);
+    contentRenderService_->enqueueStage2Rebuild(key);
 
     // The plan freezes the published source view; a new publication is the
     // event that refreshes it.
@@ -2856,8 +2856,6 @@ void OpenTuneDocumentController::installDocumentRenderExecution()
             std::move(service), job, renderGate, renderTerminalRelay);
     };
     lease.renderFailureCallback = [this, renderGate, renderTerminalRelay](const RenderJob& job, const juce::String& reason) {
-        if (job.kind == RenderJob::Kind::Stage2Rebuild)
-            return;
         ProcessRenderRuntime::notifyApplicationRenderFailure(
             job.contentKey, job.contentRevision, job.targetRevision,
             reason, job.renderCache, renderGate);
@@ -2868,7 +2866,7 @@ void OpenTuneDocumentController::installDocumentRenderExecution()
                 const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*renderGate);
                 if (callbackLease)
                 {
-                    enqueueModificationTimeStretch(key);
+                    contentRenderService_->enqueueStage2Rebuild(key);
                     renderTerminalRelay->invoke(key, false);
                 }
             });
@@ -3004,11 +3002,6 @@ void OpenTuneDocumentController::requestModificationRenderRanges(
     requestModificationRenderSampleRanges(key, requestRanges, std::move(snapshot));
 }
 
-void OpenTuneDocumentController::enqueueModificationTimeStretch(ContentKey key)
-{
-    contentRenderService_->enqueueStage2Rebuild(key);
-}
-
 void OpenTuneDocumentController::requestModificationRenderSampleRanges(
     ContentKey key,
     const std::vector<PlaybackSampleGeometry::SampleSpan>& requestRanges,
@@ -3044,7 +3037,7 @@ void OpenTuneDocumentController::requestModificationRenderSampleRanges(
 
     if (!snapshot->hasUsableOriginalF0())
     {
-        enqueueModificationTimeStretch(key);
+        contentRenderService_->enqueueStage2Rebuild(key);
         return;
     }
 
@@ -3057,7 +3050,7 @@ void OpenTuneDocumentController::requestModificationRenderSampleRanges(
     job.contentRevision = job.contentSnapshot->contentRevision;
 
     contentRenderService_->enqueueRender(std::move(job), clampedRanges);
-    enqueueModificationTimeStretch(key);
+    contentRenderService_->enqueueStage2Rebuild(key);
 }
 
 void OpenTuneDocumentController::requestFullModificationRender(
@@ -3473,7 +3466,7 @@ bool OpenTuneDocumentController::applyTimeGridToModification(const ContentKey& k
         return false;
 
     republishPlaybackSourceForModification(key);
-    enqueueModificationTimeStretch(key);
+    contentRenderService_->enqueueStage2Rebuild(key);
 
     if (mod->audioModification != nullptr)
         mod->audioModification->notifyContentChanged(

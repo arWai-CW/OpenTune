@@ -348,7 +348,6 @@ private:
     static OriginalF0InputStamp makeF0InputStamp(const AudioSource& source, const AudioModification& modification);
     std::shared_ptr<const EditableContentSnapshot> snapshotAudioModification(ContentKey key) const;
     void installDocumentRenderExecution();
-    void enqueueModificationTimeStretch(ContentKey key);
     struct RenderTerminalRelay;
     static void processDocumentRenderJob(std::shared_ptr<ContentRenderService> contentRenderService,
                                          RenderJob& job,
