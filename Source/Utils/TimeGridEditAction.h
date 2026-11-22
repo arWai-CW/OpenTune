@@ -3,30 +3,33 @@
 #include "UndoManager.h"
 #include "TimeGrid.h"
 #include "Content/ContentKey.h"
-#include "Content/ContentEditCommands.h"
 #include <memory>
 
 namespace OpenTune {
 
+class ContentEditCommands;
+
+struct TimeGridChange
+{
+    ContentKey key;
+    std::shared_ptr<const TimeGridSnapshot> before;
+    std::shared_ptr<const TimeGridSnapshot> after;
+};
+
 class TimeGridEditAction : public UndoAction {
 public:
     TimeGridEditAction(std::shared_ptr<ContentEditCommands> commands,
-                       ContentKey key,
-                       juce::String description,
-                       std::shared_ptr<const TimeGridSnapshot> oldSnapshot,
-                       std::shared_ptr<const TimeGridSnapshot> newSnapshot);
+                       juce::String description, std::vector<TimeGridChange> changes);
 
     void undo() override;
     void redo() override;
     juce::String getDescription() const override { return description_; }
-    bool dependsOnContent(ContentKey key) const noexcept override { return contentKey_ == key; }
+    bool dependsOnContent(ContentKey key) const noexcept override;
 
 private:
     std::shared_ptr<ContentEditCommands> commands_;
-    ContentKey contentKey_;
     juce::String                    description_;
-    std::shared_ptr<const TimeGridSnapshot> oldSnapshot_;
-    std::shared_ptr<const TimeGridSnapshot> newSnapshot_;
+    std::vector<TimeGridChange> changes_;
 };
 
 } // namespace OpenTune

@@ -885,6 +885,7 @@ set(OPENTUNE_COMMON_SOURCES
         Source/Content/ContentKey.h
         Source/Content/ContentEditCommands.cpp
         Source/Content/PitchReferenceSnapshot.cpp
+        Source/DSP/TimingAlignment.cpp
         Source/Content/DomainContentOwner.h
         Source/Content/AnalysisState.h
         Source/Content/ContentState.h
@@ -1985,6 +1986,7 @@ if(OPENTUNE_BUILD_TESTS)
 
     add_executable(OpenTuneTimeStretchTests
         Tests/TimeStretchTests.cpp
+        Source/DSP/TimingAlignment.cpp
         Source/Inference/SoundTouchStretcher.cpp
         Source/Utils/AppLogger.cpp
         Source/Utils/TimeGrid.cpp

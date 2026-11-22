@@ -158,6 +158,9 @@ struct PianoRollPlacementIdentity
     }
 };
 
+struct TimeGridChange;
+class TimeGridEditAction;
+
 /** 完整镜头的四个 primitive：横向 camera 2 项 + 纵向缩放 + 纵向偏移。 */
 struct PianoRollViewportPrimitive
 {
@@ -913,6 +916,8 @@ public:
                            std::shared_ptr<const TimeGridSnapshot> before,
                            std::shared_ptr<const TimeGridSnapshot> after,
                            juce::String description);
+    TimeGridEditAction* commitTimeGridEdits(const std::vector<TimeGridChange>& changes,
+                                          const juce::String& description);
     bool setContentDetectedKey(ContentKey key, const DetectedKey& detectedKey);
     bool setContentOriginalF0State(ContentKey key, OriginalF0State state);
     bool setContentOriginalF0FailureReason(ContentKey key, std::string reason);

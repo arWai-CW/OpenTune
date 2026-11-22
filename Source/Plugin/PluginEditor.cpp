@@ -26,6 +26,8 @@
 
 #if JucePlugin_Enable_ARA
 #include "ARA/OpenTuneDocumentController.h"
+#include "DSP/TimingAlignment.h"
+#include "Utils/TimeGridEditAction.h"
 #endif
 #include "Content/ContentKey.h"
 
@@ -186,6 +188,12 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                 if (safeEditor != nullptr)
                     safeEditor->tuneToPitchReference();
             });
+            menu.addItem(LOC(kAlignTimingToReference),
+                pitchReferenceTrack_ != nullptr && !timingAlignmentRunning_ && timingAlignmentPreview_ == nullptr,
+                false, [safeEditor] {
+                    if (safeEditor != nullptr)
+                        safeEditor->alignTimingToPitchReference();
+                });
         }
 #endif
         // Accessibility: open with the first item highlighted, so the first Enter works
@@ -334,6 +342,8 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
 OpenTuneAudioProcessorEditor::~OpenTuneAudioProcessorEditor()
 {
 #if JucePlugin_Enable_ARA
+    timingAlignmentPreview_.reset();
+    timingAlignmentWorker_.reset();
     clearPendingNoteGenerationSubscription();
     setPitchReferenceTrack(nullptr);
 #endif
@@ -1038,6 +1048,224 @@ void OpenTuneAudioProcessorEditor::tuneToPitchReference()
         a11y::announce(pianoRoll_, LOC_RAW("Already corrected"));
     else
         OpenTune::ConfirmDialogContent::showMessage(&contentRoot_, LOC(kTuneToPitchReference), result.message());
+}
+
+void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
+{
+    auto* dc = processorRef_.getDocumentController();
+    if (dc == nullptr || pitchReferenceTrack_ == nullptr || timingAlignmentRunning_ || timingAlignmentPreview_)
+        return;
+
+    using Region = OpenTuneDocumentController::PlaybackRegionProjection;
+    struct Input
+    {
+        Region region;
+        std::shared_ptr<const EditableContentSnapshot> snapshot;
+    };
+    struct Target
+    {
+        Input input;
+        size_t guideIndex;
+        juce::String label;
+        TimingAlignment gentle, tight;
+    };
+
+    parameterPanel_.commitPendingEdits();
+    const auto load = [dc](const Region& region) -> Input {
+        if (!region.isPlaybackRenderable() || !region.contentProjection.isValid())
+            return {};
+        auto snapshot = dc->readContentSnapshot(region.contentKey);
+        if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid
+            || snapshot->timeGrid->totalDurationSeconds() > 180.0)
+            return {};
+        return {region, std::move(snapshot)};
+    };
+    const auto guideRegions = dc->getPlaybackRegionProjectionsFor(pitchReferenceTrack_->getPlaybackRegions());
+    std::vector<juce::ARAPlaybackRegion*> selected;
+    if (const auto* view = getARAEditorView())
+        selected = view->getViewSelection().getPlaybackRegions<juce::ARAPlaybackRegion>();
+    if (selected.empty()) {
+        const auto scoped = resolveContentScopeRegions();
+        if (!scoped.empty())
+            selected.push_back(scoped.front());
+    }
+    selected.erase(std::remove_if(selected.begin(), selected.end(), [this](auto* region) {
+        return region == nullptr || region->getRegionSequence() == pitchReferenceTrack_;
+    }), selected.end());
+
+    const auto title = LOC(kAlignTimingToReference);
+    if (selected.empty() || selected.size() > 6) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title,
+            LOC_RAW("Select one to six target clips in the DAW, and choose a separate reference track."));
+        return;
+    }
+
+    std::vector<Input> guides;
+    std::vector<Target> targets;
+    for (const auto& region : dc->getPlaybackRegionProjectionsFor(selected)) {
+        const auto* modification = region.playbackRegion->getAudioModification();
+        // A shared modification would also change unselected host placements.
+        if (modification == nullptr || modification->getPlaybackRegions().size() != 1)
+            continue;
+        const auto input = load(region);
+        if (!input.snapshot)
+            continue;
+        Input bestGuide;
+        double bestOverlap = 0.5;
+        for (const auto& guide : guideRegions) {
+            const double overlap = std::min(region.endInPlaybackTime, guide.endInPlaybackTime)
+                - std::max(region.startInPlaybackTime, guide.startInPlaybackTime);
+            if (guide.contentKey == region.contentKey || overlap <= bestOverlap)
+                continue;
+            if (auto candidate = load(guide); candidate.snapshot) {
+                bestGuide = std::move(candidate);
+                bestOverlap = overlap;
+            }
+        }
+        if (!bestGuide.snapshot)
+            continue;
+        const auto existing = std::find_if(guides.begin(), guides.end(), [&](const auto& guide) {
+            return guide.region.playbackRegion == bestGuide.region.playbackRegion;
+        });
+        const auto guideIndex = static_cast<size_t>(existing - guides.begin());
+        if (existing == guides.end())
+            guides.push_back(std::move(bestGuide));
+        const auto* track = region.playbackRegion->getRegionSequence();
+        auto name = juce::String::fromUTF8(track != nullptr ? static_cast<const char*>(track->getName()) : nullptr);
+        if (name.isEmpty())
+            name = LOC(kUnnamedReferenceTrack);
+        name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
+        targets.push_back({input, guideIndex, std::move(name), {}, {}});
+    }
+    const auto noAlignment = LOC_RAW("No reliable timing changes. Read the reference and target audio first, then select overlapping takes of the same phrase.");
+    if (targets.empty()) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title, noAlignment);
+        return;
+    }
+
+    if (!timingAlignmentWorker_)
+        timingAlignmentWorker_ = std::make_unique<juce::ThreadPool>(1);
+    timingAlignmentRunning_ = true;
+    a11y::announce(pianoRoll_, LOC_RAW("Analyzing timing"));
+    const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
+    timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
+        guides = std::move(guides), targets = std::move(targets), title, noAlignment]() mutable {
+        const auto detect = [](const Input& input) {
+            return detectTimingOnsets(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate);
+        };
+        try {
+            std::vector<std::vector<TimingOnset>> guideOnsets;
+            for (const auto& guide : guides)
+                guideOnsets.push_back(detect(guide));
+            for (auto& target : targets) {
+                const auto& guide = guides[target.guideIndex];
+                const auto onsets = detect(target.input);
+                const auto plan = [&](double strength) {
+                    return alignTimingToReference(onsets, *target.input.snapshot->timeGrid,
+                        target.input.region.contentProjection, guideOnsets[target.guideIndex],
+                        *guide.snapshot->timeGrid, guide.region.contentProjection, strength);
+                };
+                target.gentle = plan(0.5);
+                target.tight = plan(1.0);
+            }
+        } catch (const std::exception& error) {
+            AppLogger::warn("Timing alignment: " + juce::String(error.what()));
+            targets.clear();
+        }
+        targets.erase(std::remove_if(targets.begin(), targets.end(), [](const auto& target) {
+            return !target.gentle.grid && !target.tight.grid;
+        }), targets.end());
+        juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
+                targets = std::move(targets), title, noAlignment]() mutable {
+            if (safe == nullptr)
+                return;
+            safe->timingAlignmentRunning_ = false;
+            if (safe->pitchReferenceTrack_ != guideTrack)
+                return;
+            if (targets.empty()) {
+                ConfirmDialogContent::showMessage(&safe->contentRoot_, title, noAlignment);
+                return;
+            }
+
+            auto detail = LOC_RAW("Choose alignment strength per clip. Pitch and the reference track are not edited.");
+            if (count != targets.size())
+                detail += "\n" + juce::String(static_cast<int>(count - targets.size()))
+                    + " " + LOC_RAW("selected clips have no safe alignment and will be skipped.");
+            auto preview = std::make_unique<juce::AlertWindow>(title, detail,
+                juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
+            const auto label = [](const juce::String& mode, const TimingAlignment& plan) {
+                return mode + " — " + juce::String(plan.movedAnchors) + " " + LOC_RAW("anchors")
+                    + ", " + juce::String(static_cast<int>(std::lround(plan.maxMoveSeconds * 1000))) + " ms max";
+            };
+            for (size_t i = 0; i < targets.size(); ++i) {
+                const auto id = juce::String(static_cast<int>(i));
+                preview->addComboBox(id, {}, targets[i].label);
+                auto* box = preview->getComboBoxComponent(id);
+                box->addItem(LOC_RAW("Skip"), 1);
+                if (targets[i].gentle.grid)
+                    box->addItem(label(LOC(kTimingGentle), targets[i].gentle), 2);
+                if (targets[i].tight.grid)
+                    box->addItem(label(LOC(kTimingTight), targets[i].tight), 3);
+                box->setSelectedId(targets[i].gentle.grid ? 2 : 1, juce::dontSendNotification);
+            }
+            preview->addButton(LOC_RAW("Apply"), 1, juce::KeyPress(juce::KeyPress::returnKey));
+            preview->addButton(LOC(kCancel), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+            safe->timingAlignmentPreview_ = std::move(preview);
+            auto& window = *safe->timingAlignmentPreview_;
+            const auto bounds = safe->contentRoot_.getLocalBounds();
+            window.setCentrePosition(bounds.getCentreX(), bounds.getCentreY());
+            safe->contentRoot_.addChildComponent(window);
+            window.enterModalState(true, juce::ModalCallbackFunction::create(
+                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title](int choice) {
+                    if (safe == nullptr)
+                        return;
+                    const auto dialog = std::move(safe->timingAlignmentPreview_);
+                    if (choice != 1 || !dialog)
+                        return;
+                    auto* dc = safe->processorRef_.getDocumentController();
+                    const auto unchanged = [dc](const Input& input) {
+                        if (dc == nullptr)
+                            return false;
+                        const auto current = dc->getPlaybackRegionProjectionsFor({input.region.playbackRegion});
+                        const PianoRollPlacementIdentity identity{input.region.contentKey, input.region.contentProjection};
+                        if (current.size() != 1
+                            || !(identity == PianoRollPlacementIdentity{current[0].contentKey, current[0].contentProjection}))
+                            return false;
+                        const auto snapshot = dc->readContentSnapshot(input.region.contentKey);
+                        return snapshot && snapshot->audioBuffer == input.snapshot->audioBuffer
+                            && snapshot->timeGridRevision == input.snapshot->timeGridRevision;
+                    };
+                    const auto stale = [&] {
+                        ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
+                            LOC_RAW("A clip or the reference changed. Run timing alignment again."));
+                    };
+                    std::vector<TimeGridChange> changes;
+                    for (size_t i = 0; i < targets.size(); ++i) {
+                        const auto* box = dialog->getComboBoxComponent(juce::String(static_cast<int>(i)));
+                        const auto& target = targets[i];
+                        const auto after = box->getSelectedId() == 2 ? target.gentle.grid
+                            : box->getSelectedId() == 3 ? target.tight.grid : nullptr;
+                        if (!after)
+                            continue;
+                        const auto& input = target.input;
+                        if (safe->pitchReferenceTrack_ != guideTrack || !unchanged(input)
+                            || !unchanged(guides[target.guideIndex])
+                            || input.region.playbackRegion->getAudioModification()->getPlaybackRegions().size() != 1) {
+                            stale();
+                            return;
+                        }
+                        changes.push_back({input.region.contentKey, input.snapshot->timeGrid, after});
+                    }
+                    if (changes.empty())
+                        return;
+
+                    if (safe->processorRef_.commitTimeGridEdits(changes, title))
+                        a11y::announce(safe->pianoRoll_, title);
+                    else
+                        stale();
+                }));
+        });
+    });
 }
 
 void OpenTuneAudioProcessorEditor::willDestroyRegionSequence(juce::ARARegionSequence* track)

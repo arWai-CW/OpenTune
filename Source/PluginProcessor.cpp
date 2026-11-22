@@ -1209,17 +1209,7 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             std::shared_ptr<const TimeGridSnapshot> after,
             const juce::String& description) override
         {
-            if (!key.isValid() || before == nullptr || after == nullptr)
-                return {};
-            auto action = std::make_unique<TimeGridEditAction>(
-                proc_.getContentCommands(), key,
-                description.isNotEmpty() ? description : LOC_RAW("Edit time grid"), before, after);
-            if (!proc_.setContentTimeGrid(key, std::move(after)))
-                return nullptr;
-            auto* actionPtr = action.get();
-            proc_.getUndoManager().addAction(std::move(action));
-            proc_.notifyContentEditCompleted(key);
-            return actionPtr;
+            return proc_.commitTimeGridEdits({{key, std::move(before), std::move(after)}}, description);
         }
 
     private:
@@ -6477,6 +6467,36 @@ bool OpenTuneAudioProcessor::applyTimeGridEdit(
         return false;
 
     return true;
+}
+
+TimeGridEditAction* OpenTuneAudioProcessor::commitTimeGridEdits(
+    const std::vector<TimeGridChange>& changes, const juce::String& description)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (!contentCommands_ || changes.empty()
+        || std::any_of(changes.begin(), changes.end(), [](const auto& change) {
+            return !change.key.isValid() || !change.before || !change.after;
+        }))
+        return nullptr;
+
+    auto action = std::make_unique<TimeGridEditAction>(
+        contentCommands_, description.isNotEmpty() ? description : LOC_RAW("Edit time grid"), changes);
+    size_t applied = 0;
+    for (const auto& change : changes) {
+        if (!setContentTimeGrid(change.key, change.after)) {
+            while (applied > 0) {
+                const auto& previous = changes[--applied];
+                setContentTimeGrid(previous.key, previous.before);
+            }
+            return nullptr;
+        }
+        ++applied;
+    }
+    auto* result = action.get();
+    undoManager_.addAction(std::move(action));
+    for (const auto& change : changes)
+        notifyContentEditCompleted(change.key);
+    return result;
 }
 
 bool OpenTuneAudioProcessor::setContentDetectedKey(ContentKey key, const DetectedKey& detectedKey)

@@ -1,32 +1,36 @@
 #include "TimeGridEditAction.h"
 #include "Content/ContentEditCommands.h"
+#include <algorithm>
 
 namespace OpenTune {
 
 TimeGridEditAction::TimeGridEditAction(std::shared_ptr<ContentEditCommands> commands,
-                                       ContentKey key,
-                                       juce::String description,
-                                       std::shared_ptr<const TimeGridSnapshot> oldSnapshot,
-                                       std::shared_ptr<const TimeGridSnapshot> newSnapshot)
-    : commands_(commands)
-    , contentKey_(key)
-    , description_(std::move(description))
-    , oldSnapshot_(std::move(oldSnapshot))
-    , newSnapshot_(std::move(newSnapshot))
+                                       juce::String description, std::vector<TimeGridChange> changes)
+    : commands_(std::move(commands)), description_(std::move(description)), changes_(std::move(changes))
 {
-    jassert(contentKey_.isValid());
-    jassert(oldSnapshot_ != nullptr);
-    jassert(newSnapshot_ != nullptr);
+    jassert(!changes_.empty());
+    jassert(std::all_of(changes_.begin(), changes_.end(), [](const auto& change) {
+        return change.key.isValid() && change.before != nullptr && change.after != nullptr;
+    }));
 }
 
 void TimeGridEditAction::undo()
 {
-    commands_->setTimeGrid(contentKey_, oldSnapshot_);
+    for (auto it = changes_.rbegin(); it != changes_.rend(); ++it)
+        commands_->setTimeGrid(it->key, it->before);
 }
 
 void TimeGridEditAction::redo()
 {
-    commands_->setTimeGrid(contentKey_, newSnapshot_);
+    for (const auto& change : changes_)
+        commands_->setTimeGrid(change.key, change.after);
+}
+
+bool TimeGridEditAction::dependsOnContent(ContentKey key) const noexcept
+{
+    return std::any_of(changes_.begin(), changes_.end(), [key](const auto& change) {
+        return change.key == key;
+    });
 }
 
 } // namespace OpenTune

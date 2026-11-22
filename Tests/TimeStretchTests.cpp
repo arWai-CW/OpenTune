@@ -1,4 +1,5 @@
 #include "Inference/SoundTouchStretcher.h"
+#include "DSP/TimingAlignment.h"
 
 #include <cmath>
 #include <cstdio>
@@ -77,12 +78,93 @@ bool testAnchorPlacementAndStereoPitch()
         && unwarped.getSample(0, sampleRate) == input.getSample(0, sampleRate)
         && unwarped.getSample(1, sampleRate) == input.getSample(1, sampleRate);
 }
+
+bool testReferenceAlignment()
+{
+    const auto target = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 3.5, 3.48, HandleKind::UserAdded},
+        {3, 4.0, 4.0, HandleKind::ClipEnd}
+    });
+    const auto guide = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 1.04, HandleKind::UserAdded},
+        {3, 4.5, 4.5, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection targetPlacement{10.05, 4.0, 0, 4.0};
+    const ContentTimelineProjection guidePlacement{9.8, 4.2, 0.3, 4.2};
+    const std::vector<TimingOnset> targetOnsets{{0.5, false}, {1.1, true}, {1.97, false}, {2.8, true}};
+    const std::vector<TimingOnset> guideOnsets{{1.10, false}, {1.68, true}, {2.56, false}};
+    const auto align = [&](const auto& guides, double strength) {
+        return alignTimingToReference(targetOnsets, *target, targetPlacement,
+                                      guides, *guide, guidePlacement, strength);
+    };
+    const auto tight = align(guideOnsets, 1.0);
+    const auto gentle = align(guideOnsets, 0.5);
+    if (!tight.grid || !gentle.grid || tight.movedAnchors != 3 || gentle.movedAnchors != 3)
+        return false;
+    for (size_t i = 0; i < guideOnsets.size(); ++i) {
+        const double source = targetOnsets[i].sourceSeconds;
+        const double expected = targetPlacement.projectTimelineTimeToContent(
+            guidePlacement.projectContentTimeToTimeline(guide->tauForward(guideOnsets[i].sourceSeconds)));
+        if (std::abs(tight.grid->tauForward(source) - expected) > 1e-9
+            || std::abs(gentle.grid->tauForward(source)
+                - (target->tauForward(source) + expected) * 0.5) > 1e-9)
+            return false;
+    }
+    const std::vector<TimingOnset> ambiguous{{0.96, false}, {1.052, false}, {1.68, true}, {2.56, false}};
+    const auto& handles = tight.grid->handles();
+    for (size_t i = 1; i < handles.size(); ++i)
+        if (!TimeGridSnapshot::supportsStretchRatio(
+            handles[i].source_seconds - handles[i - 1].source_seconds,
+            handles[i].output_seconds - handles[i - 1].output_seconds))
+            return false;
+    return tight.grid->totalDurationSeconds() == 4.0
+        && std::abs(tight.grid->tauForward(2.8) - target->tauForward(2.8)) < 1e-9
+        && tight.grid->tauForward(3.5) == 3.48
+        && !align(ambiguous, 1.0).grid
+        && !align(guideOnsets, 0.0).grid;
+}
+
+bool testDetectAttacksAcrossPitch()
+{
+    constexpr int rate = 16000;
+    const std::vector<double> attacks{0.35, 0.82, 1.44};
+    for (const int pitch : {180, 320}) {
+        juce::AudioBuffer<float> audio(2, 2 * rate);
+        audio.clear();
+        for (const double onset : attacks) {
+            for (int i = 0; i < rate / 8; ++i) {
+                const float value = static_cast<float>(std::min(1.0, i / (rate * 0.01))
+                    * std::sin(2.0 * pi * pitch * i / rate));
+                const int sample = static_cast<int>(onset * rate) + i;
+                audio.setSample(0, sample, value);
+                audio.setSample(1, sample, -value);
+            }
+        }
+        const auto onsets = detectTimingOnsets(audio, rate);
+        if (onsets.size() != attacks.size())
+            return false;
+        for (size_t i = 0; i < attacks.size(); ++i)
+            if (std::abs(onsets[i].sourceSeconds - attacks[i]) > 0.01)
+                return false;
+    }
+    return true;
+}
 }
 
 int main()
 {
     if (!testAnchorPlacementAndStereoPitch()) {
         std::fputs("Time stretch failed anchor, stereo or pitch preservation\n", stderr);
+        return 1;
+    }
+    if (!testReferenceAlignment()) {
+        std::fputs("Reference timing failed placement, strength, or preservation\n", stderr);
+        return 1;
+    }
+    if (!testDetectAttacksAcrossPitch()) {
+        std::fputs("Timing onset detection did not find synthetic attacks\n", stderr);
         return 1;
     }
     return 0;

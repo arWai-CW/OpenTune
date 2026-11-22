@@ -4,6 +4,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/ARA/OpenTuneDocumentController.h"
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
+#include "../Source/Utils/TimeGridEditAction.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -194,7 +195,8 @@ bool check (bool value, const char* name)
 bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef documentControllerRef,
                                             ARA::Host::DocumentController& hostDocumentController,
                                             ARA::ARAAudioSourceRef audioSource,
-                                            ARA::ARAPlaybackRegionRef playbackRegionRef)
+                                            ARA::ARAPlaybackRegionRef playbackRegionRef,
+                                            ARA::ARAPlaybackRegionRef secondTargetRef)
 {
     constexpr double initialSampleRate = 48000.0;
     constexpr double switchedSampleRate = 44100.0;
@@ -334,6 +336,40 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                    && undone->timeGridRevision > after->timeGridRevision,
                "stretch_undo_did_not_restore_identity");
         expectAudible(*firstRenderer, "undo_did_not_restore_unwarped_playback", true);
+
+        auto* secondTarget = ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(secondTargetRef);
+        const auto secondRegions = controller->getPlaybackRegionProjectionsFor({secondTarget});
+        if (!expect(secondRegions.size() == 1
+                        && controller->requestReadAudioForPlaybackRegion(secondTarget) == 1,
+                    "second_timing_target_not_ready"))
+            return false;
+        const auto secondKey = secondRegions.front().contentKey;
+        const auto secondBefore = controller->readContentSnapshot(secondKey);
+        if (!expect(secondKey != key && secondBefore && secondBefore->timeGrid,
+                    "second_timing_grid_missing"))
+            return false;
+
+        const auto hasGrid = [&](ContentKey content, const auto& grid) {
+            const auto snapshot = controller->readContentSnapshot(content);
+            return snapshot && snapshot->timeGrid == grid;
+        };
+        auto& history = firstProcessor.getUndoManager();
+        const auto priorUndo = history.peekUndo();
+        expect(!firstProcessor.commitTimeGridEdits({
+                   {key, before->timeGrid, warp}, {secondKey, secondBefore->timeGrid, invalid}}, "Align")
+                   && history.peekUndo() == priorUndo
+                   && hasGrid(key, before->timeGrid) && hasGrid(secondKey, secondBefore->timeGrid),
+               "rejected_timing_batch_left_partial_edit");
+        const auto* group = firstProcessor.commitTimeGridEdits({
+            {key, before->timeGrid, warp}, {secondKey, secondBefore->timeGrid, warp}}, "Align");
+        if (!expect(group && hasGrid(key, warp) && hasGrid(secondKey, warp),
+                    "timing_batch_not_committed"))
+            return false;
+        expect(history.undo() == group && hasGrid(key, before->timeGrid)
+                   && hasGrid(secondKey, secondBefore->timeGrid), "timing_batch_undo_failed");
+        expect(history.redo() == group && hasGrid(key, warp)
+                   && hasGrid(secondKey, warp), "timing_batch_redo_failed");
+        history.undo();
     }
 
     auto* route = controller->getAuditionRoute();
@@ -615,12 +651,18 @@ int runChild(int argc, char** argv)
     const auto region = documentController.createPlaybackRegion (modification, nullptr, &regionProperties);
     if (! check (region != nullptr, "playback_region_create_failed"))
         return 1;
+    regionProperties.startInPlaybackTime = 1.0;
+    const auto secondTarget = documentController.createPlaybackRegion(
+        extraModifications.front(), nullptr, &regionProperties);
+    if (!check(secondTarget != nullptr, "second_timing_region_create_failed"))
+        return 1;
 
     const bool rendererLifecyclePassed = runPlaybackRendererLifecycleRegression(
-        instance->documentControllerRef, documentController, source, region);
+        instance->documentControllerRef, documentController, source, region, secondTarget);
     documentController.enableAudioSourceSamplesAccess(source, false);
 
     documentController.destroyPlaybackRegion (region);
+    documentController.destroyPlaybackRegion (secondTarget);
     documentController.destroyAudioModification (modification);
     for (auto* extra : extraModifications)
         documentController.destroyAudioModification (extra);

@@ -1,0 +1,234 @@
+#include "TimingAlignment.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
+
+namespace OpenTune {
+namespace {
+
+constexpr double hopSeconds = 0.005;
+constexpr double maxShift = 0.18;
+constexpr double ambiguityMargin = 0.018;
+
+struct ProjectedOnset
+{
+    TimingOnset onset;
+    double timeline;
+};
+
+std::vector<ProjectedOnset> projectOnsets(const std::vector<TimingOnset>& onsets,
+                                         const TimeGridSnapshot& grid,
+                                         const ContentTimelineProjection& placement,
+                                         double begin, double end)
+{
+    std::vector<ProjectedOnset> visible;
+    for (const auto& onset : onsets) {
+        if (onset.sourceSeconds <= 0.0 || onset.sourceSeconds >= grid.totalDurationSeconds())
+            continue;
+        const double time = placement.projectContentTimeToTimeline(grid.tauForward(onset.sourceSeconds));
+        if (time >= begin && time < end)
+            visible.push_back({onset, time});
+    }
+    return visible;
+}
+
+int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>& candidates)
+{
+    auto it = std::lower_bound(candidates.begin(), candidates.end(), target.timeline - maxShift,
+        [](const ProjectedOnset& onset, double time) { return onset.timeline < time; });
+    int bestIndex = -1;
+    double best = std::numeric_limits<double>::infinity();
+    double runnerUp = best;
+    for (; it != candidates.end() && it->timeline <= target.timeline + maxShift; ++it) {
+        const double score = std::abs(it->timeline - target.timeline)
+            + (it->onset.broadband == target.onset.broadband ? 0.0 : 0.035);
+        if (score < best) {
+            runnerUp = best;
+            best = score;
+            bestIndex = static_cast<int>(it - candidates.begin());
+        } else {
+            runnerUp = std::min(runnerUp, score);
+        }
+    }
+    return runnerUp - best >= ambiguityMargin ? bestIndex : -1;
+}
+
+bool validSpan(const TimeHandle& first, const TimeHandle& second)
+{
+    return TimeGridSnapshot::hasMinimumSourceSpacing(first.source_seconds, second.source_seconds)
+        && TimeGridSnapshot::supportsStretchRatio(second.source_seconds - first.source_seconds,
+                                                  second.output_seconds - first.output_seconds);
+}
+
+bool insertAnchor(std::vector<TimeHandle>& handles, const TimeHandle& anchor)
+{
+    const auto after = std::lower_bound(handles.begin(), handles.end(), anchor.source_seconds,
+        [](const TimeHandle& handle, double time) { return handle.source_seconds < time; });
+    if (after == handles.begin() || after == handles.end()
+        || !validSpan(*(after - 1), anchor) || !validSpan(anchor, *after))
+        return false;
+    handles.insert(after, anchor);
+    return true;
+}
+
+} // namespace
+
+std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    if (!std::isfinite(sampleRate) || sampleRate < 1000.0 || sampleRate > 768000.0
+        || audio.getNumChannels() == 0)
+        return {};
+
+    const int hop = static_cast<int>(std::lround(sampleRate * hopSeconds));
+    const int frames = audio.getNumSamples() / hop;
+    struct Energy { double full = 0.0; double high = 0.0; };
+    std::vector<Energy> envelope(static_cast<size_t>(frames));
+    Energy peak;
+    for (int frame = 0; frame < frames; ++frame) {
+        auto& energy = envelope[static_cast<size_t>(frame)];
+        const int start = frame * hop;
+        for (int ch = 0; ch < audio.getNumChannels(); ++ch) {
+            const auto* samples = audio.getReadPointer(ch);
+            float previous = start > 0 ? samples[start - 1] : 0.0f;
+            for (int i = start; i < start + hop; ++i) {
+                const float sample = samples[i];
+                const float diff = sample - previous;
+                energy.full += sample * sample;
+                energy.high += diff * diff;
+                previous = sample;
+            }
+        }
+        energy.full = std::sqrt(energy.full);
+        energy.high = std::sqrt(energy.high);
+        peak.full = std::max(peak.full, energy.full);
+        peak.high = std::max(peak.high, energy.high);
+    }
+    if (peak.full == 0.0 || peak.high == 0.0)
+        return {};
+
+    // Positive energy flux finds syllable attacks without using note pitch.
+    std::vector<double> flux(envelope.size());
+    for (size_t i = 3; i < envelope.size(); ++i) {
+        const auto& now = envelope[i];
+        const auto& earlier = envelope[i - 3];
+        const double full = (now.full - earlier.full) / peak.full;
+        const double high = (now.high - earlier.high) / peak.high;
+        flux[i] = std::max(full, 0.7 * high);
+    }
+
+    std::vector<TimingOnset> onsets;
+    for (size_t i = 3; i + 3 < flux.size(); ++i) {
+        if (flux[i] < 0.16 || flux[i] <= flux[i - 1]
+            || flux[i] < *std::max_element(flux.begin() + i + 1, flux.begin() + i + 4))
+            continue;
+        size_t attack = i;
+        while (attack > i - 3 && flux[attack - 1] >= 0.4 * flux[i])
+            --attack;
+        const double time = static_cast<double>(attack * hop) / sampleRate;
+        if (!onsets.empty() && time - onsets.back().sourceSeconds < 0.105)
+            continue;
+        const auto& energy = envelope[i];
+        onsets.push_back({time, energy.high / peak.high > 1.5 * energy.full / peak.full});
+    }
+    return onsets;
+}
+
+TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
+                                       const TimeGridSnapshot& targetGrid,
+                                       const ContentTimelineProjection& targetPlacement,
+                                       const std::vector<TimingOnset>& guide,
+                                       const TimeGridSnapshot& guideGrid,
+                                       const ContentTimelineProjection& guidePlacement,
+                                       double strength)
+{
+    if (targetGrid.empty() || guideGrid.empty() || !targetPlacement.isValid()
+        || !guidePlacement.isValid() || !(strength > 0.0 && strength <= 1.0))
+        return {};
+    const double begin = std::max(targetPlacement.timelineStartSeconds, guidePlacement.timelineStartSeconds);
+    const double end = std::min(targetPlacement.timelineEndSeconds(), guidePlacement.timelineEndSeconds());
+    if (end - begin < 0.5)
+        return {};
+
+    const auto targets = projectOnsets(target, targetGrid, targetPlacement, begin, end);
+    const auto guides = projectOnsets(guide, guideGrid, guidePlacement, begin, end);
+    std::vector<int> matches(targets.size(), -1);
+    int matched = 0, previous = -1;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const int index = uniqueMatch(targets[i], guides);
+        if (index <= previous || uniqueMatch(guides[static_cast<size_t>(index)], targets) != static_cast<int>(i))
+            continue;
+        matches[i] = previous = index;
+        ++matched;
+    }
+    if (matched < 3 || static_cast<size_t>(matched) * 2 < targets.size())
+        return {};
+
+    auto handles = targetGrid.handles();
+    uint64_t id = 0;
+    for (const auto& handle : handles)
+        id = std::max(id, handle.id);
+
+    // Freeze the map outside the overlap and at attacks without a reliable guide.
+    const auto lockTime = [&](double output) {
+        constexpr double epsilon = 1.0e-6;
+        if (std::any_of(handles.begin(), handles.end(), [&](const auto& anchor) {
+                return std::abs(anchor.output_seconds - output) < epsilon;
+            }))
+            return true;
+        return insertAnchor(handles, {++id, targetGrid.tauInverse(output), output, HandleKind::InternalOnset});
+    };
+    const double firstOutput = std::max(0.0, targetPlacement.projectTimelineTimeToContent(begin));
+    const double lastOutput = std::min(targetGrid.totalDurationSeconds(), targetPlacement.projectTimelineTimeToContent(end));
+    const auto lockBoundary = [&](double output, double step) -> std::optional<double> {
+        for (int attempt = 0; attempt <= 12 && output >= firstOutput && output <= lastOutput;
+             ++attempt, output += step)
+            if (lockTime(output))
+                return output;
+        return std::nullopt;
+    };
+    const auto firstLock = lockBoundary(firstOutput, 0.025);
+    const auto lastLock = lockBoundary(lastOutput, -0.025);
+    if (!firstLock || !lastLock || *firstLock >= *lastLock)
+        return {};
+    const auto moveFor = [&](size_t i) {
+        return matches[i] < 0 ? 0.0
+            : (guides[static_cast<size_t>(matches[i])].timeline - targets[i].timeline) * strength;
+    };
+    constexpr double minMove = 0.012;
+    for (size_t i = 0; i < targets.size(); ++i)
+        if (std::abs(moveFor(i)) < minMove)
+            lockTime(targetGrid.tauForward(targets[i].onset.sourceSeconds));
+
+    TimingAlignment result;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const double time = targets[i].timeline;
+        const double source = targets[i].onset.sourceSeconds;
+        const double oldOutput = targetGrid.tauForward(source);
+        const double move = moveFor(i);
+        if (std::abs(move) < minMove)
+            continue;
+
+        // Keep manual handles intact and avoid extreme stretches between anchors.
+        const double output = targetPlacement.projectTimelineTimeToContent(time + move);
+        if (oldOutput <= *firstLock || oldOutput >= *lastLock || output <= *firstLock || output >= *lastLock)
+            continue;
+        if (insertAnchor(handles, {++id, source, output, HandleKind::OnsetVoiced, Confidence::High})) {
+            ++result.movedAnchors;
+            result.maxMoveSeconds = std::max(result.maxMoveSeconds, std::abs(output - oldOutput));
+        }
+    }
+
+    if (result.movedAnchors > 0) {
+        result.grid = TimeGridSnapshot::makeFromHandles(std::move(handles));
+        if (!result.grid)
+            return {};
+        for (size_t i = 0; i < targets.size(); ++i)
+            if (std::abs(moveFor(i)) < minMove && std::abs(result.grid->tauForward(targets[i].onset.sourceSeconds)
+                - targetGrid.tauForward(targets[i].onset.sourceSeconds)) > 0.008)
+                return {};
+    }
+    return result;
+}
+
+} // namespace OpenTune
