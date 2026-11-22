@@ -18,11 +18,12 @@ struct PlaybackReadRequest {
     double targetSampleRate{0.0};
     int numSamples{0};
     double outputStartSeconds{0.0};
+    bool forceUnwarped{false};
 
     PlaybackReadRequest(const PlaybackReadSource& src, int64_t startSample, double rate,
-                        int samples, double outputTime)
+                        int samples, double outputTime, bool unwarped = false)
         : source(src), readStartSample(startSample), targetSampleRate(rate),
-          numSamples(samples), outputStartSeconds(outputTime) {}
+          numSamples(samples), outputStartSeconds(outputTime), forceUnwarped(unwarped) {}
 };
 
 /** Stage2 input uses content-local canonical indices, matching Stage1 chunks. */
@@ -42,14 +43,16 @@ struct CanonicalReadRequest {
 inline void applyAutomationGain(juce::AudioBuffer<float>& destination,
                                 int destinationStartSample, int numSamples,
                                 const EditableContentSnapshot& snapshot,
-                                double outputStartSeconds, double targetSampleRate)
+                                double outputStartSeconds, double targetSampleRate,
+                                bool forceUnwarped = false)
 {
     if (snapshot.volumeEnvelope.empty())
         return;
     constexpr float kDbToLinear = 0.11512925465f;
     for (int s = 0; s < numSamples; ++s) {
         const double outputSeconds = outputStartSeconds + static_cast<double>(s) / targetSampleRate;
-        const double sourceSeconds = snapshot.timeGrid->tauInverse(outputSeconds);
+        const double sourceSeconds = forceUnwarped
+            ? outputSeconds : snapshot.timeGrid->tauInverse(outputSeconds);
         const float gain = std::exp(snapshot.volumeEnvelope.evalAt(sourceSeconds) * kDbToLinear);
         for (int ch = 0; ch < destination.getNumChannels(); ++ch)
             destination.getWritePointer(ch, destinationStartSample)[s] *= gain;
@@ -98,7 +101,7 @@ inline int readPlaybackAudio(const PlaybackReadRequest& request,
         return 0;
 
     int wrote = 0;
-    if (!snapshot->timeGrid->isIdentity()) {
+    if (!request.forceUnwarped && !snapshot->timeGrid->isIdentity()) {
         if (!request.source.timeStretchCache)
             return 0;
         wrote = request.source.timeStretchCache->sliceForOutputRange(
@@ -117,7 +120,7 @@ inline int readPlaybackAudio(const PlaybackReadRequest& request,
     }
     if (wrote > 0)
         applyAutomationGain(destination, destinationStartSample, wrote, *snapshot,
-                            request.outputStartSeconds, request.targetSampleRate);
+                            request.outputStartSeconds, request.targetSampleRate, request.forceUnwarped);
     return wrote;
 }
 

@@ -1983,6 +1983,21 @@ if(OPENTUNE_BUILD_TESTS)
     endif()
     add_test(NAME PitchReferenceTests COMMAND OpenTunePitchReferenceTests)
 
+    add_executable(OpenTuneTimeStretchTests
+        Tests/TimeStretchTests.cpp
+        Source/Inference/SoundTouchStretcher.cpp
+        Source/Utils/AppLogger.cpp
+        Source/Utils/TimeGrid.cpp
+        ${OPENTUNE_SOUNDTOUCH_SOURCES}
+    )
+    target_include_directories(OpenTuneTimeStretchTests PRIVATE Source ${SOUNDTOUCH_DIR}/include)
+    target_compile_definitions(OpenTuneTimeStretchTests PRIVATE SOUNDTOUCH_FLOAT_SAMPLES)
+    target_link_libraries(OpenTuneTimeStretchTests PRIVATE juce::juce_audio_basics)
+    if(MSVC)
+        target_compile_options(OpenTuneTimeStretchTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME TimeStretchTests COMMAND OpenTuneTimeStretchTests)
+
     # Scissors topology planner + undo action tests — pure planner, no plugin runtime
     add_executable(OpenTuneScissorsTopologyEditTests
         Tests/ScissorsTopologyEditTests.cpp

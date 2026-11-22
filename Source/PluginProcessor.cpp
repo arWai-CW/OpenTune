@@ -6427,11 +6427,10 @@ bool OpenTuneAudioProcessor::setContentTimeGrid(ContentKey key,
     }
     if (ok) {
         notifyContentChanged(key);
+        if (key.domainKind == DomainKind::ARAAudioModification)
+            return true;
         auto snapshot = getContentSnapshot(key);
-        auto* crs = resolveMutableLocalContentRenderService(key);
-        if (key.domainKind != DomainKind::ARAAudioModification
-            && crs != nullptr
-            && snapshot != nullptr)
+        if (auto* crs = resolveMutableLocalContentRenderService(key); crs != nullptr && snapshot != nullptr)
         {
             // TimeGrid affects only Stage2. Reuse settled Stage1 when available;
             // a pending Stage1 completion will enqueue Stage2 after it settles.
@@ -6456,10 +6455,6 @@ bool OpenTuneAudioProcessor::setContentTimeGrid(ContentKey key,
                     key, std::move(snapshot),
                     source.canonicalBuffer, source.canonicalSampleRate);
         }
-        else if (key.domainKind == DomainKind::ARAAudioModification
-                 && crs != nullptr
-                 && snapshot != nullptr)
-            crs->republishPlaybackSource(key, std::move(snapshot));
     }
     return ok;
 }

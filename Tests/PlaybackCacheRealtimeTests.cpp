@@ -271,6 +271,27 @@ bool testConcurrentTimeStretchPublicationAndClear()
 
 } // namespace
 
+bool testTrimmedStereoTimeStretchRead()
+{
+    using namespace OpenTune;
+    const ContentKey key{DomainKind::ARAAudioModification, 4721, 0};
+    TimeStretchCache cache;
+    cache.prepareForPlaybackSampleRate(48000.0);
+    juce::AudioBuffer<float> input(2, 4410);
+    input.clear();
+    for (int i = 0; i < input.getNumSamples(); ++i) {
+        input.setSample(0, i, 0.25f);
+        input.setSample(1, i, -0.5f);
+    }
+    cache.storeBuffer(key, std::move(input), 17, 2, 44100.0, cache.beginBuild(key));
+
+    juce::AudioBuffer<float> playback(2, 128);
+    return cache.sliceForOutputRange(key, 17, 1, 1200, playback, 0, 128, 48000.0) == 0
+        && cache.sliceForOutputRange(key, 17, 2, 1200, playback, 0, 128, 48000.0) == 128
+        && std::abs(playback.getSample(0, 64) - 0.25f) < 0.001f
+        && std::abs(playback.getSample(1, 64) + 0.5f) < 0.001f;
+}
+
 int main()
 {
 #if defined(OPENTUNE_REALTIME_AUDIT)
@@ -297,6 +318,10 @@ int main()
     }
     if (!testClearRejectsOldTimeStretchBuild()) {
         std::fputs("FAIL: clear rejects an old TimeStretchCache build\n", stderr);
+        return 1;
+    }
+    if (!testTrimmedStereoTimeStretchRead()) {
+        std::fputs("FAIL: trimmed Stage2 playback preserves stereo at the host rate\n", stderr);
         return 1;
     }
     if (!testConcurrentTimeStretchPublicationAndClear()) {

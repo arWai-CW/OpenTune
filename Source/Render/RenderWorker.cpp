@@ -450,7 +450,21 @@ void RenderWorker::setStage1CapacityCallback(std::function<void()> callback)
 
 bool RenderWorker::enqueueLocked(RenderJob job)
 {
-    if (!lease_.isValid() || queue_.size() >= RenderWorker::kMaxQueueDepth)
+    if (!lease_.isValid())
+        return false;
+    if (job.kind == RenderJob::Kind::Stage2Rebuild
+        && job.contentKey.domainKind == DomainKind::ARAAudioModification)
+    {
+        const auto previous = std::find_if(queue_.begin(), queue_.end(), [&job](const RenderJob& queued) {
+            return queued.kind == RenderJob::Kind::Stage2Rebuild && queued.contentKey == job.contentKey;
+        });
+        if (previous != queue_.end())
+        {
+            *previous = std::move(job);
+            return true;
+        }
+    }
+    if (queue_.size() >= RenderWorker::kMaxQueueDepth)
         return false;
     if (job.kind != RenderJob::Kind::Stage1Render)
     {

@@ -17,6 +17,7 @@
 #include "../Utils/SilentGapDetector.h"
 #include "../Utils/PitchCurve.h"
 #include "../Inference/RenderCache.h"
+#include "../Render/Stage2TimeStretchRebuilder.h"
 #include "../Utils/SourceWindow.h"
 #include "../Utils/AppLogger.h"
 #include "../Utils/AppPreferences.h"
@@ -738,20 +739,10 @@ std::optional<ContentState> restoreAudioModificationContent(const juce::XmlEleme
         }
 
         auto timeGrid = TimeGridSnapshot::makeFromHandles(std::move(handles));
-        if (timeGrid == nullptr)
-            return std::nullopt;
-
-        // Non-identity archive TimeGrid is rejected rather than silently replaced.
-        if (!timeGrid->isIdentity())
+        if (timeGrid == nullptr || !AudioModification::supportsTimeGrid(*timeGrid, content.sourceWindow))
             return std::nullopt;
 
         content.timeGrid = std::move(timeGrid);
-
-        // 完整性校验：TimeGrid 总时长与 sourceWindow 时长误差 <= 1e-6
-        const double timeGridTotal = content.timeGrid->totalDurationSeconds();
-        const double sourceWindowDuration = content.sourceWindow.durationSeconds();
-        if (std::abs(timeGridTotal - sourceWindowDuration) > 1e-6)
-            return std::nullopt;
     }
     else
     {
@@ -2201,6 +2192,7 @@ bool OpenTuneDocumentController::publishPlaybackReadSourceForModification(
         contentRenderService_->getTimeStretchCache());
 
     contentRenderService_->publishPlaybackSource(key, std::move(readSource));
+    enqueueModificationTimeStretch(key);
 
     // The plan freezes the published source view; a new publication is the
     // event that refreshes it.
@@ -2833,23 +2825,52 @@ void OpenTuneDocumentController::installDocumentRenderExecution()
     const std::weak_ptr<ContentRenderService> weakContentRenderService = contentRenderService_;
     const auto renderGate = renderCompletionGate_;
     const auto renderTerminalRelay = renderTerminalRelay_;
-    lease.renderJobCallback = [weakContentRenderService, renderGate, renderTerminalRelay](RenderJob& job)
+    lease.renderJobCallback = [this, weakContentRenderService, renderGate, renderTerminalRelay](RenderJob& job)
     {
-        if (auto contentRenderService = weakContentRenderService.lock())
-            OpenTuneDocumentController::processDocumentRenderJob(
-                std::move(contentRenderService), job, renderGate, renderTerminalRelay);
+        auto service = weakContentRenderService.lock();
+        if (service == nullptr)
+            return;
+
+        if (job.kind == RenderJob::Kind::Stage2Rebuild)
+        {
+            if (Stage2TimeStretchRebuilder::rebuild(*service,
+                {job.contentKey, job.contentSnapshot, job.audioBuffer, job.audioSampleRate}))
+            {
+                juce::MessageManager::callAsync(
+                    [this, renderGate, key = job.contentKey, rendered = job.contentSnapshot] {
+                        const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*renderGate);
+                        if (!callbackLease)
+                            return;
+                        auto* mod = findAudioModificationByContentKey(key);
+                        if (mod != nullptr && mod->content && mod->audioModification != nullptr
+                            && mod->content->contentRevision == rendered->contentRevision
+                            && mod->content->timeGridRevision == rendered->timeGridRevision
+                            && mod->content->audioRevision == rendered->audioRevision)
+                            mod->audioModification->notifyContentChanged(
+                                juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+                    });
+            }
+            return;
+        }
+        OpenTuneDocumentController::processDocumentRenderJob(
+            std::move(service), job, renderGate, renderTerminalRelay);
     };
-    lease.renderFailureCallback = [renderGate, renderTerminalRelay](const RenderJob& job, const juce::String& reason) {
+    lease.renderFailureCallback = [this, renderGate, renderTerminalRelay](const RenderJob& job, const juce::String& reason) {
+        if (job.kind == RenderJob::Kind::Stage2Rebuild)
+            return;
         ProcessRenderRuntime::notifyApplicationRenderFailure(
             job.contentKey, job.contentRevision, job.targetRevision,
             reason, job.renderCache, renderGate);
         if (renderTerminalRelay != nullptr)
         {
             const auto key = job.contentKey;
-            juce::MessageManager::callAsync([renderGate, renderTerminalRelay, key] {
+            juce::MessageManager::callAsync([this, renderGate, renderTerminalRelay, key] {
                 const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*renderGate);
                 if (callbackLease)
+                {
+                    enqueueModificationTimeStretch(key);
                     renderTerminalRelay->invoke(key, false);
+                }
             });
         }
     };
@@ -2918,16 +2939,23 @@ void OpenTuneDocumentController::processDocumentRenderJob(
     const auto contentKey = job.contentKey;
     if (renderTerminalRelay != nullptr)
     {
-        completion.chunkSettled = [renderTerminalRelay, renderCache, contentKey](
+        completion.chunkSettled = [weakService = std::weak_ptr<ContentRenderService>(contentRenderService),
+                                  renderTerminalRelay, renderCache, contentKey](
             ContentKey, std::shared_ptr<const EditableContentSnapshot>,
             std::shared_ptr<const juce::AudioBuffer<float>>, double) {
             if (renderCache == nullptr)
                 return;
             const auto state = renderCache->getStateSnapshot();
+            if (!state.chunkStats.hasActiveWork())
+                if (auto service = weakService.lock())
+                    service->enqueueStage2Rebuild(contentKey);
             if (state.canonicalSettled)
                 renderTerminalRelay->invokeCompleted(contentKey, state.renderGeneration);
         };
-        completion.chunkFailed = [renderTerminalRelay](ContentKey key, const juce::String&) {
+        completion.chunkFailed = [weakService = std::weak_ptr<ContentRenderService>(contentRenderService),
+                                  renderTerminalRelay](ContentKey key, const juce::String&) {
+            if (auto service = weakService.lock())
+                service->enqueueStage2Rebuild(key);
             renderTerminalRelay->invoke(key, false);
         };
     }
@@ -2976,6 +3004,11 @@ void OpenTuneDocumentController::requestModificationRenderRanges(
     requestModificationRenderSampleRanges(key, requestRanges, std::move(snapshot));
 }
 
+void OpenTuneDocumentController::enqueueModificationTimeStretch(ContentKey key)
+{
+    contentRenderService_->enqueueStage2Rebuild(key);
+}
+
 void OpenTuneDocumentController::requestModificationRenderSampleRanges(
     ContentKey key,
     const std::vector<PlaybackSampleGeometry::SampleSpan>& requestRanges,
@@ -3010,7 +3043,10 @@ void OpenTuneDocumentController::requestModificationRenderSampleRanges(
     refreshRegisteredRenderers(publishModelChange());
 
     if (!snapshot->hasUsableOriginalF0())
+    {
+        enqueueModificationTimeStretch(key);
         return;
+    }
 
     RenderJob job;
     job.contentKey = key;
@@ -3021,6 +3057,7 @@ void OpenTuneDocumentController::requestModificationRenderSampleRanges(
     job.contentRevision = job.contentSnapshot->contentRevision;
 
     contentRenderService_->enqueueRender(std::move(job), clampedRanges);
+    enqueueModificationTimeStretch(key);
 }
 
 void OpenTuneDocumentController::requestFullModificationRender(
@@ -3431,17 +3468,17 @@ bool OpenTuneDocumentController::applyTimeGridToModification(const ContentKey& k
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
     auto* mod = findAudioModificationByContentKey(key);
-    if (mod == nullptr || !mod->hasContentState() || grid == nullptr || !grid->isIdentity()) return false;
+    if (mod == nullptr || !mod->hasContentState()) return false;
     if (!mod->applyTimeGrid(std::move(grid)))
         return false;
 
-    auto snapshot = mod->snapshotContent();
-    contentRenderService_->republishPlaybackSource(key, snapshot);
-    refreshRegisteredRenderers(publishModelChange());
+    republishPlaybackSourceForModification(key);
+    enqueueModificationTimeStretch(key);
 
     if (mod->audioModification != nullptr)
         mod->audioModification->notifyContentChanged(
-            juce::ARAContentUpdateScopes::timelineIsAffected(), true);
+            juce::ARAContentUpdateScopes::timelineIsAffected()
+                + juce::ARAContentUpdateScopes::samplesAreAffected(), true);
 
     return true;
 }

@@ -33,6 +33,7 @@ public:
         std::shared_ptr<const EditableContentSnapshot> contentSnapshot,
         std::shared_ptr<const juce::AudioBuffer<float>> audioBuffer,
         double audioSampleRate);
+    bool enqueueStage2Rebuild(ContentKey key);
 
     ContentRenderService();
     ~ContentRenderService();
