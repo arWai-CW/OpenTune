@@ -1,8 +1,7 @@
 /**
  * TimeStretchCache — clip-wide single-entry cache for Stage 2 time-stretch output.
  *
- * Canonical audio stored at 44.1kHz as shared_ptr<const vector<float>> (immutable).
- * Prepared audio stored at target playback rate (shared_ptr<const vector<float>>).
+ * Canonical and prepared PCM are immutable multichannel buffers.
  * Audio thread reads via direct integer-sample slice from prepared audio only.
  * Canonical slice provided for Stage2/export non-realtime reading.
  *
@@ -33,7 +32,7 @@ public:
         // Canonical Stage 2 output on the TimeGrid local output grid —
         // immutable after publish. firstCanonicalOutputSample is the explicit
         // output-grid index of canonicalAudio[0].
-        std::shared_ptr<const std::vector<float>> canonicalAudio;
+        std::shared_ptr<const juce::AudioBuffer<float>> canonicalAudio;
         uint64_t contentRevision = 0;
         uint64_t timeGridRevision = 0;
         double sampleRate = TimeCoordinate::kRenderSampleRate;
@@ -44,7 +43,7 @@ public:
         // firstPreparedOutputSample is the explicit playback-grid index of
         // preparedAudio[0]; when target rate == canonical rate the prepared
         // audio aliases the canonical audio.
-        std::shared_ptr<const std::vector<float>> preparedAudio;
+        std::shared_ptr<const juce::AudioBuffer<float>> preparedAudio;
         double preparedSampleRate = 0.0;
         int64_t firstPreparedOutputSample = 0;
     };
@@ -61,6 +60,14 @@ public:
                int64_t firstCanonicalOutputSample = 0);
 
     uint32_t beginBuild(ContentKey key);
+
+    void storeBuffer(ContentKey key,
+                     juce::AudioBuffer<float> audio,
+                     uint64_t contentRevision,
+                     uint64_t timeGridRevision,
+                     double sampleRate,
+                     uint32_t buildGeneration,
+                     int64_t firstCanonicalOutputSample = 0);
 
     int sliceForOutputRange(ContentKey key,
                             uint64_t contentRevision,

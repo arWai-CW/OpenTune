@@ -505,8 +505,13 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     menuBar_.setNoteNameMode(visualPreferences.noteNameMode);
     menuBar_.setShowUnvoicedFrames(visualPreferences.showUnvoicedFrames);
 
-    pianoRoll_.setExperimentalFeaturesEnabled(false);
-    parameterPanel_.setExperimentalFeaturesEnabled(false);
+#if JucePlugin_Enable_ARA
+    const bool enableTimeTool = processorRef_.isBoundToARA();
+#else
+    const bool enableTimeTool = false;
+#endif
+    pianoRoll_.setExperimentalFeaturesEnabled(enableTimeTool);
+    parameterPanel_.setExperimentalFeaturesEnabled(enableTimeTool);
     parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme));
     parameterPanel_.setActiveTool(static_cast<int>(pianoRoll_.getCurrentTool()));
 }

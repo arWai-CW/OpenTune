@@ -81,10 +81,8 @@ RegionAnchors makeRegionAnchors(const PlaybackReadSource& source,
     if (snapshot.timeGrid->isIdentity())
         return { startInModificationTime, localSourceSeconds };
 
-    // Non-identity content: both the fixed mapping and the automation anchor
-    // live in the Stage2 output domain, relative to the content origin.
-    const double outputSeconds = snapshot.timeGrid->tauForward(localSourceSeconds);
-    return { outputSeconds, outputSeconds };
+    // Host trims and splits are fixed positions on the rendered output.
+    return { localSourceSeconds, localSourceSeconds };
 }
 
 } // namespace
@@ -311,15 +309,6 @@ void OpenTunePlaybackRenderer::assignContinuityAndPlacements(
                 || predecessor.endInModificationTime != item.startInModificationTime)
                 continue;
 
-            // A warped source boundary can move within the shared Stage2
-            // output domain. Its output anchor must also meet the actual
-            // playback boundary under the predecessor's translation.
-            if (!item.source.contentSnapshot->timeGrid->isIdentity()
-                && predecessor.startInPlaybackTime
-                    + (item.placementAnchorSeconds - predecessor.placementAnchorSeconds)
-                    != item.startInPlaybackTime)
-                continue;
-
             item.continuityGroup = predecessor.continuityGroup;
             item.placement = PlaybackSampleGeometry::makeContiguousSlice(
                 predecessor.placement,
@@ -481,7 +470,30 @@ bool OpenTunePlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
                                           outputStartSeconds};
 
         playbackScratch_.clear();
-        const int copied = readPlaybackAudio(request, playbackScratch_, 0);
+        int copied = readPlaybackAudio(request, playbackScratch_, 0);
+        if (!item.source.contentSnapshot->timeGrid->isIdentity())
+        {
+            const int64_t sourceOrigin = PlaybackSampleGeometry::projectToSample(
+                item.source.contentSnapshot->sourceWindow.sourceStartSeconds * planSampleRate);
+            const auto readUnwarped = [&](int offset, int count) {
+                return readPlaybackAudio({item.source, address.preparedGlobalIndex + sourceOrigin + offset,
+                    planSampleRate, count, outputStartSeconds + offset / planSampleRate, true},
+                    playbackScratch_, offset);
+            };
+
+            // During rebuild, or outside the original edited window after a
+            // host trim is extended, keep unwarped audio instead of silence.
+            if (copied == 0)
+                copied = readUnwarped(0, samplesToCopy);
+            else
+            {
+                const int prefix = static_cast<int>(std::clamp<int64_t>(-address.preparedGlobalIndex, 0, copied));
+                if (prefix > 0)
+                    readUnwarped(0, prefix);
+                if (copied < samplesToCopy)
+                    copied += readUnwarped(copied, samplesToCopy - copied);
+            }
+        }
         const int mixSamples = juce::jmin(juce::jmin(copied, samplesToCopy),
                                           buffer.getNumSamples() - destinationStartSample);
         if (mixSamples <= 0)

@@ -207,6 +207,9 @@ void RenderCache::setCanonicalSource(
     std::lock_guard<std::mutex> transactionGuard(snapshotTransactionMutex_);
     {
         std::lock_guard<std::mutex> lg(preparedBuildMutex_);
+        if (canonicalBuffer_ == canonicalBuffer && firstCanonicalSample_ == firstCanonicalSample
+            && nativeSource_ == nativeSource)
+            return;
         canonicalBuffer_ = std::move(canonicalBuffer);
         firstCanonicalSample_ = firstCanonicalSample;
         nativeSource_ = std::move(nativeSource);

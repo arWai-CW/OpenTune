@@ -123,25 +123,25 @@ void AudioModification::applyPitchCurve(std::shared_ptr<PitchCurve> curve)
     ++content->contentRevision;
 }
 
+bool AudioModification::supportsTimeGrid(const TimeGridSnapshot& grid, const SourceWindow& sourceWindow)
+{
+    if (sourceWindow.sourcePersistentId.isEmpty() || !sourceWindow.isValid() || grid.empty()
+        || std::abs(grid.totalDurationSeconds() - sourceWindow.durationSeconds()) > 1e-6)
+        return false;
+
+    const auto& handles = grid.handles();
+    for (size_t i = 1; i < handles.size(); ++i) {
+        const double source = handles[i].source_seconds - handles[i - 1].source_seconds;
+        const double output = handles[i].output_seconds - handles[i - 1].output_seconds;
+        if (output < 0.5 * source - 1e-9 || output > 2.0 * source + 1e-9)
+            return false;
+    }
+    return true;
+}
+
 bool AudioModification::applyTimeGrid(std::shared_ptr<const TimeGridSnapshot> grid)
 {
-    if (!content.has_value())
-        return false;
-
-    const auto& sourceWindow = content->sourceWindow;
-    if (sourceWindow.sourcePersistentId.isEmpty() || !sourceWindow.isValid())
-        return false;
-
-    if (grid == nullptr)
-        return false;
-
-    const double gridDuration = grid->totalDurationSeconds();
-    const double sourceDuration = sourceWindow.durationSeconds();
-
-    if (!grid->isIdentity())
-        return false;
-
-    if (std::abs(gridDuration - sourceDuration) > 1e-6)
+    if (!content || !grid || !supportsTimeGrid(*grid, content->sourceWindow))
         return false;
 
     content->timeGrid = std::move(grid);

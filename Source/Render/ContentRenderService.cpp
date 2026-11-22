@@ -44,6 +44,26 @@ bool ContentRenderService::enqueueStage2RebuildWhenCanonicalSettled(
     return renderWorker_.enqueue(std::move(job));
 }
 
+bool ContentRenderService::enqueueStage2Rebuild(ContentKey key)
+{
+    PlaybackReadSource source;
+    if (!getPlaybackReadSource(key, source)
+        || !source.contentSnapshot || !source.contentSnapshot->timeGrid
+        || source.contentSnapshot->timeGrid->isIdentity()
+        || !source.canonicalBuffer || !source.renderCache
+        || source.renderCache->getChunkStats().hasActiveWork())
+        return false;
+
+    RenderJob job;
+    job.kind = RenderJob::Kind::Stage2Rebuild;
+    job.contentKey = key;
+    job.contentSnapshot = std::move(source.contentSnapshot);
+    job.contentRevision = job.contentSnapshot->contentRevision;
+    job.audioBuffer = std::move(source.canonicalBuffer);
+    job.audioSampleRate = source.canonicalSampleRate;
+    return renderWorker_.enqueue(std::move(job));
+}
+
 void ContentRenderService::publishPlaybackSource(ContentKey key, PlaybackReadSource source)
 {
     if (!key.isValid()

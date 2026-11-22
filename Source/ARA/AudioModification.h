@@ -60,6 +60,7 @@ public:
     // 替换唯一音量包络，并同步 Note::outputGainDb 派生值。
     void applyVolumeEnvelope(const AutomationLane& envelope);
     void applyPitchCurve(std::shared_ptr<PitchCurve> curve);
+    static bool supportsTimeGrid(const TimeGridSnapshot& grid, const SourceWindow& sourceWindow);
     bool applyTimeGrid(std::shared_ptr<const TimeGridSnapshot> grid);
     bool applyPitchShiftState(const PitchShiftEditState& state);
     void applyDetectedKey(const DetectedKey& key);
