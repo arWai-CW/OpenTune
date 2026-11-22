@@ -58,10 +58,7 @@ bool hasCompetingSyllablePhase(const std::vector<ProjectedOnset>& targets,
                               const std::vector<ProjectedOnset>& guides,
                               const std::vector<int>& matches, size_t matched)
 {
-    // A complete, ordered one-to-one match has no competing phase.
-    if (matched == targets.size() && matched == guides.size())
-        return false;
-
+    // Equal counts can hide an extra attack at one end and a missing one at the other.
     const bool fullCoverage = matched == std::min(targets.size(), guides.size());
     for (const int direction : {-1, 1}) {
         int run = 0;
@@ -80,7 +77,7 @@ bool hasCompetingSyllablePhase(const std::vector<ProjectedOnset>& targets,
             const double alternative = candidate.timeline - target.timeline;
             if (offset * alternative >= 0.0
                 || std::abs(alternative) > maxShift
-                || (fullCoverage && std::abs(alternative) > 1.5 * std::abs(offset))
+                || (fullCoverage && std::abs(alternative) > 2.5 * std::abs(offset))
                 || candidate.onset.highFrequencyDominant != target.onset.highFrequencyDominant) {
                 run = 0;
                 continue;

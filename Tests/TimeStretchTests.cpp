@@ -209,6 +209,20 @@ bool testDenseAttacksPreferClearlyCloserSyllables()
     return true;
 }
 
+bool testExtraLeadingAttackDoesNotHidePhaseAmbiguity()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(2.5);
+    const ContentTimelineProjection placement{0.0, 2.5, 0.0, 2.5};
+    std::vector<TimingOnset> target{{0.345, false}}, guide;
+    for (int i = 0; i < 7; ++i) {
+        const double onset = 0.4 + i * 0.18;
+        guide.push_back({onset, false});
+        if (i < 6)
+            target.push_back({onset + 0.125, false});
+    }
+    return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
+}
+
 bool testBlockedAnchorDoesNotDriftAway()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(2.5);
@@ -243,6 +257,10 @@ int main()
     }
     if (!testDenseAttacksPreferClearlyCloserSyllables()) {
         std::fputs("Reference timing rejected clearly closer attacks in a dense phrase\n", stderr);
+        return 1;
+    }
+    if (!testExtraLeadingAttackDoesNotHidePhaseAmbiguity()) {
+        std::fputs("An extra leading attack hid a competing timing phase\n", stderr);
         return 1;
     }
     if (!testBlockedAnchorDoesNotDriftAway()) {
