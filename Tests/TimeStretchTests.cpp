@@ -177,7 +177,7 @@ bool testPeriodicAttacksDoNotSlipByASyllable()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(3.0);
     const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
-    for (const auto& [spacing, delay] : {std::pair{0.24, 0.13}, std::pair{0.18, 0.125}}) {
+    for (const auto& [spacing, delay] : {std::pair{0.24, 0.13}, std::pair{0.18, 0.125}, std::pair{0.18, 0.162}}) {
         std::vector<TimingOnset> target, guide;
         for (int i = 0; i < 7; ++i) {
             const auto guideTime = 0.4 + i * spacing;

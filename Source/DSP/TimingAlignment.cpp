@@ -54,12 +54,14 @@ int uniqueMatch(const ProjectedOnset& target, const std::vector<ProjectedOnset>&
     return runnerUp - best >= ambiguityMargin ? bestIndex : -1;
 }
 
-bool hasSyllableSlip(const std::vector<ProjectedOnset>& targets,
-                     const std::vector<ProjectedOnset>& guides,
-                     const std::vector<int>& matches)
+bool hasCompetingSyllablePhase(const std::vector<ProjectedOnset>& targets,
+                              const std::vector<ProjectedOnset>& guides,
+                              const std::vector<int>& matches, size_t matched)
 {
     // Compare coherent alternatives across several attacks, not just the
     // nearest attack in isolation. A regular phrase can fit either phase.
+    const double minimumOffset = matched < std::min(targets.size(), guides.size())
+        ? 0.0 : 2.0 * ambiguityMargin;
     for (const int direction : {-1, 1}) {
         int run = 0;
         double firstOffset = 0.0;
@@ -75,7 +77,7 @@ bool hasSyllableSlip(const std::vector<ProjectedOnset>& targets,
             const auto& candidate = guides[static_cast<size_t>(neighbor)];
             const double offset = guides[static_cast<size_t>(guide)].timeline - target.timeline;
             const double alternative = candidate.timeline - target.timeline;
-            if (std::abs(offset) < 2.0 * ambiguityMargin || offset * alternative >= 0.0
+            if (std::abs(offset) < minimumOffset || offset * alternative >= 0.0
                 || std::abs(alternative) > maxShift
                 || candidate.onset.highFrequencyDominant != target.onset.highFrequencyDominant) {
                 run = 0;
@@ -220,7 +222,8 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         else
             ++matched;
     }
-    if (matched < 3 || matched * 2 < targets.size() || hasSyllableSlip(targets, guides, matches))
+    if (matched < 3 || matched * 2 < targets.size()
+        || hasCompetingSyllablePhase(targets, guides, matches, matched))
         return {};
 
     auto handles = targetGrid.handles();
