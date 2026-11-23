@@ -226,9 +226,9 @@ bool runMixAutoSnapScope()
     const auto snapDrawnNote = commands->planAutoSnap(
         snapshot, std::vector<std::size_t>{1}, ScaleSnapConfig{}, NoteGeneratorParams{}, true);
     using SnapStatus = ContentAutoSnapPlan::Status;
-    return expect(snapOuterNotes && snapOuterNotes->status == SnapStatus::NoChange,
+    return expect(snapOuterNotes.status == SnapStatus::NoChange,
                   "A drawing between snapped selections must not trigger a recompute")
-        && expect(snapDrawnNote && snapDrawnNote->status == SnapStatus::Commit,
+        && expect(snapDrawnNote.status == SnapStatus::Commit,
                   "A drawing on the selected note must be replaced by Snap");
 }
 
