@@ -603,6 +603,11 @@ cat > "${INSTALL_SCRIPT}" << 'INSTALLER_EOF'
 # ==============================================================================
 set -euo pipefail
 
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" != "1" ]; then
+    echo "❌ 此版本 OpenTune 仅支持 Apple Silicon Mac，未做任何更改。"
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="OpenTune"
 APP_SRC="${SCRIPT_DIR}/${APP_NAME}.app"
@@ -701,6 +706,11 @@ cat > "${INSTALL_SCRIPT_EN}" << 'INSTALLER_EN_EOF'
 # Double-click to install (Standalone + VST3 + AU plugins)
 # ==============================================================================
 set -euo pipefail
+
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" != "1" ]; then
+    echo "❌ This OpenTune build supports Apple Silicon Macs only. Nothing was changed."
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="OpenTune"
