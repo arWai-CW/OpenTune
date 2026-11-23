@@ -9,10 +9,16 @@
 namespace {
 using namespace OpenTune;
 
+double pitchErrorCents(float actual, float expected)
+{
+    if (actual <= 0.0f || expected <= 0.0f)
+        return 1.0e9;
+    return std::abs(1200.0 * std::log2(static_cast<double>(actual) / expected));
+}
+
 bool nearPitch(float actual, float expected, double toleranceCents = 0.5)
 {
-    return actual > 0.0f && expected > 0.0f
-        && std::abs(1200.0 * std::log2(static_cast<double>(actual) / expected)) <= toleranceCents;
+    return pitchErrorCents(actual, expected) <= toleranceCents;
 }
 
 bool segmentNearPitch(const PitchCorrectionSegment& segment, const std::vector<float>& expected,
@@ -173,6 +179,42 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
+bool testShortReferenceOrnamentDoesNotBecomeTargetOrnament()
+{
+    constexpr int frameCount = 100;
+    constexpr int ornamentStartFrame = 45;
+    constexpr int ornamentEndFrame = 51;
+    constexpr double frameSeconds = 0.01;
+    constexpr double baseHz = 200.0;
+    constexpr double referenceHz = 220.0;
+    const float ornamentHz = static_cast<float>(referenceHz * std::exp2(150.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount, static_cast<float>(referenceHz));
+    for (int i = ornamentStartFrame; i < ornamentEndFrame; ++i)
+        referenceF0[static_cast<size_t>(i)] = ornamentHz;
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(baseHz)), {}, 1, 100.0)};
+    target.notes = {{0.0, duration, static_cast<float>(baseHz)}};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    double maximumDeviationCents = 0.0;
+    for (const float hz : plan.segments[0].f0Data)
+        maximumDeviationCents = std::max(maximumDeviationCents,
+                                         pitchErrorCents(hz, static_cast<float>(referenceHz)));
+    return nearPitch(plan.segments[0].f0Data[10], static_cast<float>(referenceHz), 1.0)
+        && nearPitch(plan.segments[0].f0Data[89], static_cast<float>(referenceHz), 1.0)
+        && maximumDeviationCents < 45.0;
+}
+
 bool testLegatoNotesKeepIndependentReferenceOffsets()
 {
     constexpr int shortNoteFrames = 15;
@@ -312,6 +354,10 @@ int main()
     }
     if (!testConstantTargetMovesPitchCenterWithoutChangingRegister()) {
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
+        return 1;
+    }
+    if (!testShortReferenceOrnamentDoesNotBecomeTargetOrnament()) {
+        std::fputs("FAIL: Reference tuning smooths short reference ornaments into the pitch center\n", stderr);
         return 1;
     }
     if (!testLegatoNotesKeepIndependentReferenceOffsets()) {
