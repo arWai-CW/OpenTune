@@ -343,6 +343,11 @@ void TimelineOverviewComponent::onHeartbeatTickRegular(std::vector<TimelineConte
     repaint();
 }
 
+void TimelineOverviewComponent::navigateTo(double visibleStartSeconds)
+{
+    requestNavigation(visibleStartSeconds);
+}
+
 void TimelineOverviewComponent::requestNavigation(double visibleStartSeconds)
 {
     const auto geometry = regularCaptureMode_ ? calculateRegularGeometry() : calculateGeometry();

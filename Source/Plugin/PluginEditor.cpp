@@ -2352,7 +2352,8 @@ void OpenTuneAudioProcessorEditor::overviewNavigateRequested(double visibleStart
 void OpenTuneAudioProcessorEditor::overviewWheelMoved(const juce::MouseEvent& e,
                                                       const juce::MouseWheelDetails& wheel)
 {
-    pianoRoll_.handleOverviewWheel(e, wheel);
+    if (const auto target = pianoRoll_.handleOverviewWheel(e, wheel))
+        overviewStrip_.navigateTo(*target);
 }
 
 OpenTuneAudioProcessorEditor::PianoRollContentSync
