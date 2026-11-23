@@ -22,9 +22,19 @@ struct TimingAlignment
     std::size_t targetAttacks = 0;
     std::size_t referenceAttacks = 0;
     std::size_t matchedAttacks = 0;
+    bool affectsProtectedTiming = false;
 };
 
 inline constexpr double minimumTimingOverlapSeconds = 0.5;
+
+struct TimingOutputRange
+{
+    double begin;
+    double end;
+};
+
+bool preservesTimingAudioInRange(const TimeGridSnapshot& before, const TimeGridSnapshot& after,
+                                 TimingOutputRange range) noexcept;
 
 std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate);
 
@@ -40,6 +50,7 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
                                        const std::vector<TimingOnset>& guide,
                                        const TimeGridSnapshot& guideGrid,
                                        const ContentTimelineProjection& guidePlacement,
-                                       double strength);
+                                       double strength,
+                                       const std::vector<TimingOutputRange>& protectedRanges = {});
 
 } // namespace OpenTune

@@ -215,6 +215,8 @@ double TimeGridSnapshot::tauForward(double sourceSeconds) const noexcept
     // Anchor exactness: if sourceSeconds matches a handle exactly, return its output_seconds bit-exact
     if (sourceSeconds == left.source_seconds) return left.output_seconds;
     if (sourceSeconds == right.source_seconds) return right.output_seconds;
+    if (left.source_seconds == left.output_seconds && right.source_seconds == right.output_seconds)
+        return sourceSeconds;
 
     const double srcSpan = right.source_seconds - left.source_seconds;
     if (srcSpan <= 0.0) return left.output_seconds;
@@ -235,6 +237,8 @@ double TimeGridSnapshot::tauInverse(double outputSeconds) const noexcept
 
     if (outputSeconds == left.output_seconds) return left.source_seconds;
     if (outputSeconds == right.output_seconds) return right.source_seconds;
+    if (left.source_seconds == left.output_seconds && right.source_seconds == right.output_seconds)
+        return outputSeconds;
 
     const double outSpan = right.output_seconds - left.output_seconds;
     if (outSpan <= 0.0) return left.source_seconds;
