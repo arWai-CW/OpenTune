@@ -36,8 +36,8 @@ EditableContentSnapshot makeSnapshot()
     return snapshot;
 }
 
-// 旧 ToolHandler 拖拽循环语义参照：baseline 每次取 evalAt(note.start) + delta。
-AutomationLane legacyDragPreview(const AutomationLane& baseline,
+// Read each target from the original baseline, not the preceding edit.
+AutomationLane referenceDragPreview(const AutomationLane& baseline,
                                  const std::vector<Note>& notes,
                                  const std::vector<int>& indices,
                                  float deltaGainDb)
@@ -46,7 +46,7 @@ AutomationLane legacyDragPreview(const AutomationLane& baseline,
     for (const int index : indices) {
         const auto& note = notes[static_cast<size_t>(index)];
         envelope.setRegionGain(note.startTime, note.endTime,
-                               baseline.evalAt(note.startTime) + deltaGainDb);
+                               baseline.evalAt((note.startTime + note.endTime) * 0.5) + deltaGainDb);
     }
     return envelope;
 }
@@ -56,7 +56,7 @@ bool regionGainNear(const AutomationLane& lane, double time, float expectedDb)
     return std::abs(lane.evalAt(time) - expectedDb) <= 1.0e-3f;
 }
 
-bool checkDeltaMatchesLegacySemantics()
+bool checkDeltaUsesNoteMidpoints()
 {
     const auto snapshot = makeSnapshot();
     const auto plan = planVolumeEnvelopeRegionDeltaEdit(snapshot, { 0, 1, 2 }, 7, 2.5f);
@@ -64,19 +64,17 @@ bool checkDeltaMatchesLegacySemantics()
         return false;
     if (!(plan.beforeEnvelope == snapshot.volumeEnvelope))
         return false;
-    if (!(plan.afterEnvelope == legacyDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 0, 1, 2 }, 2.5f)))
+    if (!(plan.afterEnvelope == referenceDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 0, 1, 2 }, 2.5f)))
         return false;
 
-    // 重叠音符 0/1：每 region 的 gain 仍取 baseline evalAt(start)，不以前一变更为基准。
-    // note0: start 0.2 → baseline -2.4 + 2.5 = 0.1；note1: start 0.5 → baseline -1.5 + 2.5 = 1.0；
-    // note2: start 1.2 → baseline 0.6 + 2.5 = 3.1。
+    // Overlapping notes use their own midpoints on the original baseline.
     const auto& after = plan.afterEnvelope;
-    if (!regionGainNear(after, 0.2, 0.1f)
-        || !regionGainNear(after, 0.35, 0.1f)
-        || !regionGainNear(after, 0.5, 1.0f)
-        || !regionGainNear(after, 0.9, 1.0f)
-        || !regionGainNear(after, 1.2, 3.1f)
-        || !regionGainNear(after, 1.4, 3.1f))
+    if (!regionGainNear(after, 0.2, 0.7f)
+        || !regionGainNear(after, 0.35, 0.7f)
+        || !regionGainNear(after, 0.5, 1.75f)
+        || !regionGainNear(after, 0.9, 1.75f)
+        || !regionGainNear(after, 1.2, 3.55f)
+        || !regionGainNear(after, 1.4, 3.55f))
         return false;
 
     // 区域外回到 baseline。
@@ -92,13 +90,13 @@ bool checkOverlapIterationOrder()
     // 重叠区域由后处理的 note 覆盖；每次目标 gain 仍取同一 baseline。
     const auto forward = planVolumeEnvelopeRegionDeltaEdit(snapshot, { 0, 1 }, 7, -1.0f);
     const auto reverse = planVolumeEnvelopeRegionDeltaEdit(snapshot, { 1, 0 }, 7, -1.0f);
-    const auto forwardLegacy = legacyDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 0, 1 }, -1.0f);
-    const auto reverseLegacy = legacyDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 1, 0 }, -1.0f);
+    const auto forwardExpected = referenceDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 0, 1 }, -1.0f);
+    const auto reverseExpected = referenceDragPreview(snapshot.volumeEnvelope, snapshot.notes, { 1, 0 }, -1.0f);
     if (forward.status != VolumeEnvelopeRegionEditStatus::Ready
         || reverse.status != VolumeEnvelopeRegionEditStatus::Ready)
         return false;
-    return forward.afterEnvelope == forwardLegacy
-        && reverse.afterEnvelope == reverseLegacy
+    return forward.afterEnvelope == forwardExpected
+        && reverse.afterEnvelope == reverseExpected
         && !(forward.afterEnvelope == reverse.afterEnvelope);
 }
 
@@ -203,7 +201,7 @@ bool checkUndoRedoUsesBoundContentKey()
 
 int main()
 {
-    if (!checkDeltaMatchesLegacySemantics()) {
+    if (!checkDeltaUsesNoteMidpoints()) {
         std::cerr << "Volume region delta semantics check failed\n";
         return 1;
     }

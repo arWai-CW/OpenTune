@@ -44,6 +44,8 @@ void PianoRollEditAction::undo()
         commands_->commitNotesAndSegmentsWithOriginalF0(contentKey_, beforeNotes_, beforeSegments_, affectedRanges_.front(), beforeOriginalF0_, beforeErasedRanges_);
     else
         commands_->commitNotesAndSegmentsInRanges(contentKey_, beforeNotes_, beforeSegments_, affectedRanges_);
+    if (volumeEnvelopePatch_)
+        commands_->commitVolumeEnvelope(contentKey_, volumeEnvelopePatch_->first);
 }
 
 void PianoRollEditAction::redo()
@@ -52,6 +54,8 @@ void PianoRollEditAction::redo()
         commands_->commitNotesAndSegmentsWithOriginalF0(contentKey_, afterNotes_, afterSegments_, affectedRanges_.front(), afterOriginalF0_, afterErasedRanges_);
     else
         commands_->commitNotesAndSegmentsInRanges(contentKey_, afterNotes_, afterSegments_, affectedRanges_);
+    if (volumeEnvelopePatch_)
+        commands_->commitVolumeEnvelope(contentKey_, volumeEnvelopePatch_->second);
 }
 
 } // namespace OpenTune

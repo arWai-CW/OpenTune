@@ -787,6 +787,8 @@ public:
         const std::optional<EqSettings>& settings,
         juce::String undoDescription);
     // Message-thread transaction for ordinary Piano Roll selected-note deletion.
+    ContentCommitSnapshot restoreSelectedPianoRollNotes(
+        ContentKey key, const std::vector<int>& selectedIndices, uint64_t expectedNotesRevision);
     SelectedNoteDeleteResult deleteSelectedPianoRollNotes(
         ContentKey key,
         const std::vector<int>& selectedNoteIndices,

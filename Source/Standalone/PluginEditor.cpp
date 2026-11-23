@@ -673,6 +673,8 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     // Undo/Redo 菜单项实时反映撤销栈状态
     menuBar_.canUndoQuery = [this]() { return processorRef_.getUndoManager().canUndo(); };
     menuBar_.canRedoQuery = [this]() { return processorRef_.getUndoManager().canRedo(); };
+    menuBar_.canRestoreSelectedNotesQuery = [this]() { return pianoRoll_.canRestoreSelectedNotes(); };
+    menuBar_.onRestoreSelectedNotes = [this]() { pianoRoll_.restoreSelectedNotes(); };
 
 #if JUCE_MAC
     // Populate the macOS system menu bar with File/Edit/View menus.

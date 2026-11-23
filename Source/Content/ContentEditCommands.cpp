@@ -1,4 +1,5 @@
 #include "ContentEditCommands.h"
+#include "EditableContentSnapshot.h"
 #include "../Utils/PitchUtils.h"
 #include "../Utils/TuningConfig.h"
 #include <algorithm>
@@ -6,6 +7,98 @@
 #include <optional>
 
 namespace OpenTune {
+
+SelectedNoteResetPlan planSelectedNoteReset(const EditableContentSnapshot& snapshot,
+                                            const std::vector<int>& selectedIndices,
+                                            uint64_t expectedNotesRevision)
+{
+    SelectedNoteResetPlan plan;
+    if (snapshot.notesRevision != expectedNotesRevision || selectedIndices.empty()
+        || !snapshot.hasUsableOriginalF0())
+        return plan;
+
+    auto indices = selectedIndices;
+    std::sort(indices.begin(), indices.end());
+    if (indices.front() < 0 || static_cast<size_t>(indices.back()) >= snapshot.notes.size())
+        return plan;
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+
+    const auto& curve = *snapshot.pitchCurve;
+    const F0Timeline timeline(curve.getHopSize(), curve.getSampleRate(), static_cast<int>(curve.size()));
+    const auto firstFrameAtOrAfter = [&timeline](double seconds) {
+        const int nearest = timeline.nearestFrameBoundary(seconds);
+        return nearest < timeline.endFrameExclusive() && timeline.timeAtFrame(nearest) + 1e-9 < seconds
+            ? nearest + 1 : nearest;
+    };
+
+    struct GainRange {
+        double startSeconds;
+        double endSeconds;
+        double rampSeconds;
+    };
+    std::vector<GainRange> gainRanges;
+    const Note defaults;
+    for (const int index : indices) {
+        const auto& note = snapshot.notes[static_cast<size_t>(index)];
+        if (!std::isfinite(note.startTime) || !std::isfinite(note.endTime) || note.endTime <= note.startTime)
+            return {};
+
+        const double ramp = std::min(0.005, (note.endTime - note.startTime) * 0.25);
+        if (!gainRanges.empty() && gainRanges.back().endSeconds >= note.startTime) {
+            gainRanges.back().endSeconds = std::max(gainRanges.back().endSeconds, note.endTime);
+            gainRanges.back().rampSeconds = std::min(gainRanges.back().rampSeconds, ramp);
+        } else {
+            gainRanges.push_back({note.startTime, note.endTime, ramp});
+        }
+
+        const int start = firstFrameAtOrAfter(note.startTime);
+        const int end = firstFrameAtOrAfter(note.endTime);
+        if (end <= start)
+            continue;
+        const float sungPitch = note.originalPitch > 0.0f ? note.originalPitch : note.pitch;
+        if (note.pitch == sungPitch && note.pitchOffset == 0.0f && note.pitchDriftScale == defaults.pitchDriftScale
+            && note.retuneSpeed == defaults.retuneSpeed && note.vibratoDepth == defaults.vibratoDepth
+            && note.vibratoRate == defaults.vibratoRate && !note.eq
+            && !curve.hasCorrectionInRange(start, end))
+            continue;
+
+        if (plan.notes.empty())
+            plan.notes = snapshot.notes;
+        auto& reset = plan.notes[static_cast<size_t>(index)];
+        reset.pitch = sungPitch;
+        reset.pitchOffset = 0.0f;
+        reset.pitchDriftScale = defaults.pitchDriftScale;
+        reset.retuneSpeed = defaults.retuneSpeed;
+        reset.vibratoDepth = defaults.vibratoDepth;
+        reset.vibratoRate = defaults.vibratoRate;
+        reset.eq.reset();
+        reset.dirty = true;
+        if (!plan.pitchRanges.empty() && plan.pitchRanges.back().endFrameExclusive >= start)
+            plan.pitchRanges.back().endFrameExclusive = std::max(plan.pitchRanges.back().endFrameExclusive, end);
+        else
+            plan.pitchRanges.push_back({start, end});
+    }
+
+    auto envelope = snapshot.volumeEnvelope;
+    if (!envelope.empty()) {
+        for (const auto& range : gainRanges) {
+            const auto& points = envelope.points();
+            const auto first = std::upper_bound(points.begin(), points.end(), range.startSeconds,
+                [](double time, const AutomationPoint& point) { return time < point.timeSeconds; });
+            const auto last = std::lower_bound(first, points.end(), range.endSeconds,
+                [](const AutomationPoint& point, double time) { return point.timeSeconds < time; });
+            if (envelope.evalAt(range.startSeconds) == 0.0f && envelope.evalAt(range.endSeconds) == 0.0f
+                && std::all_of(first, last, [](const auto& point) { return point.gainDb == 0.0f; }))
+                continue;
+            // Preserve neighboring gain and leave every selected note's midpoint on the plateau.
+            const double ramp = range.rampSeconds;
+            envelope.setRegionGain(range.startSeconds + ramp, range.endSeconds - ramp, 0.0f, ramp);
+        }
+        if (!(envelope == snapshot.volumeEnvelope))
+            plan.volumeEnvelope = std::move(envelope);
+    }
+    return plan;
+}
 
 ContentNoteValueEditPlan ContentEditCommands::planNoteValueEdit(
     const std::vector<Note>& notes,
