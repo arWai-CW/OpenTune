@@ -237,6 +237,7 @@ private:
     void syncTrackColorsToPanel();
     void overviewNavigateRequested(double visibleStartSeconds,
                                    double pixelsPerSecond) override;
+    void overviewWheelMoved(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     void applyThemeToEditor(ThemeId themeId);
     RenderStatusSnapshot getRenderStatusSnapshot() const;
     void syncParameterPanelFromSelection(bool forceClipParameterProjection = false);

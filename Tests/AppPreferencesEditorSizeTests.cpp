@@ -381,7 +381,7 @@ bool testLegacyShortcutMigration()
         juce::PropertiesFile migratedSettings(propertiesOptions);
         OpenTune::KeyShortcutConfig::ShortcutBinding persistedHorizontalZoom;
         OpenTune::KeyShortcutConfig::ShortcutBinding persistedVerticalZoomIn;
-        persistedMigration = migratedSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 4  // 4: F3/F5 for modulation/drift
+        persistedMigration = migratedSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 5  // 5: Shift+Alt wheel zoom
             && OpenTune::KeyShortcutConfig::parseShortcutBinding(
                 migratedSettings.getValue("shared.shortcuts.zoomHorizontalIn", {}),
                 persistedHorizontalZoom)
@@ -513,7 +513,7 @@ bool testMacShortcutDefaultMigration()
         OpenTune::KeyShortcutConfig::ShortcutBinding verticalZoomIn;
         OpenTune::KeyShortcutConfig::ShortcutBinding verticalZoomOut;
         OpenTune::KeyShortcutConfig::ShortcutBinding customSelect;
-        migrated = migratedSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 4  // 4: F3/F5 for modulation/drift
+        migrated = migratedSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 5  // 5: Shift+Alt wheel zoom
             && OpenTune::KeyShortcutConfig::parseShortcutBinding(
                 migratedSettings.getValue("shared.shortcuts.delete", {}), deleteBindings)
             && OpenTune::KeyShortcutConfig::parseShortcutBinding(
@@ -558,11 +558,15 @@ bool testMacShortcutDefaultMigration()
             && hasExactly(playFromStart, { { juce::KeyPress::returnKey, transportModifiers } })
             && hasExactly(horizontalZoomIn, {
                 { juce::KeyPress::rightKey, transportModifiers },
-                { OpenTune::KeyShortcutConfig::BindingType::WheelUp, juce::ModifierKeys::ctrlModifier }
+                { OpenTune::KeyShortcutConfig::BindingType::WheelUp, juce::ModifierKeys::ctrlModifier },
+                { OpenTune::KeyShortcutConfig::BindingType::WheelUp,
+                  juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier }
             })
             && hasExactly(horizontalZoomOut, {
                 { juce::KeyPress::leftKey, transportModifiers },
-                { OpenTune::KeyShortcutConfig::BindingType::WheelDown, juce::ModifierKeys::ctrlModifier }
+                { OpenTune::KeyShortcutConfig::BindingType::WheelDown, juce::ModifierKeys::ctrlModifier },
+                { OpenTune::KeyShortcutConfig::BindingType::WheelDown,
+                  juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier }
             })
             && hasExactly(verticalZoomIn, {
                 { juce::KeyPress::upKey, transportModifiers },
@@ -587,12 +591,16 @@ bool testMacShortcutDefaultMigration()
             && hasExactly(horizontalZoomIn, {
                 { juce::KeyPress::rightKey,
                   juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier },
-                { OpenTune::KeyShortcutConfig::BindingType::WheelUp, juce::ModifierKeys::ctrlModifier }
+                { OpenTune::KeyShortcutConfig::BindingType::WheelUp, juce::ModifierKeys::ctrlModifier },
+                { OpenTune::KeyShortcutConfig::BindingType::WheelUp,
+                  juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier }
             })
             && hasExactly(horizontalZoomOut, {
                 { juce::KeyPress::leftKey,
                   juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier },
-                { OpenTune::KeyShortcutConfig::BindingType::WheelDown, juce::ModifierKeys::ctrlModifier }
+                { OpenTune::KeyShortcutConfig::BindingType::WheelDown, juce::ModifierKeys::ctrlModifier },
+                { OpenTune::KeyShortcutConfig::BindingType::WheelDown,
+                  juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier }
             })
             && hasExactly(verticalZoomIn, {
                 { juce::KeyPress::upKey,
@@ -645,7 +653,7 @@ bool testMacShortcutDefaultMigration()
         juce::PropertiesFile restoredSettings(propertiesOptions);
         OpenTune::KeyShortcutConfig::ShortcutBinding playPause;
         OpenTune::KeyShortcutConfig::ShortcutBinding stop;
-        restoredSpacePlay = restoredSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 4
+        restoredSpacePlay = restoredSettings.getIntValue("shared.shortcuts.schemaVersion", 0) == 5
             && OpenTune::KeyShortcutConfig::parseShortcutBinding(
                 restoredSettings.getValue("shared.shortcuts.playPause", {}), playPause)
             && playPause.bindings.size() == 1
@@ -657,6 +665,56 @@ bool testMacShortcutDefaultMigration()
     }
     migrated = migrated && restoredSpacePlay;
 #endif
+    temporaryDirectory.deleteRecursively();
+    return migrated;
+}
+
+bool testAltShiftWheelZoomShortcut()
+{
+    using namespace OpenTune::KeyShortcutConfig;
+    const auto altShift = juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier;
+    const KeyBinding zoomInWheel(BindingType::WheelUp, altShift);
+    const KeyBinding zoomOutWheel(BindingType::WheelDown, altShift);
+    const auto defaults = KeyShortcutSettings::getDefault();
+    if (findShortcutForBinding(defaults, zoomInWheel, kPianoRollOpenTuneScope) != ShortcutId::ZoomHorizontalIn
+        || findShortcutForBinding(defaults, zoomOutWheel, kPianoRollOpenDyneScope) != ShortcutId::ZoomHorizontalOut)
+        return false;
+
+    const auto temporaryDirectory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("OpenTuneAltShiftWheelMigration-" + juce::Uuid().toString());
+    OpenTune::AppPreferences::StorageOptions storageOptions;
+    storageOptions.settingsDirectory = temporaryDirectory;
+    temporaryDirectory.createDirectory();
+
+    auto settingsFile = temporaryDirectory.getChildFile(storageOptions.fileName);
+    juce::PropertiesFile::Options propertiesOptions;
+    propertiesOptions.applicationName = settingsFile.getFileNameWithoutExtension();
+    propertiesOptions.filenameSuffix = settingsFile.getFileExtension();
+    propertiesOptions.folderName = temporaryDirectory.getFullPathName();
+    propertiesOptions.storageFormat = juce::PropertiesFile::storeAsXML;
+    propertiesOptions.millisecondsBeforeSaving = 0;
+    const KeyBinding ctrlWheelUp(BindingType::WheelUp, juce::ModifierKeys::ctrlModifier);
+    const KeyBinding ctrlWheelDown(BindingType::WheelDown, juce::ModifierKeys::ctrlModifier);
+    bool saved = false;
+    {
+        juce::PropertiesFile storedSettings(propertiesOptions);
+        storedSettings.setValue("shared.shortcuts.schemaVersion", 4);
+        storedSettings.setValue("shared.shortcuts.zoomHorizontalIn", toCanonicalString(ctrlWheelUp));
+        storedSettings.setValue("shared.shortcuts.zoomHorizontalOut", toCanonicalString(ctrlWheelDown));
+        storedSettings.setValue("shared.shortcuts.scrollHorizontalRight", toCanonicalString(zoomOutWheel));
+        saved = storedSettings.save();
+    }
+
+    bool migrated = false;
+    if (saved) {
+        OpenTune::AppPreferences preferences(storageOptions);
+        const auto shortcuts = preferences.getState().shared.shortcuts;
+        const auto& zoomIn = getShortcutBinding(shortcuts, ShortcutId::ZoomHorizontalIn);
+        const auto& zoomOut = getShortcutBinding(shortcuts, ShortcutId::ZoomHorizontalOut);
+        migrated = zoomIn.hasBinding(ctrlWheelUp) && zoomIn.hasBinding(zoomInWheel)
+            && zoomOut.hasBinding(ctrlWheelDown) && !zoomOut.hasBinding(zoomOutWheel)
+            && getShortcutBinding(shortcuts, ShortcutId::ScrollHorizontalRight).hasBinding(zoomOutWheel);
+    }
     temporaryDirectory.deleteRecursively();
     return migrated;
 }
@@ -692,6 +750,11 @@ int main()
 
     if (!testShortcutScopesAndConflicts()) {
         std::fputs("FAIL: shortcut scopes and conflicts\n", stderr);
+        return 1;
+    }
+
+    if (!testAltShiftWheelZoomShortcut()) {
+        std::fputs("FAIL: Shift+Alt wheel horizontal zoom shortcut\n", stderr);
         return 1;
     }
 
