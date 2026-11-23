@@ -328,12 +328,7 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     }
 
 #if JucePlugin_Enable_ARA
-    if (auto* dc = processorRef_.getDocumentController()) {
-        dc->presentationChanges().addChangeListener(this);
-        if (auto* view = getARAEditorView())
-            view->addListener(this);
-        dc->presentationChanges().sendChangeMessage();
-    }
+    attachAraPresentation();
 #endif
     grabKeyboardFocus();
 
@@ -355,7 +350,7 @@ OpenTuneAudioProcessorEditor::~OpenTuneAudioProcessorEditor()
 {
 #if JucePlugin_Enable_ARA
     referenceEditor_.reset();
-    if (auto* dc = processorRef_.getDocumentController()) {
+    if (auto* dc = processorRef_.getDocumentController(); araPresentationAttached_ && dc != nullptr) {
         dc->presentationChanges().removeChangeListener(this);
         if (auto* view = getARAEditorView())
             view->removeListener(this);
@@ -591,6 +586,7 @@ void OpenTuneAudioProcessorEditor::maybeStartOnboarding()
 void OpenTuneAudioProcessorEditor::timerCallback()
 {
 #if JucePlugin_Enable_ARA
+    attachAraPresentation();
     if (processorRef_.isBoundToARA())
         processorRef_.collectPlaybackSnapshots();
     const bool hasAraController = processorRef_.getDocumentController() != nullptr;
@@ -905,6 +901,24 @@ void OpenTuneAudioProcessorEditor::showOriginalF0Failures(std::deque<OriginalF0F
 }
 
 #if JucePlugin_Enable_ARA
+void OpenTuneAudioProcessorEditor::attachAraPresentation()
+{
+    if (araPresentationAttached_)
+        return;
+
+    auto* dc = processorRef_.getDocumentController();
+    if (dc == nullptr)
+        return;
+
+    araPresentationAttached_ = true;
+    dc->presentationChanges().addChangeListener(this);
+    if (auto* view = getARAEditorView()) {
+        view->setEditorOpen(true);
+        view->addListener(this);
+    }
+    dc->presentationChanges().sendChangeMessage();
+}
+
 void OpenTuneAudioProcessorEditor::onNewSelection(const juce::ARAViewSelection&)
 {
     if (auto* dc = processorRef_.getDocumentController())
