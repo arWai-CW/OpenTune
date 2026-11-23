@@ -194,9 +194,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                     safeEditor->tuneToPitchReference();
             });
             menu.addItem(LOC(kAlignTimingToReference), canAlignTimingToReference(), false, [safeEditor] {
-                    if (safeEditor != nullptr)
-                        safeEditor->alignTimingToPitchReference();
-                });
+                if (safeEditor != nullptr)
+                    safeEditor->alignTimingToPitchReference();
+            });
+            menu.addItem(LOC_RAW("Restore Original Clip Timing"), true, false, [safeEditor] {
+                if (safeEditor != nullptr)
+                    safeEditor->restoreOriginalClipTiming();
+            });
         }
 #endif
         // Accessibility: open with the first item highlighted, so the first Enter works
@@ -1046,6 +1050,18 @@ juce::String referenceTrackName(const juce::ARARegionSequence& track)
     const auto name = juce::String::fromUTF8(track.getName());
     return name.isEmpty() ? LOC(kUnnamedReferenceTrack) : name;
 }
+
+std::vector<TimingOutputRange> protectedTimingRanges(
+    const juce::ARAPlaybackRegion& placement, double sourceOrigin)
+{
+    std::vector<TimingOutputRange> ranges;
+    for (const auto* sibling : placement.getAudioModification()->getPlaybackRegions()) {
+        if (sibling != &placement)
+            ranges.push_back({sibling->getStartInAudioModificationTime() - sourceOrigin,
+                              sibling->getEndInAudioModificationTime() - sourceOrigin});
+    }
+    return ranges;
+}
 }
 
 juce::PopupMenu OpenTuneAudioProcessorEditor::createPitchReferenceMenu()
@@ -1156,6 +1172,43 @@ void OpenTuneAudioProcessorEditor::tuneToPitchReference()
     }
 }
 
+void OpenTuneAudioProcessorEditor::restoreOriginalClipTiming()
+{
+    const auto* dc = processorRef_.getDocumentController();
+    if (dc == nullptr)
+        return;
+    parameterPanel_.commitPendingEdits();
+    const auto regions = dc->getPlaybackRegionProjectionsFor(resolveContentScopeRegions());
+    const auto focused = std::find_if(regions.begin(), regions.end(), [](const auto& region) {
+        return region.contentKey.isValid() && region.contentProjection.isValid();
+    });
+    const auto title = LOC_RAW("Restore Original Clip Timing");
+    const auto current = focused != regions.end() && focused->isPlaybackRenderable()
+        ? dc->readContentSnapshot(focused->contentKey) : nullptr;
+    if (!current || !current->timeGrid) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title, LOC_RAW("Select a clip with loaded audio."));
+        return;
+    }
+
+    const auto& projection = focused->contentProjection;
+    const TimingOutputRange range{projection.contentStartSeconds,
+                                  projection.contentStartSeconds + projection.contentDurationSeconds};
+    if (current->timeGrid->isIdentityInOutputRange(range.begin, range.end)) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title, LOC_RAW("This clip is already at its original timing."));
+        return;
+    }
+    const auto restored = restoreOriginalTimingInRange(*current->timeGrid, range,
+        protectedTimingRanges(*focused->playbackRegion, current->sourceWindow.sourceStartSeconds));
+    if (!restored || !processorRef_.applyTimeGridEdit(focused->contentKey, current->timeGrid, restored, title)) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title,
+            LOC_RAW("This clip's timing cannot be restored without changing audio outside it or in another clip."));
+        return;
+    }
+
+    pianoRoll_.onTimeGridRevisionChanged();
+    a11y::announce(pianoRoll_, title);
+}
+
 void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
 {
     auto* dc = processorRef_.getDocumentController();
@@ -1179,17 +1232,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     };
 
     const auto protectedRangesFor = [](const Input& input) {
-        std::vector<TimingOutputRange> ranges;
-        const auto* placement = input.region.playbackRegion;
-        const auto* modification = placement->getAudioModification();
-        const auto origin = input.snapshot->sourceWindow.sourceStartSeconds;
-        // Siblings can be anywhere on the DAW timeline but still play the same samples.
-        for (const auto* sibling : modification->getPlaybackRegions()) {
-            if (sibling != placement)
-                ranges.push_back({sibling->getStartInAudioModificationTime() - origin,
-                                  sibling->getEndInAudioModificationTime() - origin});
-        }
-        return ranges;
+        return protectedTimingRanges(*input.region.playbackRegion, input.snapshot->sourceWindow.sourceStartSeconds);
     };
     const auto makePlan = [](const Target& target, const Input& guide, const TimeGridSnapshot& grid,
                              double strength, const std::vector<TimingOutputRange>& protectedRanges) {
@@ -2064,6 +2107,7 @@ void OpenTuneAudioProcessorEditor::undoRequested()
     if (auto* action = processorRef_.getUndoManager().undo()) {
         syncContentProjectionToPianoRoll();
         pianoRoll_.onNotesRevisionChanged();
+        pianoRoll_.onTimeGridRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Undone: {0}"), action->getDescription()));
     } else {
         a11y::announce(pianoRoll_, processorRef_.getUndoManager().canUndo()
@@ -2078,6 +2122,7 @@ void OpenTuneAudioProcessorEditor::redoRequested()
     if (auto* action = processorRef_.getUndoManager().redo()) {
         syncContentProjectionToPianoRoll();
         pianoRoll_.onNotesRevisionChanged();
+        pianoRoll_.onTimeGridRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Redone: {0}"), action->getDescription()));
     } else {
         a11y::announce(pianoRoll_, processorRef_.getUndoManager().canRedo()

@@ -179,6 +179,7 @@ private:
     void setPitchReferenceTrack(juce::ARARegionSequence* track);
     void tuneToPitchReference();
     void alignTimingToPitchReference();
+    void restoreOriginalClipTiming();
     void didUpdateRegionSequenceProperties(juce::ARARegionSequence* track) override;
     void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
     juce::TextButton referenceTrackButton_, tuneToReferenceButton_, alignTimingButton_;

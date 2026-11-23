@@ -36,6 +36,10 @@ struct TimingOutputRange
 bool preservesTimingAudioInRange(const TimeGridSnapshot& before, const TimeGridSnapshot& after,
                                  TimingOutputRange range) noexcept;
 
+std::shared_ptr<const TimeGridSnapshot> restoreOriginalTimingInRange(
+    const TimeGridSnapshot& grid, TimingOutputRange range,
+    const std::vector<TimingOutputRange>& protectedRanges = {});
+
 std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate);
 
 std::vector<TimingOnset> detectTimingOnsetsInOverlap(const juce::AudioBuffer<float>& audio,
