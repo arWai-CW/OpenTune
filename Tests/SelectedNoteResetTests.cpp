@@ -1,6 +1,7 @@
 #include "ContentEditCommandsStub.h"
 #include "Content/ContentPatchGeometry.h"
 #include "Content/EditableContentSnapshot.h"
+#include "Utils/VolumeEnvelopeRegionEdit.h"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -157,10 +158,29 @@ void checkSelectionGuards()
     require(unanalyzed.pitchRanges.empty() && !unanalyzed.volumeEnvelope, "reset accepted unanalyzed audio");
 }
 
+void checkGainEditAfterReset()
+{
+    auto snapshot = makeSnapshot();
+    snapshot.volumeEnvelope = AutomationLane::fromSnapshot({{0.0, 6.0f}, {0.19, 6.0f}});
+    snapshot.notes[0].startTime = 0.052;
+    auto reset = planSelectedNoteReset(snapshot, {0, 1}, 7);
+    require(reset.volumeEnvelope.has_value(), "selected gain was not reset");
+    require(std::abs(reset.volumeEnvelope->evalAt(0.1) - 6.0f) < 1e-5f,
+            "reset changed the gain at the next note's onset");
+
+    snapshot.volumeEnvelope = *reset.volumeEnvelope;
+    const auto adjustedFirst = planVolumeEnvelopeRegionDeltaEdit(snapshot, {0}, 7, 1.0f);
+    const auto adjustedSecond = planVolumeEnvelopeRegionDeltaEdit(snapshot, {1}, 7, 1.0f);
+    require(std::abs(adjustedFirst.afterEnvelope.evalAt(0.053) - 1.0f) < 1e-5f
+            && std::abs(adjustedSecond.afterEnvelope.evalAt(0.075) - 1.0f) < 1e-5f,
+            "a volume adjustment after reset brought back the old gain");
+}
+
 } // namespace
 
 int main()
 {
     checkReset();
     checkSelectionGuards();
+    checkGainEditAfterReset();
 }

@@ -1894,6 +1894,7 @@ if(OPENTUNE_BUILD_TESTS)
         Source/Utils/PitchCurve.cpp
         Source/Utils/TimeGrid.cpp
         Source/Utils/UndoManager.cpp
+        Source/Utils/VolumeEnvelopeRegionEdit.cpp
     )
     target_include_directories(OpenTuneSelectedNoteResetTests PRIVATE Source)
     target_link_libraries(OpenTuneSelectedNoteResetTests PRIVATE juce::juce_audio_basics)

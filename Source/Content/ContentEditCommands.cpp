@@ -31,17 +31,25 @@ SelectedNoteResetPlan planSelectedNoteReset(const EditableContentSnapshot& snaps
             ? nearest + 1 : nearest;
     };
 
-    std::vector<NoteRangeSeconds> gainRanges;
+    struct GainRange {
+        double startSeconds;
+        double endSeconds;
+        double rampSeconds;
+    };
+    std::vector<GainRange> gainRanges;
     const Note defaults;
     for (const int index : indices) {
         const auto& note = snapshot.notes[static_cast<size_t>(index)];
         if (!std::isfinite(note.startTime) || !std::isfinite(note.endTime) || note.endTime <= note.startTime)
             return {};
 
-        if (!gainRanges.empty() && gainRanges.back().endSeconds >= note.startTime)
+        const double ramp = std::min(0.005, (note.endTime - note.startTime) * 0.25);
+        if (!gainRanges.empty() && gainRanges.back().endSeconds >= note.startTime) {
             gainRanges.back().endSeconds = std::max(gainRanges.back().endSeconds, note.endTime);
-        else
-            gainRanges.push_back({note.startTime, note.endTime});
+            gainRanges.back().rampSeconds = std::min(gainRanges.back().rampSeconds, ramp);
+        } else {
+            gainRanges.push_back({note.startTime, note.endTime, ramp});
+        }
 
         const int start = firstFrameAtOrAfter(note.startTime);
         const int end = firstFrameAtOrAfter(note.endTime);
@@ -82,8 +90,8 @@ SelectedNoteResetPlan planSelectedNoteReset(const EditableContentSnapshot& snaps
             if (envelope.evalAt(range.startSeconds) == 0.0f && envelope.evalAt(range.endSeconds) == 0.0f
                 && std::all_of(first, last, [](const auto& point) { return point.gainDb == 0.0f; }))
                 continue;
-            // Keep the ramps inside the selected notes so adjacent notes retain their gain.
-            const double ramp = std::min(0.005, (range.endSeconds - range.startSeconds) * 0.25);
+            // Preserve neighboring gain and leave every selected note's midpoint on the plateau.
+            const double ramp = range.rampSeconds;
             envelope.setRegionGain(range.startSeconds + ramp, range.endSeconds - ramp, 0.0f, ramp);
         }
         if (!(envelope == snapshot.volumeEnvelope))

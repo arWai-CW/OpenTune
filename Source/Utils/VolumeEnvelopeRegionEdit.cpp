@@ -17,7 +17,7 @@ AutomationLane applyVolumeEnvelopeRegionDelta(const AutomationLane& beforeEnvelo
         envelope.setRegionGain(
             note.startTime,
             note.endTime,
-            beforeEnvelope.evalAt(note.startTime) + deltaGainDb);
+            beforeEnvelope.evalNoteGain(note.startTime, note.endTime) + deltaGainDb);
     }
     return envelope;
 }

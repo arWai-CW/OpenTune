@@ -6596,7 +6596,7 @@ juce::String PianoRollComponent::describeKeyboardNote(const std::vector<Note>& n
 juce::String PianoRollComponent::volumeText(const Note& note) const
 {
     const auto snap = readEditedSnapshot();
-    const float db = snap != nullptr ? snap->volumeEnvelope.evalAt(note.startTime) : 0.0f;
+    const float db = snap != nullptr ? snap->volumeEnvelope.evalNoteGain(note.startTime, note.endTime) : 0.0f;
     // Round to 0.1 dB so tiny ramps do not read as "-0.0".
     const float rounded = std::round(db * 10.0f) / 10.0f;
     juce::String value = std::abs(rounded) < 0.05f ? juce::String("0")
