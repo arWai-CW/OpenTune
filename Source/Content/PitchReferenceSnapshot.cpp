@@ -52,6 +52,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
     }
     if (overlapping.empty())
         return result;
+    result.hasClipOverlap = true;
 
     const auto pitchAtTimelineTime = [&](double time) {
         for (const auto& [ref, timeline] : overlapping) {

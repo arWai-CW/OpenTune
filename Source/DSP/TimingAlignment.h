@@ -17,6 +17,7 @@ struct TimingAlignment
     std::shared_ptr<const TimeGridSnapshot> grid;
     int movedAnchors = 0;
     double maxMoveSeconds = 0.0;
+    bool alreadyAligned = false;
 };
 
 std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate);

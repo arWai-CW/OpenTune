@@ -232,7 +232,7 @@ constexpr const char* kTuneToPitchReference = "Tune to Pitch Reference";
 constexpr const char* kAlignTimingToReference = "Align Timing to Reference";
 constexpr const char* kTimingGentle = "Gentle (Harmony)";
 constexpr const char* kTimingTight = "Tight (Double)";
-constexpr const char* kNoVoicedReferenceOverlap = "No overlapping voiced pitch. Analyze the reference track and check that it overlaps the selected audio.";
+constexpr const char* kNoVoicedReferenceOverlap = "No voiced pitch overlaps in the active clip or selected notes.";
 constexpr const char* kUnnamedReferenceTrack = "Unnamed Track";
 constexpr const char* kClassic = "Classic";
 constexpr const char* kNeon = "Neon";
@@ -607,7 +607,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kAlignTimingToReference, "Align Timing to Reference", "按参考轨对齐时序", "参照トラックにタイミングを合わせる", "Выровнять по опорной дорожке", "Alinear con la pista de referencia" },
         { Keys::kTimingGentle, "Gentle (Harmony)", "柔和（和声）", "ゆるめ（ハーモニー）", "Мягко (гармония)", "Suave (armonía)" },
         { Keys::kTimingTight, "Tight (Double)", "紧密（叠唱）", "タイト（ダブル）", "Плотно (дабл)", "Preciso (doble)" },
-        { Keys::kNoVoicedReferenceOverlap, "No overlapping voiced pitch. Analyze the reference track and check that it overlaps the selected audio.", "没有重叠的有声音高。请分析参考轨，并确保它与所选音频重叠。", "有声音の区間が重なっていません。参照トラックを解析し、選択した音声と重なっているか確認してください。", "Нет совпадающих озвученных участков. Проанализируйте опорную дорожку и проверьте, что она перекрывает выбранный звук.", "No hay tramos con tono que coincidan. Analiza la pista de referencia y comprueba que se solape con el audio seleccionado." },
+        { Keys::kNoVoicedReferenceOverlap, "No voiced pitch overlaps in the active clip or selected notes.", "当前片段或所选音符没有重叠的有声音高。", "現在のクリップまたは選択したノートに、有声音の重なりがありません。", "В активном клипе или выбранных нотах нет перекрывающихся участков с высотой тона.", "No hay tramos con tono superpuestos en el clip activo o las notas seleccionadas." },
         { Keys::kUnnamedReferenceTrack, "Unnamed Track", "未命名轨道", "名称未設定のトラック", "Дорожка без названия", "Pista sin nombre" },
         { Keys::kClassic, "Classic", "经典", "クラシック", "Классика", "Clásico" },
         { Keys::kNeon, "Neon", "霓虹", "ネオン", "Неон", "Neón" },

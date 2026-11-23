@@ -27,6 +27,7 @@ struct PitchReferenceSnapshot
 struct PitchReferenceCorrection
 {
     std::vector<PitchCorrectionSegment> segments;
+    bool hasClipOverlap = false;
     bool hasVoicedOverlap = false;
 };
 

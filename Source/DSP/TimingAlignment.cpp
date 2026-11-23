@@ -225,6 +225,19 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         || hasCompetingSyllablePhase(targets, guides, matches, matched))
         return {};
 
+    constexpr double minMove = 0.012;
+    const auto offsetFor = [&](size_t i) {
+        return matches[i] < 0 ? 0.0 : guides[static_cast<size_t>(matches[i])].timeline - targets[i].timeline;
+    };
+    bool alreadyAligned = true;
+    for (size_t i = 0; i < targets.size(); ++i)
+        alreadyAligned = alreadyAligned && std::abs(offsetFor(i)) < minMove;
+    if (alreadyAligned) {
+        TimingAlignment result;
+        result.alreadyAligned = true;
+        return result;
+    }
+
     auto handles = targetGrid.handles();
     // Opening the time tool can seed an untouched identity grid. Those seeds
     // aren't manual edits and shouldn't block detected attacks in the overlap.
@@ -261,10 +274,8 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     if (!firstLock || !lastLock || *firstLock >= *lastLock)
         return {};
     const auto moveFor = [&](size_t i) {
-        return matches[i] < 0 ? 0.0
-            : (guides[static_cast<size_t>(matches[i])].timeline - targets[i].timeline) * strength;
+        return offsetFor(i) * strength;
     };
-    constexpr double minMove = 0.012;
     for (size_t i = 0; i < targets.size(); ++i)
         if (std::abs(moveFor(i)) < minMove)
             lockTime(targetGrid.tauForward(targets[i].onset.sourceSeconds));
