@@ -1231,6 +1231,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         double bestOverlap = 0.0;
         double maxOverlap = 0.0;
         juce::String referenceRejection;
+        constexpr double maxTimingAnalysisSeconds = 180.0;
         for (const auto& guide : guideRegions) {
             const double overlap = std::min(region.endInPlaybackTime, guide.endInPlaybackTime)
                 - std::max(region.startInPlaybackTime, guide.startInPlaybackTime);
@@ -1240,6 +1241,12 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             maxOverlap = std::max(maxOverlap, overlap);
             if (overlap < minimumTimingOverlapSeconds || overlap <= bestOverlap)
                 continue;
+            if (overlap > maxTimingAnalysisSeconds) {
+                if (overlap >= previousMax)
+                    referenceRejection = "overlap exceeds the " + juce::String(static_cast<int>(maxTimingAnalysisSeconds))
+                        + " s timing analysis limit";
+                continue;
+            }
             if (auto candidate = load(guide, rejection); candidate.snapshot) {
                 bestGuide = std::move(candidate);
                 bestOverlap = overlap;
@@ -1254,12 +1261,6 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                 + juce::String(maxOverlap, 3) + " s; need "
                 + juce::String(minimumTimingOverlapSeconds, 1) + " s; "
                 + juce::String(static_cast<int>(guideRegions.size())) + " reference clips)");
-            continue;
-        }
-        constexpr double maxTimingAnalysisSeconds = 180.0;
-        if (bestOverlap > maxTimingAnalysisSeconds) {
-            diagnostics.add(position + "reference overlap " + juce::String(bestOverlap, 1)
-                + " s exceeds the " + juce::String(static_cast<int>(maxTimingAnalysisSeconds)) + " s timing analysis limit");
             continue;
         }
         const auto existing = std::find_if(guides.begin(), guides.end(), [&](const auto& guide) {
