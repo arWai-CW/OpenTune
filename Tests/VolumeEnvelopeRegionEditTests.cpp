@@ -123,6 +123,27 @@ bool checkResetZero()
     return emptyPlan.status == VolumeEnvelopeRegionEditStatus::NoChange;
 }
 
+bool checkAdjacentShortNoteGain()
+{
+    auto snapshot = makeSnapshot();
+    snapshot.notes[0].startTime = 0.052;
+    snapshot.notes[0].endTime = snapshot.notes[1].startTime = 0.054;
+    snapshot.notes[1].endTime = 0.056;
+    snapshot.volumeEnvelope = AutomationLane::fromSnapshot(
+        {{0.0, 6.0f}, {0.053, 6.0f}, {0.054, 0.0f}, {0.06, 0.0f}});
+
+    for (const auto& indices : std::vector<std::vector<int>>{{0, 1}, {1, 0}}) {
+        const auto plan = planVolumeEnvelopeRegionDeltaEdit(snapshot, indices, 7, 1.0f);
+        if (plan.status != VolumeEnvelopeRegionEditStatus::Ready
+            || !regionGainNear(plan.afterEnvelope, 0.053, 7.0f)
+            || !regionGainNear(plan.afterEnvelope, 0.055, 1.0f)
+            || !regionGainNear(plan.afterEnvelope, 0.045, 6.0f)
+            || !regionGainNear(plan.afterEnvelope, 0.062, 0.0f))
+            return false;
+    }
+    return true;
+}
+
 bool checkStatuses()
 {
     const auto snapshot = makeSnapshot();
@@ -211,6 +232,10 @@ int main()
     }
     if (!checkResetZero()) {
         std::cerr << "Volume region reset check failed\n";
+        return 1;
+    }
+    if (!checkAdjacentShortNoteGain()) {
+        std::cerr << "Adjacent short-note gain check failed\n";
         return 1;
     }
     if (!checkStatuses()) {
