@@ -199,7 +199,7 @@ ThirdParty/microsoft.direct3d.d3d12.1.619.5/
 | `ThirdParty/onnxruntime-osx-universal2-1.20.0/` | 必需 | 运行 `./scripts/build-onnxruntime-macos.sh` 生成。该脚本从 [Microsoft ONNX Runtime v1.20.0](https://github.com/microsoft/onnxruntime/tree/v1.20.0) 源码构建，并从 [Eigen 官方仓库固定 revision](https://gitlab.com/libeigen/eigen/-/archive/e7248b26a1ed53fa030c5c459f7ea095dfd276ac/eigen-e7248b26a1ed53fa030c5c459f7ea095dfd276ac.zip) 获取 Eigen；分别构建 arm64、x86_64。打包脚本不会调用此脚本。 |
 | `models/fcpe.onnx` | 必需 | 从 [KCKT0112/HachiTune 固定提交](https://raw.githubusercontent.com/KCKT0112/HachiTune/d68808c37dede264d80d2d1050dce27af34ad654/Resources/models/fcpe.onnx) 下载；核对 SHA-256 为 `013b507acd406de122b61ee497300ac6be082511101bc2136b886e48d9737e5d`。模型上游作者为 [CNChTu/FCPE](https://github.com/CNChTu/FCPE)。 |
 | `pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` | 必需 | 下载上方的 `.oudep` 并按 zip 解压，把包内的 `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` 放到该路径。构建时复制为 `models/hifigan.onnx`。 |
-推荐的 macOS Buildbot 顺序：从第三方来源获取以上必需依赖和模型；依赖未缓存时运行 `./scripts/build-onnxruntime-macos.sh`；随后运行 `./scripts/package-macos.sh --format pkg`。打包脚本会配置并构建 arm64，将 universal2 ORT dylib 裁剪为 arm64，再验证和生成 PKG。`Installer/NOTICE.md` 随仓库提供。
+推荐的 macOS Buildbot 顺序：从第三方来源获取以上必需依赖和模型；依赖未缓存时运行 `./scripts/build-onnxruntime-macos.sh`；随后运行 `./scripts/package-macos.sh --format pkg`。打包脚本会先运行 `patch-juce-ara.py`，再配置并构建 arm64，构建后将 VST3 符号链接到 `~/Library/Audio/Plug-Ins/VST3`（已有的非链接 VST3 会改名为 `.bak-<时间>`），将 universal2 ORT dylib 裁剪为 arm64，再验证和生成 PKG。`Installer/NOTICE.md` 随仓库提供。
 
 ## 完整目录结构概览
 
