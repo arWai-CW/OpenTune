@@ -42,12 +42,15 @@
 
 namespace OpenTune::PluginUI {
 
+#if JucePlugin_Enable_ARA
+class ReferenceEditor;
+#endif
+
 class OpenTuneAudioProcessorEditor : public juce::AudioProcessorEditor,
 #if JucePlugin_Enable_ARA
                                      public juce::AudioProcessorEditorARAExtension,
                                      private juce::ARAEditorView::Listener,
                                      private juce::ChangeListener,
-                                      private juce::ARARegionSequenceListener,
 #endif
                                      public TimelineOverviewComponent::Listener,
                                      public ParameterPanel::Listener,
@@ -167,20 +170,6 @@ private:
     std::vector<juce::ARAPlaybackRegion*> resolveContentScopeRegions() const;
     void readScopeAudio();
 #if JucePlugin_Enable_ARA
-    juce::PopupMenu createPitchReferenceMenu();
-    void refreshReferenceControls();
-    bool canAlignTimingToReference() const;
-    void setPitchReferenceTrack(juce::ARARegionSequence* track);
-    void tuneToPitchReference();
-    void alignTimingToPitchReference();
-    void restoreOriginalClipTiming();
-    void didUpdateRegionSequenceProperties(juce::ARARegionSequence* track) override;
-    void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
-    juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
-    std::unique_ptr<juce::ThreadPool> timingAlignmentWorker_;
-    std::unique_ptr<juce::AlertWindow> timingAlignmentPreview_;
-    bool timingAlignmentRunning_ = false;
-
     void onNewSelection(const juce::ARAViewSelection&) override;
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void refreshAraPresentation();
@@ -225,7 +214,7 @@ private:
     TransportBarComponent transportBar_;
     ParameterPanel parameterPanel_;
 #if JucePlugin_Enable_ARA
-    UnifiedToolbarButton referenceTrackButton_, tuneToReferenceButton_, alignTimingButton_;
+    std::unique_ptr<ReferenceEditor> referenceEditor_;
 #endif
     TopBarComponent topBar_;
     bool isParameterPanelVisible_ = false;

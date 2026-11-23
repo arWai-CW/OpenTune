@@ -1,7 +1,7 @@
 #include "Inference/SoundTouchStretcher.h"
 #include "Inference/RenderCache.h"
 #include "Inference/TimeStretchCache.h"
-#include "DSP/TimingAlignment.h"
+#include "Reference/TimingAlignment.h"
 
 #include <atomic>
 #include <cmath>
