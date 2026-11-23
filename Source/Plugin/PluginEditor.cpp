@@ -108,7 +108,7 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
           LocalizationManager::LanguageState{ appPreferences_.getState().shared.language }))
     , languageBinding_(languageState_)
     , menuBar_(processor, MenuBarComponent::Profile::Plugin)
-    , topBar_(menuBar_, transportBar_)
+    , topBar_(menuBar_, transportBar_, parameterPanel_.getToolStrip())
     , pianoRoll_(processor.getPlayHeadState(), processor.getUndoManager(),
                  [this](SpectrumArray& spectrum, SpectrumArray& peaks) {
                      processorRef_.copyOutputSpectrum(spectrum, peaks);
@@ -248,10 +248,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         showTransportMenu(2, transportBar_.getViewButton());
     };
 
-    // Accessibility: the plugin has no track panel and cannot hide the parameter panel, so the
-    // Tracks and Props toggles do nothing here. They stay on screen as in the original, but leave
-    // the Tab order and the screen reader tree, where they read as working "pressed" buttons.
-    topBar_.setSidePanelTogglesAccessible(false);
+    topBar_.setTrackPanelToggleVisible(false);
+    topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+    topBar_.onToggleParameterPanel = [this] {
+        isParameterPanelVisible_ = !isParameterPanelVisible_;
+        topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+        resized();
+    };
 
     // The plugin's piano roll has no use for Esc: REAPER gets it and closes the FX window.
     pianoRoll_.setEscapePassesToHost(true);
@@ -278,7 +281,7 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         contentRoot_.addChildComponent(*button);
     refreshReferenceControls();
 #endif
-    contentRoot_.addAndMakeVisible(parameterPanel_);
+    contentRoot_.addChildComponent(parameterPanel_);
     parameterPanel_.addListener(this);
     parameterPanel_.onPitchGridModeChanged = [this](PitchGridMode mode) {
         if (auto* handler = pianoRoll_.getToolHandler())
@@ -321,7 +324,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                 [this] { syncSharedAppPreferences(); });
         },
         [this](bool) { resized(); },
-        [this] { pianoRoll_.grabKeyboardFocus(); });
+        [this] {
+            resized();
+            pianoRoll_.grabKeyboardFocus();
+        });
     contentRoot_.addChildComponent(*onboardingOverlay_);
 
     // Upstream 59387696 dropped the per-tick preference sync and left no call here, so a
@@ -436,7 +442,7 @@ void OpenTuneAudioProcessorEditor::resized()
     bounds.reduce(gap, gap);
 
     // TopBar: 固定高度
-    constexpr int topBarHeight = TOP_BAR_HEIGHT;
+    constexpr int topBarHeight = TOP_BAR_HEIGHT + TopBarComponent::kToolStripHeight;
     topBar_.setBounds(bounds.removeFromTop(topBarHeight));
     bounds.removeFromTop(gap);
 
@@ -454,9 +460,14 @@ void OpenTuneAudioProcessorEditor::resized()
 #endif
 
     // 右侧 ParameterPanel
-    constexpr int paramPanelWidth = PARAMETER_PANEL_WIDTH;
-    parameterPanel_.setBounds(bounds.removeFromRight(paramPanelWidth));
-    bounds.removeFromRight(gap);
+    const bool showParameterPanel = isParameterPanelVisible_
+        || (onboardingOverlay_ != nullptr && onboardingOverlay_->isActive());
+    parameterPanel_.setVisible(showParameterPanel);
+    if (showParameterPanel)
+    {
+        parameterPanel_.setBounds(bounds.removeFromRight(PARAMETER_PANEL_WIDTH));
+        bounds.removeFromRight(gap);
+    }
 
     // 中央 PianoRoll
     pianoRoll_.setBounds(bounds);

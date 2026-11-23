@@ -10,13 +10,16 @@ constexpr float kAuroraTopBarFrameIntensity = 0.12f;
 
 } // namespace
 
-TopBarComponent::TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar)
+TopBarComponent::TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar,
+                                 juce::Component& toolStrip)
     : menuBar_(menuBar)
     , transportBar_(transportBar)
+    , toolStrip_(toolStrip)
 {
     transportBar_.setEmbeddedInTopBar(true);
     addAndMakeVisible(menuBar_);
     addAndMakeVisible(transportBar_);
+    addAndMakeVisible(toolStrip_);
 
     // 侧边栏开关按钮 - 使用箭头图标表示收起/展开功能
     trackPanelToggleButton_.setIcon(ToolbarIcons::getPanelRightIcon());
@@ -54,14 +57,6 @@ void TopBarComponent::setSidePanelsVisible(bool trackPanelVisible, bool paramete
     trackPanelToggleButton_.setToggleState(trackPanelVisible, juce::dontSendNotification);
     parameterPanelToggleButton_.setToggleState(parameterPanelVisible, juce::dontSendNotification);
     repaint();
-}
-
-void TopBarComponent::setSidePanelTogglesAccessible(bool accessible)
-{
-    for (auto* button : { &trackPanelToggleButton_, &parameterPanelToggleButton_ }) {
-        button->setWantsKeyboardFocus(accessible);
-        button->setAccessible(accessible);
-    }
 }
 
 void TopBarComponent::setTrackPanelToggleVisible(bool visible)
@@ -199,6 +194,8 @@ void TopBarComponent::resized()
         menuBar_.setBounds(bounds.removeFromTop(25));
     else
         menuBar_.setBounds({});
+
+    toolStrip_.setBounds(bounds.removeFromBottom(kToolStripHeight).reduced(3, 4));
 
     // Transport 行：左/右留给侧边栏开关按钮
     const int pad = 3;

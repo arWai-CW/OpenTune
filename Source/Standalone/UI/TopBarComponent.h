@@ -13,7 +13,10 @@ namespace OpenTune {
 class TopBarComponent : public juce::Component
 {
 public:
-    TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar);
+    TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar,
+                    juce::Component& toolStrip);
+
+    static constexpr int kToolStripHeight = 48;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -27,9 +30,6 @@ public:
     // 同步按钮状态（避免 ToggleState 与真实可见性不一致）
     void setSidePanelsVisible(bool trackPanelVisible, bool parameterPanelVisible);
     void setTrackPanelToggleVisible(bool visible);
-    // Accessibility: false takes both toggles out of the Tab order and the screen reader tree
-    // (for an editor where they have no effect); they stay visible.
-    void setSidePanelTogglesAccessible(bool accessible);
     juce::Component& getParameterPanelButton() { return parameterPanelToggleButton_; }
 
     void refreshLocalizedText();  // 刷新本地化文本
@@ -37,6 +37,7 @@ public:
 private:
     MenuBarComponent& menuBar_;
     TransportBarComponent& transportBar_;
+    juce::Component& toolStrip_;
 
     // 侧边栏开关（统一图标按钮）
     UnifiedToolbarButton trackPanelToggleButton_ { LOC(kTracks), {} }; // Icon set in constructor

@@ -384,7 +384,7 @@
     { "Rendering audio", "音訊渲染" },
     { "The audio is being rendered. Rendering starts after loading a project, editing pitch or transposing; please wait until it finishes. If you play now, you will hear the original pitch.", "音訊正在渲染，當加載項目、修改音高或移調後會觸發渲染，此時請稍後渲染完成。如果在此時播放，您將聽到原始音高。" },
     { "Editing tools", "編輯工具" },
-    { "The tools on the right edit pitch and notes. Long-press any tool to see its name and how to use it.", "右側是修音工具。長按任意工具，即可查看它的名稱和用法。" },
+    { "The tools at the top edit pitch and notes. Long-press any tool to see its name and how to use it.", "頂部是修音工具。長按任意工具，即可查看它的名稱和用法。" },
     { "Skip Tour", "跳過引導" },
     { "Rendering (", "渲染中 (" },
     { "Failed to start OriginalF0 analysis.", "未能啓動原始音高分析。" },
