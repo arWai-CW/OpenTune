@@ -81,6 +81,7 @@ struct SharedPreferencesState {
     TuningConfig::TuningSettings tuning = TuningConfig::TuningSettings::getDefault();
     WholeNoteMoveSnapMode wholeNoteMoveSnapMode = WholeNoteMoveSnapMode::Scale;
     bool noteTransposePreviewEnabled = false;  ///< 拖动音符移调时试听预览
+    bool outOfScaleDragEnabled = false;
     bool accessibilityModeEnabled = false;  ///< 无障碍模式（读屏播报等，默认关闭）
 };
 
@@ -145,6 +146,8 @@ public:
     void setAraF0AnalysisCacheEnabled(bool enabled);
     void setNoteTransposePreviewEnabled(bool enabled);
     bool getNoteTransposePreviewEnabled() const;
+    void setOutOfScaleDragEnabled(bool enabled);
+    bool getOutOfScaleDragEnabled() const;
 
     void setAccessibilityModeEnabled(bool enabled);
     bool getAccessibilityModeEnabled() const;

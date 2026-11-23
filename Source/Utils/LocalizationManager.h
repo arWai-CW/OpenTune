@@ -281,6 +281,7 @@ constexpr const char* kWholeNoteMoveSnap = "Move Snap";
 constexpr const char* kWholeNoteMoveSnapScale = "Follow Global Scale";
 constexpr const char* kWholeNoteMoveSnapStandardPitch = "Snap to Semitones";
 constexpr const char* kNoteTransposePreview = "Note Transpose Preview";
+constexpr const char* kOutOfScaleDrag = "Allow Out-of-Scale Note Dragging";
 constexpr const char* kAccessibilityMode = "Accessibility mode";
 constexpr const char* kAccessibilityModeHelp = "Enables screen reader announcements and keyboard note editing";
 
@@ -652,6 +653,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kGridStyle, "Grid Style", "网格样式", "グリッドスタイル", "Стиль сетки", "Estilo de cuadricula" },
         { Keys::kGridStylePianoLanes, "Piano Lanes", "钢琴键槽", "ピアノレーン", "Клавиши пианино", "Teclas de piano" },
         { Keys::kGridStyleEqualSpacing, "Equal Spacing", "等距", "等間隔", "Равный интервал", "Espaciado igual" },
+        { Keys::kOutOfScaleDrag, "Allow Out-of-Scale Note Dragging", "允许将音符拖出调式", "スケール外へのノートドラッグを許可", "Разрешить перетаскивание нот вне гаммы", "Permitir arrastrar notas fuera de la escala" },
         { Keys::kWholeNoteMoveSnap, "Move Snap", "移动吸附", "移動スナップ", "Привязка при сдвиге", "Ajuste al mover" },
         { Keys::kWholeNoteMoveSnapScale, "Follow Global Scale", "跟随全局调式", "グローバルスケールに従う", "Следовать глобальной гамме", "Seguir escala global" },
         { Keys::kWholeNoteMoveSnapStandardPitch, "Snap to Semitones", "半音吸附", "半音スナップ", "По полутонам", "Por semitonos" },

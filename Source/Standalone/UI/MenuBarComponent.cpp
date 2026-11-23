@@ -142,6 +142,9 @@ juce::PopupMenu MenuBarComponent::getMenuForIndex(int topLevelMenuIndex, const j
             const bool canRedo = canRedoQuery ? canRedoQuery() : true;
             menu.addItem(EditUndo, LOC(kUndo) + "  (Ctrl+Z)", canUndo);
             menu.addItem(EditRedo, LOC(kRedo) + "  (Ctrl+Shift+Z)", canRedo);
+            menu.addSeparator();
+            menu.addItem(OutOfScaleDrag, LOC(kOutOfScaleDrag), true,
+                         processor_.getAppPreferences().getOutOfScaleDragEnabled());
             break;
         }
         case 2:  // View
@@ -217,6 +220,13 @@ void MenuBarComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
     juce::ignoreUnused(topLevelMenuIndex);
     switch (menuItemID)
     {
+        case OutOfScaleDrag:
+        {
+            auto& preferences = processor_.getAppPreferences();
+            preferences.setOutOfScaleDragEnabled(!preferences.getOutOfScaleDragEnabled());
+            menuItemsChanged();
+            break;
+        }
         case ImportAudio:
             // 触发导入音频，由PluginEditor处理文件选择、多选支持和导入模式询问
             listeners_.call([](Listener& l) { l.importAudioRequested(); });

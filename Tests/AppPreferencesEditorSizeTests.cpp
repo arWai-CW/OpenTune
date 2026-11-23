@@ -9,6 +9,31 @@ bool hasSize(const OpenTune::PluginEditorSize& actual, int width, int height)
     return actual.width == width && actual.height == height;
 }
 
+bool testOutOfScaleDragPreference()
+{
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("OpenTuneAppPreferences-" + juce::Uuid().toString());
+    OpenTune::AppPreferences::StorageOptions options;
+    options.settingsDirectory = directory;
+    bool passed = true;
+    {
+        OpenTune::AppPreferences preferences(options);
+        passed = !preferences.getOutOfScaleDragEnabled();
+        preferences.setOutOfScaleDragEnabled(true);
+    }
+    {
+        OpenTune::AppPreferences preferences(options);
+        passed = passed && preferences.getOutOfScaleDragEnabled();
+        preferences.setOutOfScaleDragEnabled(false);
+    }
+    {
+        OpenTune::AppPreferences preferences(options);
+        passed = passed && !preferences.getOutOfScaleDragEnabled();
+    }
+    directory.deleteRecursively();
+    return passed;
+}
+
 bool testSharedPluginEditorSize()
 {
     const auto temporaryDirectory = juce::File::getCurrentWorkingDirectory()
@@ -586,6 +611,11 @@ bool testMacShortcutDefaultMigration()
 
 int main()
 {
+    if (!testOutOfScaleDragPreference()) {
+        std::fputs("FAIL: out-of-scale drag preference default and persistence\n", stderr);
+        return 1;
+    }
+
     if (!testSharedPluginEditorSize()) {
         std::fputs("FAIL: shared plugin editor size preferences\n", stderr);
         return 1;

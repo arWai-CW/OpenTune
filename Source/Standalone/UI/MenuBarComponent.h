@@ -125,6 +125,7 @@ private:
 
         EditUndo = 50,
         EditRedo,
+        OutOfScaleDrag,
 
         ShowWaveform = 100,
         PianoKeyboard,

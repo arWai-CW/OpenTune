@@ -82,6 +82,7 @@
     { Keys::kAudioDeviceSwitchFailed, "音訊設備切換失敗" },
     { Keys::kAudioDeviceRestoreWarning, "ASIO 採樣率恢復失敗，已繼續切換。" },
     { Keys::kEditing, "編輯" },
+    { Keys::kOutOfScaleDrag, "允許將音符拖出調式" },
     { Keys::kMouse, "滑鼠" },
     { Keys::kShortcuts, "快捷鍵" },
     { Keys::kShortcutGeneral, "通用" },

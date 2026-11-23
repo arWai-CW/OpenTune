@@ -2728,10 +2728,10 @@ void PianoRollToolHandler::dragNotePitch(const juce::MouseEvent& e, bool allowAu
     }
 
     const bool openDyne = AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme());
-    // Alt 拖拽期间临时解除吸附（保留连续 cents），OpenTune/OpenDyne 统一。
-    const bool altBypass = e.mods.isAltDown();
+    const bool bypassPitchSnap = e.mods.isAltDown()
+        || (ctx_.isOutOfScaleDragEnabled && ctx_.isOutOfScaleDragEnabled());
     const bool snapWholeMoveToStandardPitch = !openDyne
-        && !altBypass
+        && !bypassPitchSnap
         && ctx_.shouldSnapWholeNoteMoveToStandardPitch
         && ctx_.shouldSnapWholeNoteMoveToStandardPitch();
     auto& notes = workingDraftNotes(ctx_);
@@ -2756,7 +2756,7 @@ void PianoRollToolHandler::dragNotePitch(const juce::MouseEvent& e, bool allowAu
         const float targetMidi = baseMidi + initialOffset + wholeMoveDeltaSemitones;
         // OpenTune 恒量化到活动调式；OpenDyne 按 Pitch Grid 三态，KeyScale 与 OpenTune 同源量化。
         float snappedMidi = targetMidi;
-        if (!altBypass && !snapWholeMoveToStandardPitch) {
+        if (!bypassPitchSnap && !snapWholeMoveToStandardPitch) {
             if (!openDyne || pitchGridMode_ == PitchGridMode::KeyScale) {
                 snappedMidi = scaleSnap.value_or(ScaleSnapConfig{}).quantizeMidiToActiveScale(targetMidi);
             } else if (pitchGridMode_ == PitchGridMode::Chromatic) {

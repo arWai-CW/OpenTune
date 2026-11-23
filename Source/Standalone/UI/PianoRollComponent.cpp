@@ -500,6 +500,9 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
         return appPreferences_ != nullptr
             && appPreferences_->getWholeNoteMoveSnapMode() == WholeNoteMoveSnapMode::StandardPitch;
     };
+    toolCtx.isOutOfScaleDragEnabled = [this]() {
+        return appPreferences_ != nullptr && appPreferences_->getOutOfScaleDragEnabled();
+    };
     toolCtx.getEditableContentSnapshot = [this]() { return readEditedSnapshot(); };
     toolCtx.planNoteValueEdit = [this](const std::vector<Note>& notes,
                                        const ContentNoteValueEditRequest& request) {
