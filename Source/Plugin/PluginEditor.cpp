@@ -360,21 +360,6 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
             &contentRoot_, LOC_RAW("OriginalF0 model initialization failed"), f0InitializationError,
             AppLogger::makeDiagnosticText("OriginalF0 model initialization", f0InitializationError));
     }
-
-    grabKeyboardFocus();
-
-    // Accessibility: focus the piano roll right away so arrow keys work without Tab.
-    // Deferred because the editor is not on screen yet in the constructor. The first-run
-    // onboarding manages focus itself.
-    juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safeThis(this);
-    juce::Timer::callAfterDelay(150, [safeThis] {
-        if (safeThis == nullptr)
-            return;
-        if (safeThis->onboardingOverlay_ != nullptr && safeThis->onboardingOverlay_->isActive())
-            return;
-        if (safeThis->pianoRoll_.isShowing())
-            safeThis->pianoRoll_.grabKeyboardFocus();
-    });
 }
 
 OpenTuneAudioProcessorEditor::~OpenTuneAudioProcessorEditor()
@@ -635,6 +620,13 @@ void OpenTuneAudioProcessorEditor::timerCallback()
     // Cheap predicate re-check: host may close modals without any editor-side
     // hook (visibility/resized), so keep this as a fallback trigger.
     maybeStartOnboarding();
+
+    if (!initialKeyboardFocusAssigned_ && pianoRoll_.isShowing()
+        && !pianoRoll_.isCurrentlyBlockedByAnotherModalComponent()) {
+        initialKeyboardFocusAssigned_ = true;
+        if (!hasKeyboardFocus(true) && (onboardingOverlay_ == nullptr || !onboardingOverlay_->isActive()))
+            pianoRoll_.grabKeyboardFocus();
+    }
 
     // External Edit 按钮可用性跟随 Capture Session 对象的存在（ARA 绑定会清空
     // CaptureSession）。心跳内低成本比对，setter 相同值时为 no-op，不触发 resized。
@@ -1817,6 +1809,9 @@ bool OpenTuneAudioProcessorEditor::handleEditorShortcut(const juce::KeyPress& ke
         redoRequested();
         return true;
     }
+
+    if (KeyShortcutConfig::matchesShortcut(shortcutSettings, KeyShortcutConfig::ShortcutId::SelectAll, key))
+        return pianoRoll_.keyPressed(key);
 
     return false;
 }
