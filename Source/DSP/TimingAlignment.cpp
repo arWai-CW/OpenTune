@@ -10,6 +10,7 @@ namespace {
 constexpr double hopSeconds = 0.005;
 constexpr double maxShift = 0.18;
 constexpr double ambiguityMargin = 0.018;
+constexpr double boundaryEpsilon = 1.0e-9;
 
 struct ProjectedOnset
 {
@@ -224,7 +225,6 @@ bool preservesTimingAudioInRange(const TimeGridSnapshot& before, const TimeGridS
         return first.source_seconds == second.source_seconds && first.output_seconds == second.output_seconds;
     };
     const auto isIdentity = [](const TimeHandle& handle) { return handle.source_seconds == handle.output_seconds; };
-    constexpr double boundaryEpsilon = 1.0e-9;
     for (size_t i = 1, j = 1; i < a.size() && j < b.size();) {
         const auto begin = std::max(a[i - 1].output_seconds, b[j - 1].output_seconds);
         const auto end = std::min(a[i].output_seconds, b[j].output_seconds);
@@ -248,6 +248,39 @@ bool preservesTimingAudioInRange(const TimeGridSnapshot& before, const TimeGridS
         }
     }
     return true;
+}
+
+std::shared_ptr<const TimeGridSnapshot> restoreOriginalTimingInRange(
+    const TimeGridSnapshot& grid, TimingOutputRange range,
+    const std::vector<TimingOutputRange>& protectedRanges)
+{
+    if (grid.empty() || !std::isfinite(range.begin) || !std::isfinite(range.end))
+        return {};
+    range.begin = std::max(0.0, range.begin);
+    range.end = std::min(grid.handles().back().output_seconds, range.end);
+    if (range.end <= range.begin || grid.isIdentityInOutputRange(range.begin, range.end))
+        return {};
+
+    auto handles = grid.handles();
+    handles.erase(std::remove_if(handles.begin(), handles.end(), [&](const auto& handle) {
+        return handle.source_seconds != handle.output_seconds
+            && handle.output_seconds > range.begin + boundaryEpsilon
+            && handle.output_seconds < range.end - boundaryEpsilon;
+    }), handles.end());
+    auto restored = TimeGridSnapshot::makeFromHandles(std::move(handles));
+    if (!restored || !restored->isIdentityInOutputRange(range.begin, range.end))
+        return {};
+
+    const auto preserves = [&](TimingOutputRange outside) {
+        return preservesTimingAudioInRange(grid, *restored, outside);
+    };
+    // Never reset hidden audio outside the focused clip, including other ARA placements.
+    const double end = grid.handles().back().output_seconds;
+    if ((range.begin > 0.0 && !preserves({0.0, range.begin}))
+        || (range.end < end && !preserves({range.end, end}))
+        || !std::all_of(protectedRanges.begin(), protectedRanges.end(), preserves))
+        return {};
+    return restored;
 }
 
 TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
@@ -335,7 +368,6 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     // Opening the time tool can seed an untouched identity grid. Those seeds
     // aren't manual edits and shouldn't block detected attacks in the overlap.
     if (targetGrid.isIdentityInOutputRange(firstOutput, lastOutput)) {
-        constexpr double boundaryEpsilon = 1.0e-9;
         handles.erase(std::remove_if(handles.begin(), handles.end(), [&](const auto& handle) {
             return handle.kind == HandleKind::InternalOnset
                 && handle.output_seconds > firstOutput + boundaryEpsilon

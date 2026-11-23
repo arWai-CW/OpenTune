@@ -4,6 +4,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/ARA/OpenTuneDocumentController.h"
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
+#include "../Source/DSP/TimingAlignment.h"
 #include "../Source/Utils/TimeGridEditAction.h"
 #include <algorithm>
 #include <atomic>
@@ -375,6 +376,30 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
         const bool processed = firstRenderer->processBlock(siblingAudio, juce::AudioProcessor::Realtime::yes, tailPosition);
         expect(processed && siblingAudio.getSample(0, 0) == 0.375f && siblingAudio.getSample(0, 1) == 0.125f,
                "pooled_sibling_lost_native_rate_pcm");
+        const auto restored = restoreOriginalTimingInRange(*headWarp, {0.0, 0.65}, {{0.75, 1.0}});
+        if (!expect(restored && firstProcessor.applyTimeGridEdit(key, headWarp, restored, "Restore timing"),
+                    "restore_original_clip_timing_failed"))
+            return false;
+        const auto restoredSnapshot = controller->readContentSnapshot(key);
+        expect(restoredSnapshot && restoredSnapshot->timeGrid == restored && restored->isIdentity()
+                   && restoredSnapshot->contentRevision == before->contentRevision
+                   && restoredSnapshot->pitchRevision == before->pitchRevision,
+               "restore_timing_changed_pitch_or_canonical_content");
+        expectAudible(*firstRenderer, "restore_did_not_resume_unwarped_playback", true);
+        siblingAudio.clear();
+        expect(firstRenderer->processBlock(siblingAudio, juce::AudioProcessor::Realtime::yes, tailPosition)
+                   && siblingAudio.getSample(0, 0) == 0.375f && siblingAudio.getSample(0, 1) == 0.125f,
+               "restore_timing_changed_pooled_sibling_pcm");
+        auto& pooledHistory = firstProcessor.getUndoManager();
+        const auto* restoreAction = pooledHistory.peekUndo();
+        expect(secondProcessor.applyTimeGridEdit(key, restored, warp, "Newer timing")
+                   && pooledHistory.undo() == nullptr && pooledHistory.peekUndo() == restoreAction
+                   && controller->readContentSnapshot(key)->timeGrid == warp,
+               "restore_undo_overwrote_newer_timing");
+        expect(secondProcessor.getUndoManager().undo() != nullptr,
+               "undo_newer_timing_failed");
+        expect(pooledHistory.undo() != nullptr && controller->readContentSnapshot(key)->timeGrid == headWarp,
+               "undo_restore_did_not_reinstate_timing_alignment");
         expect(firstProcessor.getUndoManager().undo() != nullptr, "pooled_timing_undo_failed");
         firstInstance->playbackRendererInterface->removePlaybackRegion(firstInstance->playbackRendererRef, tail);
         hostDocumentController.destroyPlaybackRegion(tail);

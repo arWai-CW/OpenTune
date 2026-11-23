@@ -172,11 +172,18 @@ bool testPooledSplitsCanAlignIndependently()
     SoundTouchStretcher stretcher(sampleRate, 1);
     const auto firstAudio = stretcher.stretch(input, *firstPlan.grid);
     const auto combinedAudio = stretcher.stretch(input, *combined.grid);
+    const auto restored = restoreOriginalTimingInRange(*combined.grid, {0.0, 2.0}, {{2.0, 4.0}});
+    if (!restored || !restored->isIdentityInOutputRange(0.0, 2.0))
+        return false;
+    const auto restoredAudio = stretcher.stretch(input, *restored);
     for (int s = 0; s < input.getNumSamples(); ++s) {
         if (s >= 2 * sampleRate && firstAudio.getSample(0, s) != input.getSample(0, s))
             return false;
         if ((s < 2 * sampleRate || s >= 4 * sampleRate)
             && combinedAudio.getSample(0, s) != firstAudio.getSample(0, s))
+            return false;
+        if (restoredAudio.getSample(0, s) != (s < 2 * sampleRate
+            ? input.getSample(0, s) : combinedAudio.getSample(0, s)))
             return false;
     }
     return true;
@@ -194,6 +201,27 @@ bool testSameTimeMapCanStillChangeStretchedSiblingAudio()
     const auto after = TimeGridSnapshot::makeFromHandles(std::move(handles));
     return after && preservesTimingAudioInRange(*before, *after, {0.0, 1.2})
         && !preservesTimingAudioInRange(*before, *after, {1.2, 2.1});
+}
+
+bool testRestoreOriginalClipTiming()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.5, 0.6, HandleKind::OnsetVoiced},
+        {3, 1.0, 1.0, HandleKind::InternalOnset},
+        {4, 1.5, 1.4, HandleKind::UserAdded},
+        {5, 2.0, 2.0, HandleKind::InternalOnset},
+        {6, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    const auto restored = restoreOriginalTimingInRange(*grid, {0.0, 1.0}, {{1.0, 2.0}});
+    if (!restored || restored->tauForward(0.5) != 0.5 || restored->tauForward(1.5) != 1.4
+        || !preservesTimingAudioInRange(*grid, *restored, {1.0, 3.0})
+        || restoreOriginalTimingInRange(*grid, {0.0, 1.0}, {{0.25, 0.75}})
+        || restoreOriginalTimingInRange(*grid, {0.0, 0.8})
+        || restoreOriginalTimingInRange(*grid, {2.0, 3.0}))
+        return false;
+    const auto whole = restoreOriginalTimingInRange(*grid, {-0.05, 3.05});
+    return whole && whole->isIdentity() && whole->totalDurationSeconds() == 3.0;
 }
 
 bool testDetectAttacksAcrossPitch()
@@ -436,6 +464,10 @@ int main()
     }
     if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
         std::fputs("Pooled timing edits failed to preserve sibling splits\n", stderr);
+        return 1;
+    }
+    if (!testRestoreOriginalClipTiming()) {
+        std::fputs("Restoring clip timing failed or affected audio outside the clip\n", stderr);
         return 1;
     }
     if (!testDetectAttacksAcrossPitch()) {
