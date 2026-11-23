@@ -373,6 +373,7 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         if (std::abs(moveFor(i)) < minMove)
             lockTime(targetGrid.tauForward(targets[i].onset.sourceSeconds));
 
+    const auto lastLockedId = id;
     for (size_t i = 0; i < targets.size(); ++i) {
         const double time = targets[i].timeline;
         const double source = targets[i].onset.sourceSeconds;
@@ -386,28 +387,58 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         if (oldOutput <= *firstLock || oldOutput >= *lastLock || output <= *firstLock || output >= *lastLock)
             continue;
         const auto kind = targets[i].onset.highFrequencyDominant ? HandleKind::OnsetSibilant : HandleKind::OnsetVoiced;
-        if (insertAnchor(handles, {++id, source, output, kind, Confidence::High})) {
-            ++result.movedAnchors;
-            result.maxMoveSeconds = std::max(result.maxMoveSeconds, std::abs(output - oldOutput));
-        }
+        insertAnchor(handles, {++id, source, output, kind, Confidence::High});
     }
 
-    if (result.movedAnchors == 0)
-        return reject("no anchors can move within the timing limits");
-    result.grid = TimeGridSnapshot::makeFromHandles(std::move(handles));
-    if (!result.grid)
-        return reject("stretch would create an invalid timing grid");
-    for (size_t i = 0; i < targets.size(); ++i) {
-        const double after = targetPlacement.projectContentTimeToTimeline(
-            result.grid->tauForward(targets[i].onset.sourceSeconds));
-        const double before = targets[i].timeline;
-        if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
-            return reject("stretch would move an unedited attack");
-        if (matches[i] >= 0) {
-            const double reference = guides[static_cast<size_t>(matches[i])].timeline;
-            if (std::abs(after - reference) > std::abs(before - reference) + 1e-6)
-                return reject("stretch would worsen a reliable match");
+    // A blocked attack can move indirectly between two anchors. Remove only
+    // the new moves bracketing unsafe attacks, then recheck the joined spans.
+    const char* rejection = "no anchors can move within the timing limits";
+    for (;;) {
+        result.movedAnchors = 0;
+        result.maxMoveSeconds = 0.0;
+        for (const auto& handle : handles) {
+            if (handle.id <= lastLockedId)
+                continue;
+            ++result.movedAnchors;
+            result.maxMoveSeconds = std::max(result.maxMoveSeconds,
+                std::abs(handle.output_seconds - targetGrid.tauForward(handle.source_seconds)));
         }
+        if (result.movedAnchors == 0)
+            return reject(rejection);
+        result.grid = TimeGridSnapshot::makeFromHandles(handles);
+        if (!result.grid)
+            return reject("stretch would create an invalid timing grid");
+
+        std::vector<bool> discard(handles.size());
+        bool unsafe = false;
+        for (size_t i = 0; i < targets.size(); ++i) {
+            const double source = targets[i].onset.sourceSeconds;
+            const double after = targetPlacement.projectContentTimeToTimeline(result.grid->tauForward(source));
+            const double before = targets[i].timeline;
+            const double reference = before + offsetFor(i);
+            if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
+                rejection = "stretch would move an unedited attack";
+            else if (matches[i] >= 0 && std::abs(after - reference) > std::abs(before - reference) + 1e-6)
+                rejection = "stretch would worsen a reliable match";
+            else
+                continue;
+
+            unsafe = true;
+            const auto right = std::lower_bound(handles.begin(), handles.end(), source,
+                [](const TimeHandle& handle, double time) { return handle.source_seconds < time; });
+            for (const auto neighbor : {right - 1, right})
+                if (neighbor->id > lastLockedId)
+                    discard[static_cast<size_t>(neighbor - handles.begin())] = true;
+        }
+        if (!unsafe)
+            break;
+        size_t retained = 0;
+        for (size_t i = 0; i < handles.size(); ++i)
+            if (!discard[i])
+                handles[retained++] = handles[i];
+        if (retained == handles.size())
+            return reject(rejection);
+        handles.resize(retained);
     }
     if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
             return !preservesTimingAudioInRange(targetGrid, *result.grid, range);
