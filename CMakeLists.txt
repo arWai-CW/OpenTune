@@ -903,8 +903,9 @@ set(OPENTUNE_COMMON_SOURCES
         # attached to exactly one SharedCode target below)
         Source/Content/ContentKey.h
         Source/Content/ContentEditCommands.cpp
-        Source/Content/PitchReferenceSnapshot.cpp
-        Source/DSP/TimingAlignment.cpp
+        Source/Reference/PitchReferenceSnapshot.cpp
+        Source/Reference/PitchReferenceEdit.cpp
+        Source/Reference/TimingAlignment.cpp
         Source/Content/DomainContentOwner.h
         Source/Content/AnalysisState.h
         Source/Content/ContentState.h
@@ -1066,6 +1067,8 @@ endif()
 
 # ARA2 document integration is compiled into each ARA-enabled SharedCode target.
 set(OPENTUNE_ARA_SOURCES
+    Source/Reference/ReferenceEditor.cpp
+    Source/Reference/ReferenceEditor.h
     Source/ARA/AudioSource.cpp
     Source/ARA/AudioSource.h
     Source/ARA/AudioModification.cpp
@@ -1990,7 +1993,7 @@ if(OPENTUNE_BUILD_TESTS)
 
     add_executable(OpenTunePitchReferenceTests
         Tests/PitchReferenceTests.cpp
-        Source/Content/PitchReferenceSnapshot.cpp
+        Source/Reference/PitchReferenceSnapshot.cpp
         Source/Utils/AppLogger.cpp
         Source/Utils/TimeGrid.cpp
     )
@@ -2004,7 +2007,7 @@ if(OPENTUNE_BUILD_TESTS)
     add_executable(OpenTuneTimeStretchTests
         Tests/TimeStretchTests.cpp
         Source/DSP/ResamplingManager.cpp
-        Source/DSP/TimingAlignment.cpp
+        Source/Reference/TimingAlignment.cpp
         Source/Inference/RenderCache.cpp
         Source/Inference/SoundTouchStretcher.cpp
         Source/Inference/TimeStretchCache.cpp

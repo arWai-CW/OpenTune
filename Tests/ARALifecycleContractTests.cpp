@@ -4,7 +4,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/ARA/OpenTuneDocumentController.h"
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
-#include "../Source/DSP/TimingAlignment.h"
+#include "../Source/Reference/TimingAlignment.h"
 #include "../Source/Utils/TimeGridEditAction.h"
 #include "../Source/Runtime/ProcessF0Runtime.h"
 #include "../Source/Runtime/ProcessRenderRuntime.h"

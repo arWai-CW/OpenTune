@@ -1,4 +1,4 @@
-#include "Content/PitchReferenceSnapshot.h"
+#include "Reference/PitchReferenceSnapshot.h"
 #include "UI/PianoRoll/PianoRollTimeMap.h"
 #include "Utils/EditorUiSync.h"
 

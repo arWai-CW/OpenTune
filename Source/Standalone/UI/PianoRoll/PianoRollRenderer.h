@@ -15,7 +15,7 @@
 #include "UI/ToolIds.h"
 #include "UI/ViewMapper.h"
 #include "Content/EditableContentSnapshot.h"
-#include "Content/PitchReferenceSnapshot.h"
+#include "Reference/PitchReferenceSnapshot.h"
 #include <algorithm>
 #include <vector>
 #include <array>
