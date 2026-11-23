@@ -386,6 +386,38 @@ bool testBlockedAnchorDoesNotDriftAway()
     const std::vector<TimingOnset> guide{{0.46, true}, {0.69, false}, {1.25, true}, {1.85, false}};
     return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
 }
+
+bool testBlockedAttackDoesNotDiscardSafeEdits()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.35, 0.35, HandleKind::UserAdded},
+        {3, 0.95, 0.95, HandleKind::UserAdded},
+        {4, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    const std::vector<TimingOnset> target{{0.60, true}, {0.73, false},
+        {1.35, true}, {1.90, false}, {2.45, true}};
+    const std::vector<TimingOnset> guide{{0.552, true}, {0.763, false},
+        {1.39, true}, {1.94, false}, {2.49, true}};
+    for (const double strength : {0.5, 1.0}) {
+        const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, strength);
+        if (!plan.grid) {
+            std::fprintf(stderr, "Safe attacks discarded: %s\n", plan.rejection);
+            return false;
+        }
+        if (plan.matchedAttacks != 5 || plan.movedAnchors != 3
+            || std::abs(plan.maxMoveSeconds - 0.04 * strength) > 1e-9)
+            return false;
+        for (size_t i = 0; i < target.size(); ++i) {
+            const auto before = target[i].sourceSeconds;
+            const auto expected = i < 2 ? before : before + 0.04 * strength;
+            if (std::abs(plan.grid->tauForward(before) - expected) > 1e-9)
+                return false;
+        }
+    }
+    return true;
+}
 }
 
 int main()
@@ -396,6 +428,10 @@ int main()
     }
     if (!testReferenceAlignment()) {
         std::fputs("Reference timing failed placement, strength, or preservation\n", stderr);
+        return 1;
+    }
+    if (!testBlockedAttackDoesNotDiscardSafeEdits()) {
+        std::fputs("A blocked attack discarded independent safe timing edits\n", stderr);
         return 1;
     }
     if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
