@@ -512,8 +512,14 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         return reject("timing would affect another placement that shares these ARA edits");
     };
     if (result.movedAnchors == 0) {
-        if (skippedProtectedMove)
-            return rejectProtectedTiming();
+        if (skippedProtectedMove) {
+            const auto unpooled = alignTimingToReference(target, targetGrid, targetPlacement,
+                guide, guideGrid, guidePlacement, strength, {});
+            if (unpooled.grid)
+                return rejectProtectedTiming();
+            if (unpooled.rejection)
+                return reject(unpooled.rejection);
+        }
         return reject(rejection);
     }
     if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {

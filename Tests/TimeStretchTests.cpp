@@ -480,6 +480,23 @@ bool testProtectedSiblingDoesNotDiscardIndependentMove()
         && std::abs(plan.grid->tauForward(1.50) - 1.54) < 1e-9
         && preservesTimingAudioInRange(*grid, *plan.grid, sibling);
 }
+
+bool testUnpoolHintRequiresSafeUnpooledMoves()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.35, 0.35, HandleKind::UserAdded},
+        {3, 0.95, 0.95, HandleKind::UserAdded},
+        {4, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.60, true}, {0.73, false}, {1.35, true}};
+    const std::vector<TimingOnset> guide{{0.552, true}, {0.763, false}, {1.35, true}};
+    const auto unpooled = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    const auto pooled = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0, {{0.4, 0.5}});
+    return !unpooled.grid && !pooled.grid && pooled.matchedAttacks == 3 && !pooled.affectsProtectedTiming
+        && juce::String(pooled.rejection) == "stretch would worsen a reliable match";
+}
 }
 
 int main()
@@ -502,6 +519,10 @@ int main()
     }
     if (!testProtectedSiblingDoesNotDiscardIndependentMove()) {
         std::fputs("A move affecting a pooled sibling discarded an independent timing move\n", stderr);
+        return 1;
+    }
+    if (!testUnpoolHintRequiresSafeUnpooledMoves()) {
+        std::fputs("Timing alignment suggested unpooling even though an independent clip cannot align\n", stderr);
         return 1;
     }
     if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
