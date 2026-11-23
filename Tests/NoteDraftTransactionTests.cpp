@@ -232,12 +232,54 @@ bool runMixAutoSnapScope()
                   "A drawing on the selected note must be replaced by Snap");
 }
 
+bool runMixParameterUndoRestoresLineBase()
+{
+    using Source = PitchCorrectionSegment::Source;
+    OpenTuneAudioProcessor processor;
+    processor.prepareToPlay(44100.0, 512);
+    auto& repository = *processor.getStandaloneContentRepository();
+    const auto key = repository.createClip();
+    auto* clip = repository.findClip(key);
+    auto curve = std::make_shared<PitchCurve>();
+    curve->setHopSize(1);
+    curve->setSampleRate(128.0);
+    curve->setOriginalF0(std::vector<float>(512, 220.0f));
+    std::vector<float> line(448);
+    for (std::size_t i = 0; i < line.size(); ++i)
+        line[i] = 300.0f + static_cast<float>(i);
+    curve->setManualCorrectionRange(1, 449, line, Source::LineAnchor);
+    clip->applyPitchCurve(std::move(curve));
+    clip->applyNotes({makeNote(240.0 / 128, 265.0 / 128, 220.0f)});
+
+    const auto before = processor.getContentSnapshot(key);
+    const auto edit = processor.editSelectedNoteParameter(
+        key, {0}, before->notesRevision, AudioEditingScheme::ParameterId::RetuneSpeed,
+        0.8f, 0.15f, 0.0f, 7.5f, "Mix Retune", true);
+    if (!expect(edit.changed && edit.contentSnapshot && edit.affectedRange.startFrame > 1,
+                "The parameter edit must start inside the drawing"))
+        return false;
+
+    processor.getUndoManager().undo();
+    const auto restored = processor.getContentSnapshot(key);
+    const int frame = 247;
+    for (const auto& segment : restored->pitchCurve->getCorrectionSegments()) {
+        if (segment.startFrame <= frame && frame < segment.endFrame) {
+            const auto offset = static_cast<std::size_t>(frame - segment.startFrame);
+            return expect(segment.source == Source::LineAnchor
+                              && offset < segment.baseF0Data.size()
+                              && segment.baseF0Data[offset] == line[frame - 1],
+                          "Undo must restore the drawing's base frequency at its original frame");
+        }
+    }
+    return expect(false, "Undo must restore the drawing at the edited frame");
+}
+
 } // namespace
 
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     return runTransactions() && runCorrectionDraftTransaction() && runInsertionAndDeletionTransactions()
-        && runMixAutoSnapScope()
+        && runMixAutoSnapScope() && runMixParameterUndoRestoresLineBase()
         ? 0 : 1;
 }

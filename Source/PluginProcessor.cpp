@@ -1284,35 +1284,13 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             return result;
         }
 
-        static std::vector<PitchCorrectionSegment> segmentsInRange(
-            const std::vector<PitchCorrectionSegment>& segments, int start, int end)
-        {
-            std::vector<PitchCorrectionSegment> result;
-            for (const auto& segment : segments) {
-                if (segment.endFrame <= start || segment.startFrame >= end)
-                    continue;
-                const int clipStart = std::max(segment.startFrame, start);
-                const int clipEnd = std::min(segment.endFrame, end);
-                const int offset = clipStart - segment.startFrame;
-                if (clipEnd <= clipStart || offset + clipEnd - clipStart > static_cast<int>(segment.f0Data.size()))
-                    continue;
-                auto clipped = segment;
-                clipped.startFrame = clipStart;
-                clipped.endFrame = clipEnd;
-                clipped.f0Data.assign(segment.f0Data.begin() + offset,
-                                      segment.f0Data.begin() + offset + clipEnd - clipStart);
-                result.push_back(std::move(clipped));
-            }
-            return result;
-        }
-
         static std::vector<PitchCorrectionSegment> segmentsInRanges(
             const std::vector<PitchCorrectionSegment>& segments,
             const std::vector<ContentEditRangeFrames>& ranges)
         {
             std::vector<PitchCorrectionSegment> result;
             for (const auto& range : ranges) {
-                auto clipped = segmentsInRange(segments, range.startFrame, range.endFrameExclusive);
+                auto clipped = clipSegmentsToFrameRange(segments, range.startFrame, range.endFrameExclusive);
                 result.insert(result.end(),
                               std::make_move_iterator(clipped.begin()),
                               std::make_move_iterator(clipped.end()));
