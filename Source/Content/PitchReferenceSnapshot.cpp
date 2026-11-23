@@ -1,7 +1,13 @@
 #include "PitchReferenceSnapshot.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace OpenTune {
 namespace {
+
+constexpr double kReferencePitchCenterWindowSeconds = 0.2;
+constexpr double kReferencePitchChangeToleranceCents = 0.5;
 
 bool isVoiced(float hz)
 {
@@ -71,39 +77,73 @@ PitchReferenceCorrection planPitchReferenceCorrection(
 
     const F0Timeline timeline{target.curve->getHopSize(), target.curve->getSampleRate(),
                               static_cast<int>(target.curve->size())};
+    const double frameSeconds = timeline.timeAtFrame(1);
+    int centerWindowFrames = std::max(1, static_cast<int>(std::lround(
+        kReferencePitchCenterWindowSeconds / frameSeconds)));
+    if (centerWindowFrames % 2 == 0)
+        ++centerWindowFrames;
+    const int centerWindowRadius = centerWindowFrames / 2;
     const auto& originalF0 = target.curve->getOriginalF0();
+
+    struct RunFrame
+    {
+        float baseHz;
+        float offsetCents;
+    };
+
     for (const auto& range : ranges) {
-        PitchCorrectionSegment run{0, 0, {}, PitchCorrectionSegment::Source::HandDraw};
-        bool changed = false;
+        std::vector<RunFrame> run;
+        int runStartFrame = 0;
         const auto finishRun = [&] {
+            if (run.empty())
+                return;
+            const int count = static_cast<int>(run.size());
+            PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
+                                           PitchCorrectionSegment::Source::HandDraw};
+            segment.f0Data.reserve(run.size());
+            bool changed = false;
+            for (int i = 0; i < count; ++i) {
+                const int begin = std::max(0, i - centerWindowRadius);
+                const int end = std::min(count, i + centerWindowRadius + 1);
+                double offsetSum = 0.0;
+                for (int j = begin; j < end; ++j)
+                    offsetSum += run[static_cast<size_t>(j)].offsetCents;
+                const double smoothedCents = offsetSum / static_cast<double>(end - begin);
+                const float correctedHz = static_cast<float>(run[static_cast<size_t>(i)].baseHz
+                    * std::exp2(smoothedCents / 1200.0));
+                segment.f0Data.push_back(correctedHz);
+                const float currentHz = effectivePitch(target, runStartFrame + i);
+                if (!isVoiced(currentHz) || std::abs(1200.0 * std::log2(
+                        static_cast<double>(correctedHz) / currentHz)) > kReferencePitchChangeToleranceCents)
+                    changed = true;
+            }
             if (changed)
-                result.segments.push_back(std::move(run));
-            run = {0, 0, {}, PitchCorrectionSegment::Source::HandDraw};
-            changed = false;
+                result.segments.push_back(std::move(segment));
+            run.clear();
         };
         for (int frame = std::max(0, range.startFrame);
              frame < std::min(range.endFrameExclusive, timeline.endFrameExclusive()); ++frame) {
-            float hz = 0.0f;
-            if (isVoiced(originalF0[static_cast<size_t>(frame)])) {
+            float referenceHz = 0.0f;
+            const float baseHz = originalF0[static_cast<size_t>(frame)] * target.originalPitchRatio;
+            if (isVoiced(baseHz)) {
                 const double time = placement.projectContentTimeToTimeline(
                     target.timeGrid->tauForward(timeline.timeAtFrame(frame)));
                 if (time >= placement.timelineStartSeconds && time < placement.timelineEndSeconds())
-                    hz = pitchAtTimelineTime(time);
+                    referenceHz = pitchAtTimelineTime(time);
             }
-            if (!isVoiced(hz)) {
-                if (!run.f0Data.empty())
-                    finishRun();
+            if (!isVoiced(referenceHz)) {
+                finishRun();
                 continue;
             }
             result.hasVoicedOverlap = true;
-            if (run.f0Data.empty())
-                run.startFrame = frame;
-            run.endFrame = frame + 1;
-            run.f0Data.push_back(hz);
-            changed = changed || hz != effectivePitch(target, frame);
+            if (run.empty())
+                runStartFrame = frame;
+            double offsetCents = 1200.0 * std::log2(
+                static_cast<double>(referenceHz) / baseHz);
+            offsetCents -= 1200.0 * std::round(offsetCents / 1200.0);
+            run.push_back({baseHz, static_cast<float>(offsetCents)});
         }
-        if (changed)
-            result.segments.push_back(std::move(run));
+        finishRun();
     }
     return result;
 }
