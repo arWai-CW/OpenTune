@@ -18,7 +18,13 @@ struct TimingAlignment
     int movedAnchors = 0;
     double maxMoveSeconds = 0.0;
     bool alreadyAligned = false;
+    const char* rejection = nullptr;
+    std::size_t targetAttacks = 0;
+    std::size_t referenceAttacks = 0;
+    std::size_t matchedAttacks = 0;
 };
+
+inline constexpr double minimumTimingOverlapSeconds = 0.5;
 
 std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate);
 

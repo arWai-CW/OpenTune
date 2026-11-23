@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string_view>
 
 namespace {
 using namespace OpenTune;
@@ -217,6 +218,26 @@ bool testLoudAudioOutsideOverlapDoesNotHideAttacks()
         && std::abs(plan.grid->tauForward(0.35) - 0.35) < 1e-9;
 }
 
+bool testTimingRejectionReportsStageAndCounts()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    const std::vector<TimingOnset> targets{{0.4, true}, {1.0, false}, {1.6, true}};
+    const std::vector<TimingOnset> guides{{0.44, true}, {1.04, false}, {2.1, true}};
+    const auto plan = [&](const std::vector<TimingOnset>& guide) {
+        return alignTimingToReference(targets, *grid, placement, guide, *grid, placement, 1.0);
+    };
+    const auto noAttacks = plan({});
+    const auto notEnoughMatches = plan(guides);
+    return !noAttacks.grid && noAttacks.rejection
+        && std::string_view(noAttacks.rejection).find("detected attacks") != std::string_view::npos
+        && noAttacks.targetAttacks == 3 && noAttacks.referenceAttacks == 0 && noAttacks.matchedAttacks == 0
+        && !notEnoughMatches.grid && notEnoughMatches.rejection
+        && std::string_view(notEnoughMatches.rejection).find("reliable matches") != std::string_view::npos
+        && notEnoughMatches.targetAttacks == 3 && notEnoughMatches.referenceAttacks == 3
+        && notEnoughMatches.matchedAttacks == 2;
+}
+
 bool testPeriodicAttacksDoNotSlipByASyllable()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(3.0);
@@ -293,6 +314,10 @@ int main()
     }
     if (!testLoudAudioOutsideOverlapDoesNotHideAttacks()) {
         std::fputs("Loud audio outside the overlap hid matching timing attacks\n", stderr);
+        return 1;
+    }
+    if (!testTimingRejectionReportsStageAndCounts()) {
+        std::fputs("Timing alignment did not report the rejection stage and counts\n", stderr);
         return 1;
     }
     if (!testIsolatedAttackStaysPut()) {

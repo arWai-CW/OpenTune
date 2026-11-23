@@ -214,16 +214,29 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
                                        const ContentTimelineProjection& guidePlacement,
                                        double strength)
 {
+    TimingAlignment result;
+    const auto reject = [&](const char* stage) {
+        result.grid.reset();
+        result.movedAnchors = 0;
+        result.maxMoveSeconds = 0.0;
+        result.rejection = stage;
+        return result;
+    };
+
     if (targetGrid.empty() || guideGrid.empty() || !targetPlacement.isValid()
         || !guidePlacement.isValid() || !(strength > 0.0 && strength <= 1.0))
-        return {};
+        return reject("invalid timing grid or placement");
     const double begin = std::max(targetPlacement.timelineStartSeconds, guidePlacement.timelineStartSeconds);
     const double end = std::min(targetPlacement.timelineEndSeconds(), guidePlacement.timelineEndSeconds());
-    if (end - begin < 0.5)
-        return {};
+    if (end - begin < minimumTimingOverlapSeconds)
+        return reject("insufficient overlap");
 
     const auto targets = projectOnsets(target, targetGrid, targetPlacement, begin, end);
     const auto guides = projectOnsets(guide, guideGrid, guidePlacement, begin, end);
+    result.targetAttacks = targets.size();
+    result.referenceAttacks = guides.size();
+    if (targets.size() < 3 || guides.size() < 3)
+        return reject("too few detected attacks (need 3 on each clip)");
     std::vector<int> matches(targets.size(), -1);
     int previous = -1;
     for (size_t i = 0; i < targets.size(); ++i) {
@@ -253,9 +266,11 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         else
             ++matched;
     }
-    if (matched < 3 || matched * 2 < targets.size()
-        || hasCompetingSyllablePhase(targets, guides, matches, matched))
-        return {};
+    result.matchedAttacks = matched;
+    if (matched < 3 || matched * 2 < targets.size())
+        return reject("too few reliable matches (need 3 and at least half of target attacks)");
+    if (hasCompetingSyllablePhase(targets, guides, matches, matched))
+        return reject("ambiguous syllable matches");
 
     constexpr double minMove = 0.012;
     const auto offsetFor = [&](size_t i) {
@@ -265,7 +280,6 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     for (size_t i = 0; i < targets.size(); ++i)
         alreadyAligned = alreadyAligned && std::abs(offsetFor(i)) < minMove;
     if (alreadyAligned) {
-        TimingAlignment result;
         result.alreadyAligned = true;
         return result;
     }
@@ -304,7 +318,7 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     const auto firstLock = lockBoundary(firstOutput, 0.025);
     const auto lastLock = lockBoundary(lastOutput, -0.025);
     if (!firstLock || !lastLock || *firstLock >= *lastLock)
-        return {};
+        return reject("could not lock overlap boundaries");
     const auto moveFor = [&](size_t i) {
         return offsetFor(i) * strength;
     };
@@ -312,7 +326,6 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         if (std::abs(moveFor(i)) < minMove)
             lockTime(targetGrid.tauForward(targets[i].onset.sourceSeconds));
 
-    TimingAlignment result;
     for (size_t i = 0; i < targets.size(); ++i) {
         const double time = targets[i].timeline;
         const double source = targets[i].onset.sourceSeconds;
@@ -332,21 +345,21 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         }
     }
 
-    if (result.movedAnchors > 0) {
-        result.grid = TimeGridSnapshot::makeFromHandles(std::move(handles));
-        if (!result.grid)
-            return {};
-        for (size_t i = 0; i < targets.size(); ++i) {
-            const double after = targetPlacement.projectContentTimeToTimeline(
-                result.grid->tauForward(targets[i].onset.sourceSeconds));
-            const double before = targets[i].timeline;
-            if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
-                return {};
-            if (matches[i] >= 0) {
-                const double reference = guides[static_cast<size_t>(matches[i])].timeline;
-                if (std::abs(after - reference) > std::abs(before - reference) + 1e-6)
-                    return {};
-            }
+    if (result.movedAnchors == 0)
+        return reject("no anchors can move within the timing limits");
+    result.grid = TimeGridSnapshot::makeFromHandles(std::move(handles));
+    if (!result.grid)
+        return reject("stretch would create an invalid timing grid");
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const double after = targetPlacement.projectContentTimeToTimeline(
+            result.grid->tauForward(targets[i].onset.sourceSeconds));
+        const double before = targets[i].timeline;
+        if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
+            return reject("stretch would move an unedited attack");
+        if (matches[i] >= 0) {
+            const double reference = guides[static_cast<size_t>(matches[i])].timeline;
+            if (std::abs(after - reference) > std::abs(before - reference) + 1e-6)
+                return reject("stretch would worsen a reliable match");
         }
     }
     return result;

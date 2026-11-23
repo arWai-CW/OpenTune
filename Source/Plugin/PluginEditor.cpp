@@ -1152,13 +1152,26 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     };
 
     parameterPanel_.commitPendingEdits();
-    const auto load = [dc](const Region& region) -> Input {
-        if (!region.isPlaybackRenderable() || !region.contentProjection.isValid())
+    const auto load = [dc](const Region& region, juce::String& rejection) -> Input {
+        if (!region.contentProjection.isValid()) {
+            rejection = "no content projection (audio not loaded or invalid placement)";
             return {};
+        }
+        if (!region.isPlaybackRenderable()) {
+            rejection = "unsupported playback placement (timeline " + juce::String(region.durationInPlaybackTime, 3)
+                + " s, source " + juce::String(region.durationInModificationTime, 3) + " s)";
+            return {};
+        }
         auto snapshot = dc->readContentSnapshot(region.contentKey);
-        if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid
-            || snapshot->timeGrid->totalDurationSeconds() > 180.0)
+        if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid || snapshot->timeGrid->empty()) {
+            rejection = "audio or timing grid not loaded";
             return {};
+        }
+        if (snapshot->timeGrid->totalDurationSeconds() > 180.0) {
+            rejection = "source duration " + juce::String(snapshot->timeGrid->totalDurationSeconds(), 1)
+                + " s exceeds the 180 s timing limit";
+            return {};
+        }
         return {region, std::move(snapshot)};
     };
     const auto guideRegions = dc->getPlaybackRegionProjectionsFor(pitchReferenceTrack_->getPlaybackRegions());
@@ -1176,35 +1189,64 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
 
     const auto title = LOC(kAlignTimingToReference);
     if (selected.empty() || selected.size() > 6) {
-        ConfirmDialogContent::showMessage(&contentRoot_, title,
-            LOC_RAW("Select one to six target clips in the DAW, and choose a separate reference track."));
+        const auto reason = "Selection: " + juce::String(static_cast<int>(selected.size())) + " target clips (need 1–6)";
+        ConfirmDialogContent::showDiagnostic(&contentRoot_, title,
+            LOC_RAW("Select one to six target clips in the DAW, and choose a separate reference track.") + "\n" + reason,
+            reason);
         return;
     }
 
+    juce::StringArray diagnostics;
     std::vector<Input> guides;
     std::vector<Target> targets;
-    for (const auto& region : dc->getPlaybackRegionProjectionsFor(selected)) {
+    const auto targetRegions = dc->getPlaybackRegionProjectionsFor(selected);
+    if (targetRegions.size() != selected.size())
+        diagnostics.add("Placement: " + juce::String(static_cast<int>(targetRegions.size())) + "/"
+            + juce::String(static_cast<int>(selected.size())) + " selected targets have a valid DAW placement");
+    for (const auto& region : targetRegions) {
+        const auto position = "Target @ " + juce::String(region.startInPlaybackTime, 2) + " s: ";
         const auto* modification = region.playbackRegion->getAudioModification();
         // A shared modification would also change unselected host placements.
-        if (modification == nullptr || modification->getPlaybackRegions().size() != 1)
+        if (modification == nullptr || modification->getPlaybackRegions().size() != 1) {
+            diagnostics.add(position + "expected 1 placement of the ARA audio modification, found "
+                + juce::String(modification != nullptr ? static_cast<int>(modification->getPlaybackRegions().size()) : 0));
             continue;
-        const auto input = load(region);
-        if (!input.snapshot)
+        }
+        juce::String rejection;
+        const auto input = load(region, rejection);
+        if (!input.snapshot) {
+            diagnostics.add(position + rejection);
             continue;
+        }
         Input bestGuide;
-        double bestOverlap = 0.5;
+        double bestOverlap = 0.0;
+        double maxOverlap = 0.0;
+        juce::String referenceRejection;
         for (const auto& guide : guideRegions) {
             const double overlap = std::min(region.endInPlaybackTime, guide.endInPlaybackTime)
                 - std::max(region.startInPlaybackTime, guide.startInPlaybackTime);
-            if (guide.contentKey == region.contentKey || overlap <= bestOverlap)
+            if (guide.contentKey == region.contentKey)
                 continue;
-            if (auto candidate = load(guide); candidate.snapshot) {
+            const auto previousMax = maxOverlap;
+            maxOverlap = std::max(maxOverlap, overlap);
+            if (overlap < minimumTimingOverlapSeconds || overlap <= bestOverlap)
+                continue;
+            if (auto candidate = load(guide, rejection); candidate.snapshot) {
                 bestGuide = std::move(candidate);
                 bestOverlap = overlap;
+            } else if (overlap >= previousMax) {
+                referenceRejection = rejection;
             }
         }
-        if (!bestGuide.snapshot)
+        if (!bestGuide.snapshot) {
+            const auto reason = referenceRejection.isNotEmpty() ? referenceRejection
+                : juce::String("no eligible reference clip with enough overlap");
+            diagnostics.add(position + "reference: " + reason + " (max overlap "
+                + juce::String(maxOverlap, 3) + " s; need "
+                + juce::String(minimumTimingOverlapSeconds, 1) + " s; "
+                + juce::String(static_cast<int>(guideRegions.size())) + " reference clips)");
             continue;
+        }
         const auto existing = std::find_if(guides.begin(), guides.end(), [&](const auto& guide) {
             return guide.region.playbackRegion == bestGuide.region.playbackRegion;
         });
@@ -1218,9 +1260,13 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
         targets.push_back({input, guideIndex, std::move(name), {}, {}});
     }
-    const auto noAlignment = LOC_RAW("No reliable timing changes. Read the reference and target audio first, then select overlapping takes of the same phrase.");
+    const auto noAlignment = LOC_RAW("No reliable timing changes.");
+    const auto showFailure = [title, noAlignment](juce::Component& parent, const juce::StringArray& details) {
+        const auto summary = details.isEmpty() ? noAlignment : noAlignment + "\n" + details[0];
+        ConfirmDialogContent::showDiagnostic(&parent, title, summary, details.joinIntoString("\n"));
+    };
     if (targets.empty()) {
-        ConfirmDialogContent::showMessage(&contentRoot_, title, noAlignment);
+        showFailure(contentRoot_, diagnostics);
         return;
     }
 
@@ -1231,7 +1277,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     a11y::announce(pianoRoll_, LOC_RAW("Analyzing timing"));
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
-        guides = std::move(guides), targets = std::move(targets), title, noAlignment]() mutable {
+        guides = std::move(guides), targets = std::move(targets), title, showFailure, diagnostics = std::move(diagnostics)]() mutable {
         const auto detect = [](const Input& input, const Input& other) {
             return detectTimingOnsetsInOverlap(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate,
                 *input.snapshot->timeGrid, input.region.contentProjection, other.region.contentProjection);
@@ -1248,9 +1294,28 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                 };
                 target.gentle = plan(0.5);
                 target.tight = plan(1.0);
+                if (!target.gentle.grid && !target.tight.grid) {
+                    const auto& a = target.tight;
+                    const auto& targetRegion = target.input.region;
+                    const double overlap = std::min(targetRegion.endInPlaybackTime, guide.region.endInPlaybackTime)
+                        - std::max(targetRegion.startInPlaybackTime, guide.region.startInPlaybackTime);
+                    const auto stage = [](const TimingAlignment& result) {
+                        return juce::String(result.alreadyAligned ? "already aligned" : result.rejection);
+                    };
+                    const auto tight = stage(a);
+                    const auto gentle = stage(target.gentle);
+                    const auto reason = tight == gentle ? tight : tight + " (tight), " + gentle + " (gentle)";
+                    diagnostics.add("Target @ " + juce::String(targetRegion.startInPlaybackTime, 2)
+                        + " s: " + reason + "; overlap "
+                        + juce::String(overlap, 3) + " s, attacks (target/ref) "
+                        + juce::String(static_cast<int>(a.targetAttacks)) + "/"
+                        + juce::String(static_cast<int>(a.referenceAttacks)) + ", matched "
+                        + juce::String(static_cast<int>(a.matchedAttacks)));
+                }
             }
         } catch (const std::exception& error) {
             AppLogger::warn("Timing alignment: " + juce::String(error.what()));
+            diagnostics.add("Analysis could not finish; see the OpenTune log.");
             targets.clear();
         }
         const bool alreadyAligned = targets.size() == count
@@ -1261,7 +1326,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             return !target.gentle.grid && !target.tight.grid;
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
-                targets = std::move(targets), title, noAlignment, alreadyAligned]() mutable {
+                targets = std::move(targets), title, showFailure, diagnostics = std::move(diagnostics), alreadyAligned]() mutable {
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
@@ -1271,8 +1336,11 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             }
             if (targets.empty()) {
                 safe->refreshReferenceControls();
-                ConfirmDialogContent::showMessage(&safe->contentRoot_, title, alreadyAligned
-                    ? LOC_RAW("The matched attacks are already aligned. No timing change was applied.") : noAlignment);
+                if (alreadyAligned)
+                    ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
+                        LOC_RAW("The matched attacks are already aligned. No timing change was applied."));
+                else
+                    showFailure(safe->contentRoot_, diagnostics);
                 return;
             }
 
