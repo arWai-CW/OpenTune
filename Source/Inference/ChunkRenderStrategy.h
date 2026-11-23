@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../DSP/AutoTunePeriodDetector.h"
+#include "../DSP/AutoTunePitchShifter.h"
 #include "../DSP/PitchShiftRateContract.h"
 
 namespace OpenTune {
@@ -53,6 +54,9 @@ constexpr float kLightClampCents = 70.0f;
 /// Detector-invalid runs shorter than this pass through the light render
 /// uncorrected (onsets, breath, consonant edges); longer runs go to the vocoder.
 constexpr double kMaxLightInvalidRunSeconds = 0.040;
+/// A vocoder region grows into neighbouring frames while the light render's
+/// smoothed pitch is this far from the requested pitch, so seams never jump.
+constexpr double kSeamPitchToleranceCents = 3.0;
 constexpr double kSpliceFadeSeconds = 0.020;
 constexpr double kSpliceSearchSeconds = 0.015;
 constexpr double kSpliceDilateSeconds = 0.005;
@@ -108,7 +112,8 @@ inline LightRenderPlan planLightRender(
     int numSamples,
     double sampleRate,
     double f0FrameRate,
-    double firstSampleFramePhase)
+    double firstSampleFramePhase,
+    bool snapMode = true)
 {
     LightRenderPlan plan;
     const int frames = std::min(numF0Frames, static_cast<int>(correctedF0.size()));
@@ -135,27 +140,65 @@ inline LightRenderPlan planLightRender(
 
     if (detectorPeriods != nullptr && numSamples > 0) {
         const double samplesPerF0Frame = sampleRate / f0FrameRate;
-        std::vector<uint8_t> invalid(static_cast<size_t>(frames), 0);
-        for (int i = 0; i < numSamples; ++i) {
-            const int f = chunkFrameAtSample(i, samplesPerF0Frame,
-                                             firstSampleFramePhase, frames);
+        const auto frameAt = [&](int i) {
+            return chunkFrameAtSample(i, samplesPerF0Frame, firstSampleFramePhase, frames);
+        };
+        const auto invalidAt = [&](int i) {
             const auto& det = detectorPeriods[i];
-            if (active(f) && !(det.valid && det.periodSamples > 0.0f))
-                invalid[static_cast<size_t>(f)] = 1;
-        }
-        const int maxLightRun = std::max(1, static_cast<int>(
-            std::floor(kMaxLightInvalidRunSeconds * f0FrameRate)));
-        for (int f = 0; f < frames;) {
-            if (!invalid[static_cast<size_t>(f)]) { ++f; continue; }
-            int end = f;
-            while (end < frames && invalid[static_cast<size_t>(end)])
+            return !(det.valid && det.periodSamples > 0.0f);
+        };
+
+        // Invalid runs are measured in samples, not in the frames they touch.
+        const int maxLightRunSamples = std::max(1, static_cast<int>(
+            std::ceil(kMaxLightInvalidRunSeconds * sampleRate)));
+        for (int i = 0; i < numSamples;) {
+            if (!(active(frameAt(i)) && invalidAt(i))) { ++i; continue; }
+            int end = i;
+            while (end < numSamples && active(frameAt(end)) && invalidAt(end))
                 ++end;
-            for (int k = f; k < end; ++k) {
-                plan.dspTarget[static_cast<size_t>(k)] = 0.0f;
-                if (end - f >= maxLightRun)
-                    plan.vocoderFrames[static_cast<size_t>(k)] = 1;
+            const bool longRun = end - i >= maxLightRunSamples;
+            for (int k = i; k < end; ++k) {
+                const auto f = static_cast<size_t>(frameAt(k));
+                plan.dspTarget[f] = 0.0f;
+                if (longRun)
+                    plan.vocoderFrames[f] = 1;
             }
-            f = end;
+            i = end;
+        }
+
+        // Follow the light render's smoothed pitch (in cents from the source)
+        // and grow each vocoder region over neighbouring frames where it is
+        // still away from the requested pitch, e.g. while it glides back from
+        // the clamped target after a large correction.
+        const auto centsOf = [&](const std::vector<float>& track, int f) {
+            const float value = track[static_cast<size_t>(f)];
+            return value > 0.0f && originalF0[f] > 0.0f
+                ? 1200.0 * std::log2(static_cast<double>(value) / static_cast<double>(originalF0[f]))
+                : 0.0;
+        };
+        const double keep = snapMode ? 0.0 : AutoTunePitchShifter::kDecayPerTrackingUpdate;
+        std::vector<uint8_t> seamMismatch(static_cast<size_t>(frames), 0);
+        double lightCents = 0.0;
+        for (int i = 0; i < numSamples; ++i) {
+            const int f = frameAt(i);
+            const double target = centsOf(plan.dspTarget, f);
+            if (invalidAt(i))
+                lightCents = 0.0;
+            else if (detectorPeriods[i].trackingUpdated)
+                lightCents = target + (lightCents - target) * keep;
+            if (std::fabs(lightCents - centsOf(correctedF0, f)) >= kSeamPitchToleranceCents)
+                seamMismatch[static_cast<size_t>(f)] = 1;
+        }
+        const auto seed = plan.vocoderFrames;
+        for (int f = 0; f < frames; ++f) {
+            if (!seed[static_cast<size_t>(f)])
+                continue;
+            for (int g = f + 1; g < frames && !seed[static_cast<size_t>(g)]
+                     && seamMismatch[static_cast<size_t>(g)]; ++g)
+                plan.vocoderFrames[static_cast<size_t>(g)] = 1;
+            for (int g = f - 1; g >= 0 && !seed[static_cast<size_t>(g)]
+                     && seamMismatch[static_cast<size_t>(g)]; --g)
+                plan.vocoderFrames[static_cast<size_t>(g)] = 1;
         }
     }
 
@@ -223,6 +266,10 @@ inline std::vector<float> buildVocoderSpliceWeights(
         const double x = (static_cast<double>(k) + 0.5) / static_cast<double>(fade);
         return static_cast<float>(0.5 - 0.5 * std::cos(3.14159265358979323846 * x));
     };
+    const auto rampOver = [](int k, int length) {
+        const double x = (static_cast<double>(k) + 0.5) / static_cast<double>(length);
+        return static_cast<float>(0.5 - 0.5 * std::cos(3.14159265358979323846 * x));
+    };
     const auto raise = [&](int i, float w) {
         if (i >= 0 && i < numSamples)
             weights[static_cast<size_t>(i)] = std::max(weights[static_cast<size_t>(i)], w);
@@ -235,7 +282,12 @@ inline std::vector<float> buildVocoderSpliceWeights(
         for (int i = start; i < end; ++i)
             raise(i, 1.0f);
 
-        if (start > 0) {
+        if (start > 0 && start < fade) {
+            // Not enough room before the chunk start: fade in from its first sample.
+            for (int k = 0; k < start; ++k)
+                raise(k, rampOver(k, start));
+        }
+        else if (start > 0) {
             int bestEnd = start;
             double bestEnergy = energy(start - fade, start);
             for (int fe = start - kSearchStep; fe >= start - search && fe - fade >= 0; fe -= kSearchStep) {
@@ -247,7 +299,14 @@ inline std::vector<float> buildVocoderSpliceWeights(
             for (int k = 0; k < fade; ++k)
                 raise(bestEnd - fade + k, ramp(k));
         }
-        if (end < numSamples) {
+        if (end < numSamples && numSamples - end < fade) {
+            // Not enough room before the chunk end: fade out by its last
+            // sample so the next chunk does not start against a vocoder edge.
+            const int room = numSamples - end;
+            for (int k = 0; k < room; ++k)
+                raise(end + k, rampOver(room - 1 - k, room));
+        }
+        else if (end < numSamples) {
             int bestStart = end;
             double bestEnergy = energy(end, end + fade);
             for (int fs = end + kSearchStep; fs <= end + search && fs + fade <= numSamples; fs += kSearchStep) {

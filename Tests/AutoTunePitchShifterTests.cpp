@@ -2710,7 +2710,7 @@ void testPlanLightRenderSplitsPerFrame()
     corrected[4] = static_cast<float>(220.0 * std::exp2(200.0 / 1200.0));
 
     std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> det(static_cast<size_t>(kSamples));
-    for (auto& d : det) { d.valid = true; d.periodSamples = 44100.0f / 220.0f; }
+    for (auto& d : det) { d.valid = true; d.periodSamples = 44100.0f / 220.0f; d.trackingUpdated = true; }
     for (int i = 441 * 8; i < 441 * 9; ++i) det[static_cast<size_t>(i)].valid = false;   // 10 ms
     for (int i = 441 * 12; i < 441 * 17; ++i) det[static_cast<size_t>(i)].valid = false; // 50 ms
 
@@ -2736,6 +2736,31 @@ void testPlanLightRenderSplitsPerFrame()
     const auto lightOnly = OpenTune::planLightRender(inContract, original.data(), kFrames,
         nullptr, 0, 44100.0, 100.0, 0.0);
     expectTrue(!lightOnly.needsVocoder, "plan: in-contract chunk stays light");
+
+    // Without snap the light render glides back from the clamped target; the
+    // vocoder region covers that glide instead of handing over mid-glide.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> sparse(static_cast<size_t>(kSamples));
+    for (int i = 0; i < kSamples; ++i) {
+        auto& d = sparse[static_cast<size_t>(i)];
+        d.valid = true; d.periodSamples = 44100.0f / 220.0f; d.trackingUpdated = i % 5 == 0;
+    }
+    const auto glide = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, false);
+    expectTrue(glide.vocoderFrames[5] == 1 && glide.vocoderFrames[6] == 1,
+               "plan: vocoder region covers the light glide after a large correction");
+    const auto snapped = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(snapped.vocoderFrames[5] == 0, "plan: snap mode needs no glide cover");
+
+    // A 25 ms invalid run touching four frames still passes through.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> straddle(sparse);
+    for (int i = 441 * 8 + 400; i < 441 * 8 + 400 + 1102; ++i)
+        straddle[static_cast<size_t>(i)].valid = false;
+    const auto shortRun = OpenTune::planLightRender(inContract, original.data(), kFrames,
+        straddle.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(!shortRun.needsVocoder, "plan: short invalid run across four frames stays light");
+    expectTrue(shortRun.dspTarget[8] == 0.0f && shortRun.dspTarget[11] == 0.0f,
+               "plan: frames touched by a short invalid run pass through");
 }
 
 void testVocoderSpliceWeightsAndMix()
@@ -2778,6 +2803,17 @@ void testVocoderSpliceWeightsAndMix()
     payload.numChannels = 1;
     expectTrue(OpenTune::spliceVocoderIntoLight(payload, vocoder).empty(),
                "splice: mismatched planes are rejected");
+
+    std::vector<uint8_t> tailFrames(static_cast<size_t>(kFrames), 0);
+    tailFrames[57] = 1;
+    const auto tail = OpenTune::buildVocoderSpliceWeights(tailFrames, kSamples, 44100.0, 100.0, 0.0, source.data());
+    expectTrue(tail[441 * 57 + 200] == 1.0f && tail.back() < 0.01f,
+               "splice: fade-out finishes inside the chunk near its end");
+    std::vector<uint8_t> headFrames(static_cast<size_t>(kFrames), 0);
+    headFrames[1] = 1;
+    const auto head = OpenTune::buildVocoderSpliceWeights(headFrames, kSamples, 44100.0, 100.0, 0.0, source.data());
+    expectTrue(head.front() < 0.01f && head[441 + 200] == 1.0f,
+               "splice: fade-in starts inside the chunk near its start");
 }
 
 int main()

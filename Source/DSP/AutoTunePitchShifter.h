@@ -34,6 +34,8 @@ public:
     static constexpr int kLookaheadSamples = 75; // 67 FIR support + 8 drift headroom.
     // At the ±75-cent rate limit, 64 samples drift by less than three samples.
     static constexpr int kCycleJumpFadeSamples = 64;
+    /// Smoothed-rate decay per detector tracking update when not in snap mode.
+    static constexpr double kDecayPerTrackingUpdate = 0.995;
 
     /// @return numSamples resampled samples, or an empty vector (with no
     ///         audio rendered) when any resample-rate update falls outside
@@ -123,7 +125,6 @@ private:
     /// away from the requested target. The render is then discarded.
     bool rateHoldExceeded_ = false;
 
-    static constexpr double kDecayPerTrackingUpdate = 0.995;
     static constexpr double kIdentityRateEpsilon = 1.0e-4;
 
     bool isReadable(double addr) const;

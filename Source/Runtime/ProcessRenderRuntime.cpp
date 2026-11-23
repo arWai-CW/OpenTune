@@ -2405,16 +2405,17 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                         originalF0Full.data(), originalF0Size, f0FrameRate,
                         static_cast<double>(f0StartFrame) + firstSampleFramePhase);
 
-                const LightRenderPlan lightPlan = planLightRender(
-                    autoTuneTargetF0, originalF0Full.data() + f0StartFrame,
-                    safeNumF0Frames, detectorFrames.data(), detectorNumSamples,
-                    RenderCache::kSampleRate, f0FrameRate, firstSampleFramePhase);
-
                 // snapMode：所有音符 retuneSpeed 均为 1.0 时，DSP 跳过 EMA 直接锁定
                 bool snapMode = true;
                 for (const auto& n : contentSnap->notes) {
                     if (n.retuneSpeed < 1.0f) { snapMode = false; break; }
                 }
+
+                const LightRenderPlan lightPlan = planLightRender(
+                    autoTuneTargetF0, originalF0Full.data() + f0StartFrame,
+                    safeNumF0Frames, detectorFrames.data(), detectorNumSamples,
+                    RenderCache::kSampleRate, f0FrameRate, firstSampleFramePhase,
+                    snapMode);
 
                 auto repair = autoTuneShifter.shiftChunkWithOctaveRepair(
                     monoAudio.data(),
