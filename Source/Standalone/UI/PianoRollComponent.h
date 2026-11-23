@@ -213,6 +213,13 @@ public:
      *  阻止下一帧 heartbeat 播放跟随立即夺回 camera。 */
     void navigateFromOverview(TimelineViewportRequest req);
 
+    /** Wheel over the overview strip: unmodified wheel and trackpad motion scroll the timeline
+     *  horizontally; modified wheel runs the same shortcuts as over the piano roll. */
+    // Modified wheel runs the normal wheel shortcuts. A plain wheel returns the
+    // visible start it asks for, for the overview to clamp and navigate to.
+    std::optional<double> handleOverviewWheel(const juce::MouseEvent& e,
+                                              const juce::MouseWheelDetails& wheel);
+
     int timelinePolicyViewportWidth() const noexcept { return getTimelineContentViewportWidth(); }
     TimelineViewportCamera timelineCamera() const noexcept { return camera_; }
     void activateTimelineCamera(TimelineViewportCamera camera);

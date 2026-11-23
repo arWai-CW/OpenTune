@@ -165,6 +165,7 @@ private:
     void applyUiZoomIfNeeded();
     void overviewNavigateRequested(double visibleStartSeconds,
                                    double pixelsPerSecond) override;
+    void overviewWheelMoved(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     void syncSharedAppPreferences();
     void applyThemeToEditor(ThemeId themeId);
     ContentKey resolveCurrentContentKey();

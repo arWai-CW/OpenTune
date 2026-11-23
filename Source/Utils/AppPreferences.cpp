@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace OpenTune {
 
@@ -56,7 +57,8 @@ constexpr int kShortcutMacModifierSchemaVersion = 2;
 constexpr int kShortcutMacSpacePlaySchemaVersion = 3;
 // 4: Pitch Modulation / Pitch Drift got default keys F3 / F5 (Windows).
 constexpr int kShortcutModDriftKeysSchemaVersion = 4;
-constexpr int kShortcutSchemaVersion = 4;
+constexpr int kShortcutAltShiftWheelZoomSchemaVersion = 5;
+constexpr int kShortcutSchemaVersion = 5;
 
 juce::File resolveSettingsDirectory(const AppPreferences::StorageOptions& storageOptions)
 {
@@ -298,6 +300,7 @@ KeyShortcutConfig::KeyShortcutSettings decodeShortcutSettings(const juce::Proper
     // Modulation and drift used to have no keys, so settings stored an empty string.
     // Do not treat it as a user choice; adopt the new F3 / F5.
     const bool adoptNewToolDefaults = storedSchemaVersion < kShortcutModDriftKeysSchemaVersion;
+    const bool adoptAltShiftWheelZoom = storedSchemaVersion < kShortcutAltShiftWheelZoomSchemaVersion;
 
     for (const auto& info : KeyShortcutConfig::kShortcutInfos) {
         if (!properties.containsKey(info.storageKey))
@@ -385,6 +388,28 @@ KeyShortcutConfig::KeyShortcutSettings decodeShortcutSettings(const juce::Proper
                 return findShortcutForBinding(settings, binding, info.scopes) != id;
             });
             bindings.erase(conflicts, bindings.end());
+        }
+    }
+
+    // Shift+Option/Alt+wheel zoom was added after these settings were stored: add it unless the
+    // user cleared the zoom shortcut or already uses that wheel gesture for something else.
+    if (adoptAltShiftWheelZoom) {
+        const auto altShift = juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier;
+        const std::pair<KeyShortcutConfig::ShortcutId, KeyShortcutConfig::BindingType> wheelZoom[] = {
+            { KeyShortcutConfig::ShortcutId::ZoomHorizontalIn, KeyShortcutConfig::BindingType::WheelUp },
+            { KeyShortcutConfig::ShortcutId::ZoomHorizontalOut, KeyShortcutConfig::BindingType::WheelDown },
+        };
+        for (const auto& [id, wheelType] : wheelZoom) {
+            const KeyShortcutConfig::KeyBinding binding(wheelType, altShift);
+            auto& zoomBinding = settings.bindings[static_cast<size_t>(id)];
+            if (zoomBinding.bindings.empty())
+                continue;
+            bool usedElsewhere = false;
+            for (std::size_t index = 0; index < settings.bindings.size(); ++index)
+                usedElsewhere = usedElsewhere
+                    || (index != static_cast<size_t>(id) && settings.bindings[index].hasBinding(binding));
+            if (!usedElsewhere)
+                zoomBinding.addBinding(binding);
         }
     }
 
