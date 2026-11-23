@@ -177,6 +177,46 @@ bool testIsolatedAttackStaysPut()
         });
 }
 
+bool testLoudAudioOutsideOverlapDoesNotHideAttacks()
+{
+    constexpr int rate = 16000;
+    juce::AudioBuffer<float> targetAudio(1, 5 * rate), guideAudio(1, 5 * rate);
+    targetAudio.clear();
+    guideAudio.clear();
+    const auto pulse = [](auto& audio, double time, double amplitude) {
+        for (int i = 0; i < rate / 8; ++i)
+            audio.setSample(0, static_cast<int>(std::lround(time * rate)) + i,
+                static_cast<float>(amplitude * std::min(1.0, i / (rate * 0.01))
+                    * std::sin(2.0 * pi * 220.0 * i / rate)));
+    };
+
+    const auto grid = TimeGridSnapshot::makeIdentity(5.0);
+    const auto guideGrid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 2.0, HandleKind::UserAdded},
+        {3, 5.0, 5.0, HandleKind::ClipEnd}
+    });
+    if (!guideGrid)
+        return false;
+
+    // The guide starts inside its source, and its existing timing grid maps that
+    // cropped region to a different source range.
+    const ContentTimelineProjection targetPlacement{10.0, 5.0, 0.0, 5.0};
+    const ContentTimelineProjection guidePlacement{11.0, 3.0, 2.0, 3.0};
+    pulse(targetAudio, 0.35, 1.0);
+    pulse(guideAudio, 0.35, 1.0);
+    for (const double time : {11.35, 11.8, 12.45, 13.05}) {
+        pulse(targetAudio, targetPlacement.projectTimelineTimeToContent(time) + 0.04, 0.12);
+        pulse(guideAudio, guideGrid->tauInverse(guidePlacement.projectTimelineTimeToContent(time)), 0.12);
+    }
+
+    const auto targets = detectTimingOnsetsInOverlap(targetAudio, rate, *grid, targetPlacement, guidePlacement);
+    const auto guides = detectTimingOnsetsInOverlap(guideAudio, rate, *guideGrid, guidePlacement, targetPlacement);
+    const auto plan = alignTimingToReference(targets, *grid, targetPlacement, guides, *guideGrid, guidePlacement, 1.0);
+    return targets.size() == 4 && guides.size() == 4 && plan.grid && plan.movedAnchors == 4
+        && std::abs(plan.grid->tauForward(0.35) - 0.35) < 1e-9;
+}
+
 bool testPeriodicAttacksDoNotSlipByASyllable()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(3.0);
@@ -249,6 +289,10 @@ int main()
     }
     if (!testDetectAttacksAcrossPitch()) {
         std::fputs("Timing onset detection did not find synthetic attacks\n", stderr);
+        return 1;
+    }
+    if (!testLoudAudioOutsideOverlapDoesNotHideAttacks()) {
+        std::fputs("Loud audio outside the overlap hid matching timing attacks\n", stderr);
         return 1;
     }
     if (!testIsolatedAttackStaysPut()) {
