@@ -230,6 +230,9 @@ constexpr const char* kOff = "Off";
 constexpr const char* kReferenceTrack = "Pitch Reference Track";
 constexpr const char* kTuneToPitchReference = "Tune to Pitch Reference";
 constexpr const char* kAlignTimingToReference = "Align Timing to Reference";
+constexpr const char* kReferenceToolbarLabel = "Guide";
+constexpr const char* kTuneReferenceToolbarLabel = "Tune";
+constexpr const char* kAlignReferenceToolbarLabel = "Align";
 constexpr const char* kTimingGentle = "Gentle (Harmony)";
 constexpr const char* kTimingTight = "Tight (Double)";
 constexpr const char* kNoVoicedReferenceOverlap = "No voiced pitch overlaps in the active clip or selected notes.";
@@ -606,6 +609,9 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kReferenceTrack, "Pitch Reference Track", "音高参考轨", "ピッチ参照トラック", "Дорожка-ориентир высоты тона", "Pista de referencia tonal" },
         { Keys::kTuneToPitchReference, "Tune to Pitch Reference", "按音高参考轨修音", "参照トラックに合わせて補正", "Коррекция по опорной дорожке", "Afinar según la pista de referencia" },
         { Keys::kAlignTimingToReference, "Align Timing to Reference", "按参考轨对齐时序", "参照トラックにタイミングを合わせる", "Выровнять по опорной дорожке", "Alinear con la pista de referencia" },
+        { Keys::kReferenceToolbarLabel, "Guide", "参考轨", "参照", "Опора", "Guía" },
+        { Keys::kTuneReferenceToolbarLabel, "Tune", "修音", "補正", "Тон", "Afinar" },
+        { Keys::kAlignReferenceToolbarLabel, "Align", "对齐", "同期", "Ритм", "Alinear" },
         { Keys::kTimingGentle, "Gentle (Harmony)", "柔和（和声）", "ゆるめ（ハーモニー）", "Мягко (гармония)", "Suave (armonía)" },
         { Keys::kTimingTight, "Tight (Double)", "紧密（叠唱）", "タイト（ダブル）", "Плотно (дабл)", "Preciso (doble)" },
         { Keys::kNoVoicedReferenceOverlap, "No voiced pitch overlaps in the active clip or selected notes.", "当前片段或所选音符没有重叠的有声音高。", "現在のクリップまたは選択したノートに、有声音の重なりがありません。", "В активном клипе или выбранных нотах нет перекрывающихся участков с высотой тона.", "No hay tramos con tono superpuestos en el clip activo o las notas seleccionadas." },

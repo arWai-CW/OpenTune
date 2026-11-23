@@ -915,9 +915,9 @@ void ParameterPanel::ToolStrip::resized()
         return;
 
     auto row = getLocalBounds();
-    constexpr int gap = 4;
-    const int gridWidth = owner_.openDyneMode_ ? juce::jmin(144, row.getWidth() / 4) : 0;
+    const int gridWidth = owner_.openDyneMode_ ? juce::jmin(144, row.getWidth() / 3) : 0;
     const int gapCount = owner_.openDyneMode_ ? count : count - 1;
+    const int gap = row.getWidth() - gridWidth < count * 28 + gapCount * 4 ? 2 : 4;
     const int buttonWidth = juce::jlimit(0, 44, (row.getWidth() - gridWidth - gap * gapCount) / count);
 
     for (auto* button : buttons)

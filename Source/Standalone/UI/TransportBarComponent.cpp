@@ -877,6 +877,12 @@ void UnifiedToolbarButton::setIcon(juce::Path iconPath)
     repaint();
 }
 
+void UnifiedToolbarButton::setToolbarLabel(const juce::String& label)
+{
+    toolbarLabel_ = label;
+    repaint();
+}
+
 void UnifiedToolbarButton::setConnectedEdges(int edges)
 {
     connectedEdges_ = edges;
@@ -1183,6 +1189,14 @@ void UnifiedToolbarButton::paintButton(juce::Graphics& g, bool shouldDrawButtonA
     }
 
     // Draw Icon centered with hover scale animation
+    if (toolbarLabel_.isNotEmpty())
+    {
+        const auto labelArea = bounds.removeFromBottom(14.0f).reduced(2.0f, 0.0f);
+        g.setFont(UIColors::getLabelFont(11.0f));
+        g.setColour(isEnabled() ? UIColors::textPrimary : UIColors::textDisabled);
+        g.drawFittedText(toolbarLabel_, labelArea.toNearestInt(), juce::Justification::centred, 1);
+    }
+
     auto iconArea = bounds.reduced(bounds.getWidth() * 0.06f, bounds.getHeight() * 0.06f);
 
     // Hover: subtle scale-up (1.08x) and brightness boost
