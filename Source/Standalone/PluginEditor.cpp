@@ -1576,6 +1576,10 @@ bool OpenTuneAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
+    if (!isWorkspaceView_
+        && KeyShortcutConfig::matchesShortcut(shortcutSettings_, KeyShortcutConfig::ShortcutId::SelectAll, key))
+        return pianoRoll_.keyPressed(key);
+
     if (KeyShortcutConfig::matchesShortcut(shortcutSettings_, KeyShortcutConfig::ShortcutId::PlayPause, key))
     {
         playPauseToggleRequested();

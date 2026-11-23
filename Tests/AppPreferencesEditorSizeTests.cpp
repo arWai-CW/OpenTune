@@ -216,6 +216,29 @@ bool testShortcutScopesAndConflicts()
         && findShortcutForBinding(settings, modeBinding, kPianoRollOpenDyneScope) == ShortcutId::ToolODSelect;
 }
 
+bool testPrimaryEditingShortcuts()
+{
+    using namespace OpenTune::KeyShortcutConfig;
+    const auto settings = KeyShortcutSettings::getDefault();
+    const auto primary = juce::ModifierKeys::commandModifier;
+    const auto shiftedPrimary = primary | juce::ModifierKeys::shiftModifier;
+    for (const auto keyCode : { 'A', 'a' }) {
+        if (!matchesShortcut(settings, ShortcutId::SelectAll, juce::KeyPress(keyCode, primary, 0))
+            || matchesShortcut(settings, ShortcutId::SelectAll, juce::KeyPress(keyCode, {}, 0)))
+            return false;
+    }
+    for (const auto keyCode : { 'Z', 'z' }) {
+        const juce::KeyPress undo(keyCode, primary, 0);
+        const juce::KeyPress redo(keyCode, shiftedPrimary, 0);
+        if (!matchesShortcut(settings, ShortcutId::Undo, undo)
+            || matchesShortcut(settings, ShortcutId::Redo, undo)
+            || !matchesShortcut(settings, ShortcutId::Redo, redo)
+            || matchesShortcut(settings, ShortcutId::Undo, redo))
+            return false;
+    }
+    return true;
+}
+
 bool testShortcutDefaults()
 {
     using namespace OpenTune::KeyShortcutConfig;
@@ -760,6 +783,11 @@ int main()
 
     if (!testShortcutDefaults()) {
         std::fputs("FAIL: shortcut defaults\n", stderr);
+        return 1;
+    }
+
+    if (!testPrimaryEditingShortcuts()) {
+        std::fputs("FAIL: primary select-all, undo and redo shortcuts\n", stderr);
         return 1;
     }
 

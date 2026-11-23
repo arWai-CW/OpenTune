@@ -222,6 +222,7 @@ private:
     int appliedUiZoomPercent_ = 100;
     juce::Point<int> lastSavedEditorSize_;
     bool editorSizePersistenceEnabled_ = false;
+    bool initialKeyboardFocusAssigned_ = false;
 
     MenuBarComponent menuBar_;
     TransportBarComponent transportBar_;
