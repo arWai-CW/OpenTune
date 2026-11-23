@@ -133,32 +133,30 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 return result;
             };
             auto boundaries = buildBoundaries();
-            bool removedBoundary = true;
-            while (removedBoundary && !jumpBoundaries.empty()) {
-                removedBoundary = false;
-                for (size_t boundaryIndex = 1; boundaryIndex < boundaries.size(); ++boundaryIndex) {
-                    const int segmentStart = boundaries[boundaryIndex - 1];
-                    const int segmentEnd = boundaries[boundaryIndex];
-                    if (segmentEnd - segmentStart >= minimumJumpSegmentFrames)
-                        continue;
-                    const bool removeStart = std::binary_search(
-                        jumpBoundaries.begin(), jumpBoundaries.end(), segmentStart);
-                    const bool removeEnd = std::binary_search(
-                        jumpBoundaries.begin(), jumpBoundaries.end(), segmentEnd);
-                    if (!removeStart && !removeEnd)
-                        continue;
-                    if (removeStart) {
-                        jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
-                                                         segmentStart), jumpBoundaries.end());
-                    }
-                    if (removeEnd) {
-                        jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
-                                                         segmentEnd), jumpBoundaries.end());
-                    }
-                    boundaries = buildBoundaries();
-                    removedBoundary = true;
-                    break;
+            std::vector<int> mergedJumpBoundaries;
+            for (size_t boundaryIndex = 1; boundaryIndex < boundaries.size(); ++boundaryIndex) {
+                const int segmentStart = boundaries[boundaryIndex - 1];
+                const int segmentEnd = boundaries[boundaryIndex];
+                if (segmentEnd - segmentStart >= minimumJumpSegmentFrames)
+                    continue;
+                const bool startsAtJump = std::binary_search(
+                    jumpBoundaries.begin(), jumpBoundaries.end(), segmentStart);
+                const bool endsAtJump = std::binary_search(
+                    jumpBoundaries.begin(), jumpBoundaries.end(), segmentEnd);
+                if (!startsAtJump || !endsAtJump)
+                    continue;
+                mergedJumpBoundaries.push_back(segmentStart);
+                mergedJumpBoundaries.push_back(segmentEnd);
+            }
+            if (!mergedJumpBoundaries.empty()) {
+                std::sort(mergedJumpBoundaries.begin(), mergedJumpBoundaries.end());
+                mergedJumpBoundaries.erase(std::unique(mergedJumpBoundaries.begin(),
+                    mergedJumpBoundaries.end()), mergedJumpBoundaries.end());
+                for (const int boundary : mergedJumpBoundaries) {
+                    jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
+                                                     boundary), jumpBoundaries.end());
                 }
+                boundaries = buildBoundaries();
             }
 
             PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
