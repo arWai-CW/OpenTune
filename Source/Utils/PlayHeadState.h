@@ -101,16 +101,8 @@ struct PlayHeadPresentationProjection
     // Use only from codepaths that guarantee a single writer (Standalone local path).
     void publish(double positionSec, double nowClockSec, double horizonSec, uint64_t epoch)
     {
-        // Contiguous standalone blocks extend the horizon, not the clock origin.
-        // Callback scheduling jitter must not become presentation timing jitter.
         const auto previous = load();
-        if (previous.valid && previous.epoch == epoch
-            && std::abs(previous.horizon - positionSec) < 1.0e-7
-            && horizonSec > positionSec)
-        {
-            positionSec = previous.anchorPosition;
-            nowClockSec = previous.anchorClock;
-        }
+        retainAnchor(previous, positionSec, nowClockSec, horizonSec);
         sequence.fetch_add(1, std::memory_order_acq_rel);  // enter write (odd)
         anchorPositionSeconds.store(positionSec,  std::memory_order_relaxed);
         anchorClockSeconds.store(nowClockSec,      std::memory_order_relaxed);
@@ -140,6 +132,19 @@ struct PlayHeadPresentationProjection
                                               std::memory_order_relaxed))
             return false;  // lost race, skip this projection
 
+        Snapshot previous;
+        previous.valid = expected != 0;
+        previous.anchorPosition = anchorPositionSeconds.load(std::memory_order_relaxed);
+        previous.anchorClock = anchorClockSeconds.load(std::memory_order_relaxed);
+        previous.horizon = horizonPositionSeconds.load(std::memory_order_relaxed);
+        previous.epoch = anchorEpoch.load(std::memory_order_relaxed);
+        if (epoch < previous.epoch)
+        {
+            sequence.fetch_add(1, std::memory_order_release);
+            return false;
+        }
+        retainAnchor(previous, positionSec, nowClockSec, horizonSec);
+
         anchorPositionSeconds.store(positionSec,  std::memory_order_relaxed);
         anchorClockSeconds.store(nowClockSec,      std::memory_order_relaxed);
         horizonPositionSeconds.store(horizonSec,    std::memory_order_relaxed);
@@ -147,6 +152,27 @@ struct PlayHeadPresentationProjection
 
         sequence.fetch_add(1, std::memory_order_release);  // commit (even)
         return true;
+    }
+
+private:
+    static void retainAnchor(const Snapshot& previous, double& positionSec,
+                             double& nowClockSec, double horizonSec)
+    {
+        constexpr double contiguousTolerance = 0.001;
+        constexpr double lagTolerance = 0.000001;
+        constexpr double leadTolerance = 0.5;
+        const double elapsed = nowClockSec - previous.anchorClock;
+        const double audioAdvance = positionSec - previous.anchorPosition;
+        // Keep early/burst callbacks on one clock; reset once audio falls behind it.
+        if (previous.valid
+            && std::abs(previous.horizon - positionSec) < contiguousTolerance
+            && horizonSec > positionSec
+            && elapsed <= audioAdvance + lagTolerance
+            && audioAdvance - elapsed <= leadTolerance)
+        {
+            positionSec = previous.anchorPosition;
+            nowClockSec = previous.anchorClock;
+        }
     }
 };
 
