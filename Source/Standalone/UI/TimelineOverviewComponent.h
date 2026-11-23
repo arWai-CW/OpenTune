@@ -21,6 +21,7 @@ public:
         virtual ~Listener() = default;
         virtual void overviewNavigateRequested(double visibleStartSeconds,
                                                double pixelsPerSecond) = 0;
+        virtual void overviewWheelMoved(const juce::MouseEvent&, const juce::MouseWheelDetails&) {}
     };
 
     explicit TimelineOverviewComponent(WaveformMipmapCache& waveformMipmapCache);
@@ -53,6 +54,7 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
 private:
     struct Geometry

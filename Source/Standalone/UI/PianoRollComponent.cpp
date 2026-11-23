@@ -5356,6 +5356,19 @@ void PianoRollComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::M
         handleVerticalScrollPixels(pan.y);
 }
 
+void PianoRollComponent::handleOverviewWheel(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    if (e.mods.isShiftDown() || e.mods.isCtrlDown()
+        || e.mods.isCommandDown() || e.mods.isAltDown()) {
+        mouseWheelMove(e.getEventRelativeTo(this), wheel);
+        return;
+    }
+
+    const float delta = std::abs(wheel.deltaX) > std::abs(wheel.deltaY) ? wheel.deltaX : wheel.deltaY;
+    const auto pan = wheelEventToPixels(delta, 0.0f, wheel.isSmooth, zoomSensitivity_.scrollSpeed);
+    handleHorizontalScrollPixels(pan.x);
+}
+
 void PianoRollComponent::mouseMagnify(const juce::MouseEvent& e, float scaleFactor)
 {
     const auto zoom = magnifyScaleToZoom(scaleFactor);

@@ -442,6 +442,12 @@ void TimelineOverviewComponent::mouseUp(const juce::MouseEvent& e)
     updateMouseCursor(e.position);
 }
 
+void TimelineOverviewComponent::mouseWheelMove(const juce::MouseEvent& e,
+                                               const juce::MouseWheelDetails& wheel)
+{
+    listeners_.call([&e, &wheel](Listener& listener) { listener.overviewWheelMoved(e, wheel); });
+}
+
 void TimelineOverviewComponent::paint(juce::Graphics& g)
 {
     auto panelBounds = getLocalBounds();

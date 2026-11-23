@@ -687,11 +687,22 @@ void OpenTuneAudioProcessorEditor::timerCallback()
         return tickSnapshotCache.find(key)->second;
     };
 
-    // Overview update: regular capture uses multi-segment overview path;
-    // ARA/other paths continue using the single-content onHeartbeatTick.
+    // Overview update: regular capture and ARA show every placement in the editor's
+    // timeline (all clips on the focused ARA track), not only the edited one.
     if (pianoRoll_.isShowing()) {
-        if (sync.isRegularVst3Capture)
+        if (sync.isRegularVst3Capture || sync.hasPlacements())
         {
+            double overviewStart = sync.timelineViewStartSeconds;
+            double overviewEnd = sync.timelineViewEndSeconds;
+            if (!sync.isRegularVst3Capture) {
+                overviewStart = sync.placements.front().projection.timelineStartSeconds;
+                overviewEnd = sync.placements.front().projection.timelineEndSeconds();
+                for (const auto& placement : sync.placements) {
+                    overviewStart = std::min(overviewStart, placement.projection.timelineStartSeconds);
+                    overviewEnd = std::max(overviewEnd, placement.projection.timelineEndSeconds());
+                }
+            }
+
             std::vector<double> overviewSampleRates;
             overviewSampleRates.reserve(sync.placements.size());
             for (const auto& placement : sync.placements) {
@@ -699,8 +710,8 @@ void OpenTuneAudioProcessorEditor::timerCallback()
                 overviewSampleRates.push_back(snap != nullptr ? snap->audioSampleRate : 0.0);
             }
             overviewStrip_.onHeartbeatTickRegular(sync.placements,
-                                                  sync.timelineViewStartSeconds,
-                                                  sync.timelineViewEndSeconds,
+                                                  overviewStart,
+                                                  overviewEnd,
                                                   pianoRoll_.timelineCamera(),
                                                   pianoRoll_.timelinePolicyViewportWidth(),
                                                   std::move(overviewSampleRates));
@@ -2336,6 +2347,12 @@ void OpenTuneAudioProcessorEditor::overviewNavigateRequested(double visibleStart
         pianoRoll_.timelinePolicyViewportWidth(),
         pixelsPerSecond
     });
+}
+
+void OpenTuneAudioProcessorEditor::overviewWheelMoved(const juce::MouseEvent& e,
+                                                      const juce::MouseWheelDetails& wheel)
+{
+    pianoRoll_.handleOverviewWheel(e, wheel);
 }
 
 OpenTuneAudioProcessorEditor::PianoRollContentSync
