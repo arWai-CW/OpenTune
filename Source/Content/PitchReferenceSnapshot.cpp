@@ -8,6 +8,7 @@ namespace {
 
 constexpr double kReferencePitchCenterWindowSeconds = 0.4;
 constexpr double kReferencePitchOffsetJumpThresholdCents = 50.0;
+constexpr double kReferencePitchMinimumJumpSegmentSeconds = 0.12;
 constexpr double kReferencePitchChangeToleranceCents = 0.5;
 constexpr double kPi = 3.14159265358979323846;
 
@@ -85,6 +86,8 @@ PitchReferenceCorrection planPitchReferenceCorrection(
     if (centerWindowFrames % 2 == 0)
         ++centerWindowFrames;
     const int centerWindowRadius = centerWindowFrames / 2;
+    const int minimumJumpSegmentFrames = std::max(1, static_cast<int>(std::ceil(
+        kReferencePitchMinimumJumpSegmentSeconds / frameSeconds)));
     const auto& originalF0 = target.curve->getOriginalF0();
 
     struct RunFrame
@@ -100,22 +103,63 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
-            std::vector<int> boundaries{0, count};
+            std::vector<int> noteBoundaries;
             for (const auto& note : target.notes) {
                 const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
                 const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
                 if (noteStart > 0 && noteStart < count)
-                    boundaries.push_back(noteStart);
+                    noteBoundaries.push_back(noteStart);
                 if (noteEnd > 0 && noteEnd < count)
-                    boundaries.push_back(noteEnd);
+                    noteBoundaries.push_back(noteEnd);
             }
+            std::sort(noteBoundaries.begin(), noteBoundaries.end());
+            noteBoundaries.erase(std::unique(noteBoundaries.begin(), noteBoundaries.end()),
+                                 noteBoundaries.end());
+
+            std::vector<int> jumpBoundaries;
             for (int i = 1; i < count; ++i) {
                 if (std::abs(static_cast<double>(run[static_cast<size_t>(i)].offsetCents)
-                        - run[static_cast<size_t>(i - 1)].offsetCents) > kReferencePitchOffsetJumpThresholdCents)
-                    boundaries.push_back(i);
+                        - run[static_cast<size_t>(i - 1)].offsetCents) > kReferencePitchOffsetJumpThresholdCents
+                    && !std::binary_search(noteBoundaries.begin(), noteBoundaries.end(), i))
+                    jumpBoundaries.push_back(i);
             }
-            std::sort(boundaries.begin(), boundaries.end());
-            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+
+            const auto buildBoundaries = [&] {
+                std::vector<int> result{0, count};
+                result.insert(result.end(), noteBoundaries.begin(), noteBoundaries.end());
+                result.insert(result.end(), jumpBoundaries.begin(), jumpBoundaries.end());
+                std::sort(result.begin(), result.end());
+                result.erase(std::unique(result.begin(), result.end()), result.end());
+                return result;
+            };
+            auto boundaries = buildBoundaries();
+            bool removedBoundary = true;
+            while (removedBoundary && !jumpBoundaries.empty()) {
+                removedBoundary = false;
+                for (size_t boundaryIndex = 1; boundaryIndex < boundaries.size(); ++boundaryIndex) {
+                    const int segmentStart = boundaries[boundaryIndex - 1];
+                    const int segmentEnd = boundaries[boundaryIndex];
+                    if (segmentEnd - segmentStart >= minimumJumpSegmentFrames)
+                        continue;
+                    const bool removeStart = std::binary_search(
+                        jumpBoundaries.begin(), jumpBoundaries.end(), segmentStart);
+                    const bool removeEnd = std::binary_search(
+                        jumpBoundaries.begin(), jumpBoundaries.end(), segmentEnd);
+                    if (!removeStart && !removeEnd)
+                        continue;
+                    if (removeStart) {
+                        jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
+                                                         segmentStart), jumpBoundaries.end());
+                    }
+                    if (removeEnd) {
+                        jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
+                                                         segmentEnd), jumpBoundaries.end());
+                    }
+                    boundaries = buildBoundaries();
+                    removedBoundary = true;
+                    break;
+                }
+            }
 
             PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
                                            PitchCorrectionSegment::Source::HandDraw};
