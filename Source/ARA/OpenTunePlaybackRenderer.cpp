@@ -270,6 +270,9 @@ std::shared_ptr<OpenTunePlaybackRenderer::RenderPlan> OpenTunePlaybackRenderer::
         const auto anchors = makeRegionAnchors(readSource, projection.startInModificationTime);
         item.placementAnchorSeconds = anchors.placementAnchorSeconds;
         item.semanticAnchorSeconds = anchors.semanticAnchorSeconds;
+        item.readsNativeTiming = readSource.contentSnapshot->timeGrid->isIdentityInOutputRange(
+            anchors.semanticAnchorSeconds,
+            projection.endInModificationTime - readSource.contentSnapshot->sourceWindow.sourceStartSeconds);
         item.source = std::move(readSource);
         nextPlan->items.push_back(std::move(item));
     }
@@ -297,6 +300,7 @@ void OpenTunePlaybackRenderer::assignContinuityAndPlacements(
     {
         auto& item = items[index];
         bool inheritedFromPredecessor = false;
+        bool inheritedNativePlacement = false;
 
         // Other regions may overlap between a slice and its predecessor, so the
         // predecessor is the nearest earlier item with matching provenance and
@@ -304,19 +308,31 @@ void OpenTunePlaybackRenderer::assignContinuityAndPlacements(
         for (size_t earlier = index; earlier > 0; --earlier)
         {
             const auto& predecessor = items[earlier - 1];
-            if (!sameContinuityProvenance(predecessor.source, item.source)
-                || predecessor.endInPlaybackTime != item.startInPlaybackTime
+            if (predecessor.endInPlaybackTime != item.startInPlaybackTime
                 || predecessor.endInModificationTime != item.startInModificationTime)
                 continue;
 
-            item.continuityGroup = predecessor.continuityGroup;
-            item.placement = PlaybackSampleGeometry::makeContiguousSlice(
-                predecessor.placement,
-                item.startInPlaybackTime,
-                item.endInPlaybackTime);
-            inheritedFromPredecessor = true;
-            break;
+            // Keep the native addressing of contiguous pooled splits even if
+            // their predecessor now renders through the warped output grid.
+            if (!inheritedNativePlacement && predecessor.source.nativeSource == item.source.nativeSource
+                && (predecessor.contentKey == item.contentKey || predecessor.readsNativeTiming)) {
+                item.nativePlacement = PlaybackSampleGeometry::makeContiguousSlice(
+                    predecessor.nativePlacement, item.startInPlaybackTime, item.endInPlaybackTime);
+                inheritedNativePlacement = true;
+            }
+            if (!inheritedFromPredecessor && sameContinuityProvenance(predecessor.source, item.source)) {
+                item.continuityGroup = predecessor.continuityGroup;
+                item.placement = PlaybackSampleGeometry::makeContiguousSlice(
+                    predecessor.placement, item.startInPlaybackTime, item.endInPlaybackTime);
+                inheritedFromPredecessor = true;
+            }
+            if (inheritedNativePlacement && inheritedFromPredecessor)
+                break;
         }
+
+        if (!inheritedNativePlacement)
+            item.nativePlacement = PlaybackSampleGeometry::makePlacement(
+                targetSampleRate, item.startInPlaybackTime, item.endInPlaybackTime, item.startInModificationTime);
 
         if (inheritedFromPredecessor)
             continue;
@@ -443,8 +459,9 @@ bool OpenTunePlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
         if (static_cast<const void*>(item.playbackRegion) == suppressedRegion)
             continue;
 
+        const auto& placement = item.readsNativeTiming ? item.nativePlacement : item.placement;
         const auto overlap = PlaybackSampleGeometry::intersect(
-            PlaybackSampleGeometry::hostPlaybackSpan(item.placement), blockSpan);
+            PlaybackSampleGeometry::hostPlaybackSpan(placement), blockSpan);
         if (overlap.empty())
             continue;
 
@@ -455,23 +472,24 @@ bool OpenTunePlaybackRenderer::processBlock(juce::AudioBuffer<float>& buffer,
             continue;
 
         const auto address = PlaybackSampleGeometry::mapHostSampleToPrepared(
-            item.placement,
+            placement,
             overlap.begin,
             item.source.preparedDry.firstPreparedSample);
 
         const double outputStartSeconds = item.semanticAnchorSeconds
-            + static_cast<double>(overlap.begin - item.placement.playbackBeginSample)
+            + static_cast<double>(overlap.begin - placement.playbackBeginSample)
                 / planSampleRate;
 
         const PlaybackReadRequest request{item.source,
                                           address.preparedGlobalIndex,
                                           planSampleRate,
                                           samplesToCopy,
-                                          outputStartSeconds};
+                                          outputStartSeconds,
+                                          item.readsNativeTiming};
 
         playbackScratch_.clear();
         int copied = readPlaybackAudio(request, playbackScratch_, 0);
-        if (!item.source.contentSnapshot->timeGrid->isIdentity())
+        if (!item.readsNativeTiming)
         {
             const int64_t sourceOrigin = PlaybackSampleGeometry::projectToSample(
                 item.source.contentSnapshot->sourceWindow.sourceStartSeconds * planSampleRate);
