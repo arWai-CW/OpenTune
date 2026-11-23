@@ -1,0 +1,85 @@
+name: macOS ONNX Runtime A/B
+
+on:
+  push:
+    branches: ['devin/*-ort-mac-benchmark']
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned JUCE and models
+        run: |
+          git clone --depth 1 --branch 8.0.12 https://github.com/juce-framework/JUCE.git JUCE-master
+          test "$(git -C JUCE-master rev-parse HEAD)" = 29396c22c93392d6738e021b83196283d6e4d850
+          python3 scripts/github_actions/patch-juce-ara.py
+          python3 scripts/github_actions/fetch-models.py
+      - name: Fetch runtimes and build probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          sysctl -n machdep.cpu.brand_string hw.ncpu
+          sw_vers
+          work="$RUNNER_TEMP/ort-ab"
+          mkdir -p "$work"
+          fetch() {
+            curl -fsSL --retry 3 -o "$1" "$2"
+            echo "$3  $1" | shasum -a 256 -c
+          }
+          base_url=https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime
+          fetch "$work/1.20.0.zip" "$base_url/1.20.0/microsoft.ml.onnxruntime.1.20.0.nupkg" \
+            36dbafacb1bc532e92d02371bd70582a61105872561fc9982314854d1c7ebf72
+          fetch "$work/1.24.4.zip" "$base_url/1.24.4/microsoft.ml.onnxruntime.1.24.4.nupkg" \
+            4b978d5065b85e7004b6c6f60ca494bd978fbe6836cbf0a0b52d82b61ab99638
+          fetch "$work/upstream.pkg" \
+            https://github.com/YuFeng926/OpenTune/releases/download/OpenTuneV1.8.2/OpenTune-1.8.2-macOS-Universal2.pkg \
+            ee602d3d2be09e1db18f475ac54e7d50ac8f33015f4830ba5ea58d8d2de3686f
+          pkgutil --expand-full "$work/upstream.pkg" "$work/upstream"
+          baseline="$(find "$work/upstream" -type f -name libonnxruntime.1.20.0.dylib -print -quit)"
+          test -n "$baseline"
+          for v in 1.20.0 1.24.4; do
+            mkdir -p "$work/$v"
+            unzip -q "$work/$v.zip" 'build/native/include/*' -d "$work/$v"
+            if [ "$v" = 1.20.0 ]; then
+              cp "$baseline" "$work/$v/libonnxruntime.1.20.0.dylib"
+              lib="$work/$v/libonnxruntime.1.20.0.dylib"
+              curl -fsSL --retry 3 \
+                https://raw.githubusercontent.com/intel/onnxruntime/c4fb724e810bb496165b9015c77f402727392933/include/onnxruntime/core/providers/coreml/coreml_provider_factory.h \
+                -o "$work/$v/build/native/include/coreml_provider_factory.h"
+            else
+              lib="$work/$v/libonnxruntime.dylib"
+              unzip -p "$work/$v.zip" runtimes/osx-arm64/native/libonnxruntime.dylib > "$lib"
+              # Resolve the candidate using our rpath regardless of the NuGet install name.
+              install_name_tool -id @rpath/libonnxruntime.dylib "$lib"
+              codesign --force --sign - "$lib"
+            fi
+            lipo -verify_arch arm64 "$lib"
+            otool -arch arm64 -L "$lib"
+            otool -arch arm64 -l "$lib" | awk '$1 == "minos" {print}'
+            cmake -S Tests/OrtMacBenchmark -B "$work/build-$v" -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 -DORT_INCLUDE="$work/$v/build/native/include" \
+              -DORT_LIBRARY="$lib"
+            cmake --build "$work/build-$v" --parallel 3
+          done
+      - name: Compare runs on the same runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/ort-ab"
+          model=pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx
+          for order in '1.20.0 1.24.4' '1.24.4 1.20.0'; do
+            for v in $order; do
+              for backend in coreml cpu; do
+                "$work/build-$v/ort_benchmark" "$v" "$backend" models/fcpe.onnx "$model" \
+                    | tee -a "$GITHUB_STEP_SUMMARY"
+              done
+            done
+          done
