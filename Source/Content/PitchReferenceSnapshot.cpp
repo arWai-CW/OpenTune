@@ -6,8 +6,10 @@
 namespace OpenTune {
 namespace {
 
-constexpr double kReferencePitchCenterWindowSeconds = 0.2;
+constexpr double kReferencePitchCenterWindowSeconds = 0.4;
+constexpr double kReferencePitchOffsetJumpThresholdCents = 50.0;
 constexpr double kReferencePitchChangeToleranceCents = 0.5;
+constexpr double kPi = 3.14159265358979323846;
 
 bool isVoiced(float hz)
 {
@@ -98,17 +100,43 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
+            std::vector<int> boundaries{0, count};
+            for (const auto& note : target.notes) {
+                const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
+                const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
+                if (noteStart > 0 && noteStart < count)
+                    boundaries.push_back(noteStart);
+                if (noteEnd > 0 && noteEnd < count)
+                    boundaries.push_back(noteEnd);
+            }
+            for (int i = 1; i < count; ++i) {
+                if (std::abs(static_cast<double>(run[static_cast<size_t>(i)].offsetCents)
+                        - run[static_cast<size_t>(i - 1)].offsetCents) > kReferencePitchOffsetJumpThresholdCents)
+                    boundaries.push_back(i);
+            }
+            std::sort(boundaries.begin(), boundaries.end());
+            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+
             PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
                                            PitchCorrectionSegment::Source::HandDraw};
             segment.f0Data.reserve(run.size());
             bool changed = false;
             for (int i = 0; i < count; ++i) {
-                const int begin = std::max(0, i - centerWindowRadius);
-                const int end = std::min(count, i + centerWindowRadius + 1);
-                double offsetSum = 0.0;
-                for (int j = begin; j < end; ++j)
-                    offsetSum += run[static_cast<size_t>(j)].offsetCents;
-                const double smoothedCents = offsetSum / static_cast<double>(end - begin);
+                const auto endBoundary = std::upper_bound(boundaries.begin(), boundaries.end(), i);
+                const int smoothingEnd = *endBoundary;
+                const int smoothingStart = *(endBoundary - 1);
+                const int begin = std::max(smoothingStart, i - centerWindowRadius);
+                const int end = std::min(smoothingEnd, i + centerWindowRadius + 1);
+                double weightedOffsetSum = 0.0;
+                double weightSum = 0.0;
+                for (int j = begin; j < end; ++j) {
+                    const int lag = j > i ? j - i : i - j;
+                    const double weight = centerWindowRadius == 0 ? 1.0
+                        : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
+                    weightedOffsetSum += run[static_cast<size_t>(j)].offsetCents * weight;
+                    weightSum += weight;
+                }
+                const double smoothedCents = weightedOffsetSum / weightSum;
                 const float correctedHz = static_cast<float>(run[static_cast<size_t>(i)].baseHz
                     * std::exp2(smoothedCents / 1200.0));
                 segment.f0Data.push_back(correctedHz);
