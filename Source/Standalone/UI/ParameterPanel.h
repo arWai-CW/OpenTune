@@ -7,7 +7,7 @@
  * - Retune Speed（校正速度）
  * - Vibrato Depth/Rate（颤音深度/速率）
  * - Note Split（音符分割阈值）
- * - 工具选择按钮
+ * - 工具选择按钮（显示在顶部工具栏）
  */
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -94,7 +94,7 @@ public:
     void setActiveTool(int toolId);
     void setExperimentalFeaturesEnabled(bool enabled);
 
-    /** OpenDyne（NotesPrimary）模式：切换工具在上 / Pitch Shift 在底部布局。 */
+    /** OpenDyne（NotesPrimary）模式：切换工具和 Pitch Grid 的可见性。 */
     void setOpenDyneMode(bool enabled);
 
     /** Pitch Grid 全局开关回调：切换 No Snap / Chromatic / Key Scale 吸附模式。 */
@@ -119,6 +119,7 @@ public:
     float getVibratoDepth() const;
     float getVibratoRate() const;
 
+    juce::Component& getToolStrip() { return toolStrip_; }
     juce::Component* getToolComponent(ToolId tool);
     juce::Component& getRetuneSpeedControl();
     juce::Component& getVibratoDepthControl();
@@ -159,6 +160,16 @@ private:
         ParameterPanel& owner_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ContentComponent)
+    };
+
+    class ToolStrip : public juce::Component
+    {
+    public:
+        explicit ToolStrip(ParameterPanel& owner) : owner_(owner) {}
+        void resized() override;
+
+    private:
+        ParameterPanel& owner_;
     };
 
     void setupHeader(juce::Label& label, const juce::String& text);
@@ -211,7 +222,7 @@ private:
     a11y::AccessibleKnob noteSplitSlider_;
 
     // Tools Section
-    juce::Label toolsHeader_;
+    ToolStrip toolStrip_ { *this };
     std::unique_ptr<ToolIconButton> autoTuneToolButton_;
     std::unique_ptr<ToolIconButton> selectToolButton_;
     std::unique_ptr<ToolIconButton> drawNoteToolButton_;

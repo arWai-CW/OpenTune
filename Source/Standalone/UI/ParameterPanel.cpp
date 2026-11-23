@@ -4,7 +4,8 @@
 #include "../../Utils/PitchControlConfig.h"
 #include "../../Utils/LocalizationManager.h"
 #include <cmath>
-#include <vector>
+#include <algorithm>
+#include <array>
 
 namespace OpenTune {
 
@@ -486,48 +487,45 @@ ParameterPanel::ParameterPanel()
     contentComponent_.addAndMakeVisible(noteSplitSlider_);
     noteSplitSlider_.setTooltip(LOC(kTooltipNoteSplit));
 
-    // ========== Tools Section (Replaces Info Display) ==========
-    setupHeader(toolsHeader_, LOC(kTools));
-    contentComponent_.addAndMakeVisible(toolsHeader_);
-
+    // ========== Tools Section ==========
     autoTuneToolButton_ = std::make_unique<ToolIconButton>(0, "Auto", LOC(kTooltipAutoTune));
     autoTuneToolButton_->setClickingTogglesState(false);
     autoTuneToolButton_->setTextIcon("AUTO");
     autoTuneToolButton_->onClick = [this] {
         listeners_.call([](Listener& l) { l.autoTuneRequested(); });
     };
-    contentComponent_.addAndMakeVisible(*autoTuneToolButton_);
+    toolStrip_.addAndMakeVisible(*autoTuneToolButton_);
 
     selectToolButton_ = std::make_unique<ToolIconButton>(1, "Select", LOC(kTooltipSelect));
     selectToolButton_->setRadioGroupId(1001);
     selectToolButton_->setToggleState(true, juce::dontSendNotification);
     selectToolButton_->setIcon(ToolbarIcons::getSelectIcon(), true);
     selectToolButton_->onClick = [this] { onToolClicked(1); };
-    contentComponent_.addAndMakeVisible(*selectToolButton_);
+    toolStrip_.addAndMakeVisible(*selectToolButton_);
 
     drawNoteToolButton_ = std::make_unique<ToolIconButton>(2, "DrawNote", LOC(kTooltipDrawNote));
     drawNoteToolButton_->setRadioGroupId(1001);
     drawNoteToolButton_->setIcon(ToolbarIcons::getDrawNoteIcon(), false);
     drawNoteToolButton_->onClick = [this] { onToolClicked(2); };
-    contentComponent_.addAndMakeVisible(*drawNoteToolButton_);
+    toolStrip_.addAndMakeVisible(*drawNoteToolButton_);
 
     lineAnchorToolButton_ = std::make_unique<ToolIconButton>(3, "LineAnchor", LOC(kTooltipLineAnchor));
     lineAnchorToolButton_->setRadioGroupId(1001);
     lineAnchorToolButton_->setIcon(ToolbarIcons::getLineAnchorIcon(), false);
     lineAnchorToolButton_->onClick = [this] { onToolClicked(3); };
-    contentComponent_.addAndMakeVisible(*lineAnchorToolButton_);
+    toolStrip_.addAndMakeVisible(*lineAnchorToolButton_);
 
     handDrawToolButton_ = std::make_unique<ToolIconButton>(4, "HandDraw", LOC(kTooltipHandDraw));
     handDrawToolButton_->setRadioGroupId(1001);
     handDrawToolButton_->setIcon(ToolbarIcons::getHandDrawIcon(), false);
     handDrawToolButton_->onClick = [this] { onToolClicked(4); };
-    contentComponent_.addAndMakeVisible(*handDrawToolButton_);
+    toolStrip_.addAndMakeVisible(*handDrawToolButton_);
 
     eraserToolButton_ = std::make_unique<ToolIconButton>(12, "Eraser", LOC(kTooltipEraser));
     eraserToolButton_->setRadioGroupId(1001);
     eraserToolButton_->setIcon(ToolbarIcons::getEraseIcon(), false);
     eraserToolButton_->onClick = [this] { onToolClicked(12); };
-    contentComponent_.addAndMakeVisible(*eraserToolButton_);
+    toolStrip_.addAndMakeVisible(*eraserToolButton_);
 
     // Pitch Shift action button
     pitchShiftButton_ = std::make_unique<juce::TextButton>(LOC(kPitchShift) + "...");
@@ -547,38 +545,38 @@ ParameterPanel::ParameterPanel()
     timeToolButton_->setIcon(ToolbarIcons::getTimeToolIcon(), false);
     timeToolButton_->onClick = [this] { onToolClicked(5); };
     // Time 两种模式均仅在 experimental 开启时可见
-    contentComponent_.addChildComponent(*timeToolButton_);
+    toolStrip_.addChildComponent(*timeToolButton_);
 
     // ── OpenDyne 工具按钮（OpenDyne 专属，OpenTune 初态隐藏） ──
     pitchToolButton_ = std::make_unique<ToolIconButton>(6, "Pitch", LOC(kToolODPitch));
     pitchToolButton_->setRadioGroupId(1001);
     pitchToolButton_->setIcon(ToolbarIcons::getPitchToolIcon(), false);
     pitchToolButton_->onClick = [this] { onToolClicked(6); };
-    contentComponent_.addChildComponent(*pitchToolButton_);
+    toolStrip_.addChildComponent(*pitchToolButton_);
 
     volumeEnvelopeToolButton_ = std::make_unique<ToolIconButton>(7, "VolumeEnvelope", LOC(kToolODVolumeEnvelope));
     volumeEnvelopeToolButton_->setRadioGroupId(1001);
     volumeEnvelopeToolButton_->setIcon(ToolbarIcons::getVolumeEnvelopeToolIcon(), false);
     volumeEnvelopeToolButton_->onClick = [this] { onToolClicked(7); };
-    contentComponent_.addChildComponent(*volumeEnvelopeToolButton_);
+    toolStrip_.addChildComponent(*volumeEnvelopeToolButton_);
 
     scissorsToolButton_ = std::make_unique<ToolIconButton>(8, "Scissors", LOC(kToolODScissors));
     scissorsToolButton_->setRadioGroupId(1001);
     scissorsToolButton_->setIcon(ToolbarIcons::getScissorsToolIcon(), false);
     scissorsToolButton_->onClick = [this] { onToolClicked(8); };
-    contentComponent_.addChildComponent(*scissorsToolButton_);
+    toolStrip_.addChildComponent(*scissorsToolButton_);
 
     pitchModulationToolButton_ = std::make_unique<ToolIconButton>(9, "PitchModulation", LOC(kToolODPitchModulation));
     pitchModulationToolButton_->setRadioGroupId(1001);
     pitchModulationToolButton_->setIcon(ToolbarIcons::getPitchModulationToolIcon(), false);
     pitchModulationToolButton_->onClick = [this] { onToolClicked(9); };
-    contentComponent_.addChildComponent(*pitchModulationToolButton_);
+    toolStrip_.addChildComponent(*pitchModulationToolButton_);
 
     pitchDriftToolButton_ = std::make_unique<ToolIconButton>(10, "PitchDrift", LOC(kToolODPitchDrift));
     pitchDriftToolButton_->setRadioGroupId(1001);
     pitchDriftToolButton_->setIcon(ToolbarIcons::getPitchDriftToolIcon(), false);
     pitchDriftToolButton_->onClick = [this] { onToolClicked(10); };
-    contentComponent_.addChildComponent(*pitchDriftToolButton_);
+    toolStrip_.addChildComponent(*pitchDriftToolButton_);
 
     // EQ tool button (visible in both OpenTune and OpenDyne modes)
     eqToolButton_ = std::make_unique<ToolIconButton>(11, "EQ", LOC_RAW("EQ frequency equalizer"));
@@ -586,7 +584,7 @@ ParameterPanel::ParameterPanel()
     eqToolButton_->setIcon(ToolbarIcons::getEqIcon(), false);
     eqToolButton_->setTextIcon("EQ");
     eqToolButton_->onClick = [this] { onToolClicked(11); };
-    contentComponent_.addAndMakeVisible(*eqToolButton_);
+    toolStrip_.addAndMakeVisible(*eqToolButton_);
 
     // ── Pitch Grid 模式选择器（OpenDyne 专属，初态隐藏） ──
     pitchGridSelector_.addItem(LOC(kNoSnap), 1);
@@ -607,7 +605,7 @@ ParameterPanel::ParameterPanel()
     pitchGridSelector_.setJustificationType(juce::Justification::centred);
     // 滚轮调参：ComboBox 在 JUCE 中默认关闭，此处显式开启；鼠标在控件上时事件被其消费，Viewport 不滚
     pitchGridSelector_.setScrollWheelEnabled(true);
-    contentComponent_.addChildComponent(pitchGridSelector_);
+    toolStrip_.addChildComponent(pitchGridSelector_);
 
     // Accessibility: the viewport itself took Tab focus and NVDA read it
     // as "unknown". Controls inside it remain reachable with Tab.
@@ -618,7 +616,7 @@ ParameterPanel::ParameterPanel()
     // Knob captions and section headers: JUCE exposes a label's text both as name and as
     // value, so NVDA read them twice. The knobs now carry the names themselves.
     for (auto* caption : { &pitchCorrectionHeader_, &retuneSpeedLabel_, &vibratoDepthLabel_,
-                           &vibratoRateLabel_, &noteSplitLabel_, &toolsHeader_ })
+                           &vibratoRateLabel_, &noteSplitLabel_ })
         caption->setAccessible(false);
     applyAccessibilityTitles();
     juce::Desktop::getInstance().addFocusChangeListener(this);
@@ -815,7 +813,6 @@ void ParameterPanel::ContentComponent::paint(juce::Graphics& g)
     };
 
     drawSectionHeader(owner_.pitchCorrectionHeader_);
-    drawSectionHeader(owner_.toolsHeader_);
 }
 
 void ParameterPanel::resized()
@@ -855,16 +852,11 @@ int ParameterPanel::layoutContent(int width)
     const int innerPadding = 8;
     const int contentLeft = innerPadding;
     const int contentWidth = width - innerPadding * 2;
-    const int contentCentre = contentLeft + contentWidth / 2;
     const int colWidth = contentWidth / 2;
 
     const int headerHeight = 24;
     const int labelHeight = 20;
     const int spacing = 12;
-    const int toolButtonSize = 60;
-    const int toolButtonGap = 10;
-    const int toolButtonHorizontalGap = 12;
-    const int toolHeaderGap = 8;
     const int pitchShiftButtonHeight = 28;
     const int rowHeight = labelHeight + knobSize + 8;
 
@@ -898,85 +890,54 @@ int ParameterPanel::layoutContent(int width)
 
     // ── Pitch Shift 按钮 ──
     pitchShiftButton_->setBounds(contentLeft + 4, y, contentWidth - 8, pitchShiftButtonHeight);
-    y += pitchShiftButtonHeight + spacing;
+    return y + pitchShiftButtonHeight + innerPadding;
+}
 
-    // ── 工具区标题 ──
-    toolsHeader_.setBounds(contentLeft, y, contentWidth, headerHeight);
-    y += headerHeight + toolHeaderGap;
+void ParameterPanel::ToolStrip::resized()
+{
+    const std::array buttons {
+        owner_.selectToolButton_.get(),
+        owner_.drawNoteToolButton_.get(),
+        owner_.lineAnchorToolButton_.get(),
+        owner_.pitchToolButton_.get(),
+        owner_.pitchModulationToolButton_.get(),
+        owner_.pitchDriftToolButton_.get(),
+        owner_.volumeEnvelopeToolButton_.get(),
+        owner_.openDyneMode_ ? owner_.timeToolButton_.get() : nullptr,
+        owner_.scissorsToolButton_.get(),
+        owner_.handDrawToolButton_.get(),
+        owner_.eraserToolButton_.get(),
+        owner_.openDyneMode_ ? nullptr : owner_.timeToolButton_.get(),
+        owner_.autoTuneToolButton_.get(),
+        owner_.eqToolButton_.get(),
+    };
+    const auto isVisible = [](auto* button) { return button != nullptr && button->isVisible(); };
+    const int count = static_cast<int>(std::count_if(buttons.begin(), buttons.end(), isVisible));
+    if (count == 0)
+        return;
 
-    // ── 工具按钮网格：2 列居中 ──
-    const int totalGridWidth = 2 * toolButtonSize + toolButtonHorizontalGap;
-    const int gridStartX = contentCentre - totalGridWidth / 2;
+    auto row = getLocalBounds();
+    constexpr int gap = 4;
+    const int gridWidth = owner_.openDyneMode_ ? juce::jmin(120, row.getWidth() / 4) : 0;
+    const int gapCount = owner_.openDyneMode_ ? count : count - 1;
+    const int buttonWidth = juce::jlimit(0, 44, (row.getWidth() - gridWidth - gap * gapCount) / count);
 
-    if (openDyneMode_)
+    for (auto* button : buttons)
     {
-        // OpenDyne：Time 仅在 experimental 开启时加入布局
-        // Melodyne 纵向顺序：Select(F1)、Pitch(F2)、Modulation(F2×2)、Drift(F2×3)、
-        // VolumeEnvelope(F4)、Time(T)、Scissors(F6)，AUTO 瞬时命令收尾，EQ 收尾
-        std::vector<juce::Component*> buttons = {
-            selectToolButton_.get(),
-            pitchToolButton_.get(),
-            pitchModulationToolButton_.get(),
-            pitchDriftToolButton_.get(),
-            volumeEnvelopeToolButton_.get(),
-        };
-        if (experimentalFeaturesEnabled_)
-            buttons.push_back(timeToolButton_.get());
-        buttons.push_back(scissorsToolButton_.get());
-        buttons.push_back(handDrawToolButton_.get());
-        buttons.push_back(eraserToolButton_.get());
-        buttons.push_back(autoTuneToolButton_.get());
-        buttons.push_back(eqToolButton_.get());
-
-        for (int i = 0; i < static_cast<int>(buttons.size()); ++i)
+        if (isVisible(button))
         {
-            const int row = i / 2;
-            const int col = i % 2;
-            const int bx = gridStartX + col * (toolButtonSize + toolButtonHorizontalGap);
-            const int by = y + row * (toolButtonSize + toolButtonGap);
-            buttons[static_cast<size_t>(i)]->setBounds(bx, by, toolButtonSize, toolButtonSize);
+            button->setBounds(row.removeFromLeft(buttonWidth));
+            row.removeFromLeft(gap);
         }
-
-        // Pitch Grid 选择器：网格最后一行下方 14px，是 OpenDyne 布局的最后一个控件
-        const int gridRows = (static_cast<int>(buttons.size()) + 1) / 2;
-        const int gridBottom = y + gridRows * toolButtonSize + (gridRows - 1) * toolButtonGap;
-        pitchGridSelector_.setBounds(contentLeft + 5, gridBottom + 14, contentWidth - 10, 22);
-
-        return pitchGridSelector_.getBounds().getBottom() + innerPadding;
     }
-    else
-    {
-        // OpenTune：Time 仅在 experimental 开启时加入布局
-        std::vector<juce::Component*> buttons;
-        if (selectToolButton_) buttons.push_back(selectToolButton_.get());
-        if (drawNoteToolButton_) buttons.push_back(drawNoteToolButton_.get());
-        if (lineAnchorToolButton_) buttons.push_back(lineAnchorToolButton_.get());
-        if (handDrawToolButton_) buttons.push_back(handDrawToolButton_.get());
-        if (eraserToolButton_) buttons.push_back(eraserToolButton_.get());
-        if (experimentalFeaturesEnabled_ && timeToolButton_) buttons.push_back(timeToolButton_.get());
-        if (autoTuneToolButton_) buttons.push_back(autoTuneToolButton_.get());
-        if (eqToolButton_) buttons.push_back(eqToolButton_.get());
-
-        for (int i = 0; i < static_cast<int>(buttons.size()); ++i)
-        {
-            const int row = i / 2;
-            const int col = i % 2;
-            const int bx = gridStartX + col * (toolButtonSize + toolButtonHorizontalGap);
-            const int by = y + row * (toolButtonSize + toolButtonGap);
-            buttons[i]->setBounds(bx, by, toolButtonSize, toolButtonSize);
-        }
-
-        const int gridRows = (static_cast<int>(buttons.size()) + 1) / 2;
-        const int gridBottom = y + gridRows * toolButtonSize + (gridRows - 1) * toolButtonGap;
-        return gridBottom + innerPadding;
-    }
+    if (owner_.openDyneMode_)
+        owner_.pitchGridSelector_.setBounds(row.removeFromLeft(gridWidth).withSizeKeepingCentre(gridWidth, 26));
 }
 
 void ParameterPanel::applyTheme()
 {
     auroraSidebarSurface_ = juce::Image();
     pitchCorrectionHeader_.setColour(juce::Label::textColourId, UIColors::textPrimary);
-    toolsHeader_.setColour(juce::Label::textColourId, UIColors::textPrimary);
 
     retuneSpeedLabel_.setColour(juce::Label::textColourId, UIColors::textSecondary);
     vibratoDepthLabel_.setColour(juce::Label::textColourId, UIColors::textSecondary);
@@ -998,6 +959,7 @@ void ParameterPanel::applyTheme()
 
     resized();
     repaint();
+    toolStrip_.repaint();
 }
 
 void ParameterPanel::refreshLocalizedText()
@@ -1011,8 +973,6 @@ void ParameterPanel::refreshLocalizedText()
     vibratoRateLabel_.setText(LOC(kVibratoRate), juce::dontSendNotification);
     noteSplitLabel_.setText(LOC(kNoteSplit), juce::dontSendNotification);
     
-    // 更新 Tools 部分
-    toolsHeader_.setText(LOC(kTools), juce::dontSendNotification);
     if (pitchShiftButton_) {
         setPitchShiftIndicator(pitchShiftSemitone_, pitchShiftCents_);
     }
@@ -1135,8 +1095,7 @@ void ParameterPanel::setExperimentalFeaturesEnabled(bool enabled)
         }
         timeToolButton_->setVisible(enabled);
     }
-    resized();
-    repaint();
+    toolStrip_.resized();
 }
 
 void ParameterPanel::setOpenDyneMode(bool enabled)
@@ -1166,8 +1125,7 @@ void ParameterPanel::setOpenDyneMode(bool enabled)
 
     // Select tooltip 的快捷键随 scheme 切换（OpenDyne F1 / OpenTune 3）
     refreshLocalizedText();
-    resized();
-    repaint();
+    toolStrip_.resized();
 }
 
 void ParameterPanel::setAutoButtonPresentation(const AutoButtonPresentation& presentation)
@@ -1259,6 +1217,9 @@ juce::Component& ParameterPanel::getPitchGridControl() { return pitchGridSelecto
 
 void ParameterPanel::revealControl(juce::Component& control)
 {
+    if (control.getParentComponent() != &contentComponent_)
+        return;
+
     const auto bounds = control.getBounds();
     const auto visible = viewport_.getViewArea();
     const int currentY = viewport_.getViewPositionY();

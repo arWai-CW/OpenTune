@@ -223,8 +223,9 @@ private:
 
     MenuBarComponent menuBar_;
     TransportBarComponent transportBar_;
-    TopBarComponent topBar_;
     ParameterPanel parameterPanel_;
+    TopBarComponent topBar_;
+    bool isParameterPanelVisible_ = false;
     PianoRollComponent pianoRoll_;
     TimelineOverviewComponent overviewStrip_;
     AutoRenderOverlayComponent autoRenderOverlay_;
