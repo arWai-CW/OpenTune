@@ -131,6 +131,9 @@ DrawNoteEditPlan planDrawNoteEdit(const EditableContentSnapshot& snapshot,
                 noteRange.startFrame, noteRange.endFrameExclusive, timeline.endFrameExclusive());
 
             auto correctedCurve = PitchCurve::fromSnapshot(curveSnapshot);
+            const std::vector<F0FrameRange> manualReplacementRanges{{
+                timeline.exclusiveFrameAt(input.startSeconds),
+                timeline.exclusiveFrameAt(input.endSeconds)}};
             const auto correctedSnapshot = correctedCurve->applyCorrectionToRange(
                 plan.afterNotes,
                 noteRange.startFrame,
@@ -138,7 +141,8 @@ DrawNoteEditPlan planDrawNoteEdit(const EditableContentSnapshot& snapshot,
                 static_cast<float>(snapshot.pitchShiftSettings.getPitchRatio()),
                 input.retuneSpeed,
                 input.vibratoDepth,
-                input.vibratoRate);
+                input.vibratoRate, 1.0f,
+                input.preserveManualOutsideEdits ? &manualReplacementRanges : nullptr);
 
             for (const auto& segment : correctedSnapshot->getCorrectionSegments()) {
                 if (segment.startFrame < plan.affectedRange.endFrameExclusive

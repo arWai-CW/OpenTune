@@ -198,6 +198,7 @@ constexpr const char* kExternalEditCurveCorrupt = "The returned curve file is co
 
 constexpr const char* kUndo = "Undo";
 constexpr const char* kRedo = "Redo";
+constexpr const char* kRestoreSelectedNotes = "Restore Selected Notes";
 
 constexpr const char* kShowWaveform = "Show Waveform";
 constexpr const char* kPianoKeyboard = "Piano Keyboard";
@@ -230,6 +231,9 @@ constexpr const char* kOff = "Off";
 constexpr const char* kReferenceTrack = "Pitch Reference Track";
 constexpr const char* kTuneToPitchReference = "Tune to Pitch Reference";
 constexpr const char* kAlignTimingToReference = "Align Timing to Reference";
+constexpr const char* kReferenceToolbarLabel = "Guide";
+constexpr const char* kTuneReferenceToolbarLabel = "Tune";
+constexpr const char* kAlignReferenceToolbarLabel = "Align";
 constexpr const char* kTimingGentle = "Gentle (Harmony)";
 constexpr const char* kTimingTight = "Tight (Double)";
 constexpr const char* kNoVoicedReferenceOverlap = "No voiced pitch overlaps in the active clip or selected notes.";
@@ -274,6 +278,7 @@ constexpr const char* kLanguageLabel = "Interface Language";
 constexpr const char* kAudioEditingScheme = "Audio Editing Scheme";
 constexpr const char* kSchemeOpenTune = "OpenTune";
 constexpr const char* kSchemeOpenDyne = "OpenDyne";
+constexpr const char* kOpenDyneMix = "Mix: Tune drawing tools";
 constexpr const char* kGridStyle = "Grid Style";
 constexpr const char* kGridStylePianoLanes = "Piano Lanes";
 constexpr const char* kGridStyleEqualSpacing = "Equal Spacing";
@@ -574,6 +579,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kExternalEditCurveCorrupt, "The returned curve file is corrupt. The external edit session stays open — fix or save the curve in the standalone editor and try again.", "返回的曲线文件已损坏。外部编辑会话保持打开，请在独立编辑器中修复或重新保存曲线后重试。", "返されたカーブファイルが破損しています。外部編集セッションは開いたままです。スタンドアロンエディターで曲線を修復または保存し直して、再試行してください。", "Файл кривой повреждён. Сессия внешнего редактирования остаётся открытой — исправьте или сохраните кривую заново в автономном редакторе и повторите попытку.", "El archivo de curva devuelto está dañado. La sesión de edición externa permanece abierta: corrija o vuelva a guardar la curva en el editor independiente e inténtelo de nuevo." },
         { Keys::kUndo, "Undo", "撤销", "元に戻す", "Отменить", "Deshacer" },
         { Keys::kRedo, "Redo", "重做", "やり直す", "Повтор", "Rehacer" },
+        { Keys::kRestoreSelectedNotes, "Restore Selected Notes", "还原所选音符", "選択したノートを元に戻す", "Восстановить выбранные ноты", "Restaurar notas seleccionadas" },
         
         { Keys::kShowWaveform, "Show Waveform", "显示波形", "波形を表示", "Волновая форма", "Ver forma de onda" },
         { Keys::kPianoKeyboard, "Piano Keyboard", "钢琴键盘", "ピアノキーボード", "Клавиатура пианино", "Teclado de piano" },
@@ -606,6 +612,9 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kReferenceTrack, "Pitch Reference Track", "音高参考轨", "ピッチ参照トラック", "Дорожка-ориентир высоты тона", "Pista de referencia tonal" },
         { Keys::kTuneToPitchReference, "Tune to Pitch Reference", "按音高参考轨修音", "参照トラックに合わせて補正", "Коррекция по опорной дорожке", "Afinar según la pista de referencia" },
         { Keys::kAlignTimingToReference, "Align Timing to Reference", "按参考轨对齐时序", "参照トラックにタイミングを合わせる", "Выровнять по опорной дорожке", "Alinear con la pista de referencia" },
+        { Keys::kReferenceToolbarLabel, "Guide", "参考轨", "参照", "Опора", "Guía" },
+        { Keys::kTuneReferenceToolbarLabel, "Tune", "修音", "補正", "Тон", "Afinar" },
+        { Keys::kAlignReferenceToolbarLabel, "Align", "对齐", "同期", "Ритм", "Alinear" },
         { Keys::kTimingGentle, "Gentle (Harmony)", "柔和（和声）", "ゆるめ（ハーモニー）", "Мягко (гармония)", "Suave (armonía)" },
         { Keys::kTimingTight, "Tight (Double)", "紧密（叠唱）", "タイト（ダブル）", "Плотно (дабл)", "Preciso (doble)" },
         { Keys::kNoVoicedReferenceOverlap, "No voiced pitch overlaps in the active clip or selected notes.", "当前片段或所选音符没有重叠的有声音高。", "現在のクリップまたは選択したノートに、有声音の重なりがありません。", "В активном клипе или выбранных нотах нет перекрывающихся участков с высотой тона.", "No hay tramos con tono superpuestos en el clip activo o las notas seleccionadas." },
@@ -650,6 +659,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kAudioEditingScheme, "Audio Editing Scheme", "音频编辑方案", "音声編集方式", "Схема аудиоредактирования", "Esquema de edicion de audio" },
         { Keys::kSchemeOpenTune, "OpenTune", "OpenTune", "OpenTune", "OpenTune", "OpenTune" },
         { Keys::kSchemeOpenDyne, "OpenDyne", "OpenDyne", "OpenDyne", "OpenDyne", "OpenDyne" },
+        { Keys::kOpenDyneMix, "Mix: Tune drawing tools", "混合模式：Tune 绘制工具", "Mix：Tune の描画ツール", "Микс: инструменты рисования Tune", "Mix: herramientas de dibujo de Tune" },
         { Keys::kGridStyle, "Grid Style", "网格样式", "グリッドスタイル", "Стиль сетки", "Estilo de cuadricula" },
         { Keys::kGridStylePianoLanes, "Piano Lanes", "钢琴键槽", "ピアノレーン", "Клавиши пианино", "Teclas de piano" },
         { Keys::kGridStyleEqualSpacing, "Equal Spacing", "等距", "等間隔", "Равный интервал", "Espaciado igual" },
@@ -951,7 +961,7 @@ inline juce::String get(Language lang, const char* key)
         { "Rendering audio", "Rendering audio", "音频渲染", "オーディオのレンダリング", "Рендеринг аудио", "Renderizado de audio" },
         { "The audio is being rendered. Rendering starts after loading a project, editing pitch or transposing; please wait until it finishes. If you play now, you will hear the original pitch.", "The audio is being rendered. Rendering starts after loading a project, editing pitch or transposing; please wait until it finishes. If you play now, you will hear the original pitch.", "音频正在渲染，当加载项目、修改音高或移调后会触发渲染，此时请稍后渲染完成。如果在此时播放，您将听到原始音高。", "オーディオをレンダリングしています。プロジェクトの読み込み、ピッチの編集、移調の後にレンダリングが行われます。完了までお待ちください。今再生すると元のピッチが聞こえます。", "Идёт рендеринг аудио. Он запускается после загрузки проекта, изменения высоты тона или транспонирования; дождитесь завершения. Если начать воспроизведение сейчас, вы услышите исходную высоту тона.", "Se está renderizando el audio. El renderizado se inicia al cargar un proyecto, editar el tono o transponer; espera a que termine. Si reproduces ahora, oirás el tono original." },
         { "Editing tools", "Editing tools", "编辑工具", "編集ツール", "Инструменты редактирования", "Herramientas de edición" },
-        { "The tools on the right edit pitch and notes. Long-press any tool to see its name and how to use it.", "The tools on the right edit pitch and notes. Long-press any tool to see its name and how to use it.", "右侧是修音工具。长按任意工具，即可查看它的名称和用法。", "右側はピッチとノートを編集するツールです。ツールを長押しすると、名前と使い方が表示されます。", "Справа находятся инструменты для правки высоты тона и нот. Нажмите и удерживайте инструмент, чтобы увидеть его название и способ использования.", "A la derecha están las herramientas para editar tono y notas. Mantén pulsada cualquier herramienta para ver su nombre y cómo usarla." },
+        { "The tools at the top edit pitch and notes. Long-press any tool to see its name and how to use it.", "The tools at the top edit pitch and notes. Long-press any tool to see its name and how to use it.", "顶部是修音工具。长按任意工具，即可查看它的名称和用法。", "上部にはピッチとノートを編集するツールがあります。ツールを長押しすると、名前と使い方が表示されます。", "Вверху находятся инструменты для правки высоты тона и нот. Нажмите и удерживайте инструмент, чтобы увидеть его название и способ использования.", "En la parte superior están las herramientas para editar tono y notas. Mantén pulsada cualquier herramienta para ver su nombre y cómo usarla." },
         { "Skip Tour", "Skip Tour", "跳过引导", "ガイドをスキップ", "Пропустить обучение", "Omitir guía" },
         { "Rendering (", "Rendering (", "渲染中 (", "レンダリング中 (", "Рендеринг (", "Renderizando (" },
         { "Failed to start OriginalF0 analysis.", "Failed to start Original Pitch analysis.", "未能启动原始音高分析。", "元のピッチの解析を開始できませんでした。", "Не удалось запустить анализ исходной высоты тона.", "No se pudo iniciar el análisis del tono original." },

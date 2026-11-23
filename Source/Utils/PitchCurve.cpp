@@ -83,29 +83,54 @@ void clearSegmentsInRangePreserveOutside(std::vector<PitchCorrectionSegment>& se
             continue;
         }
 
-        if (seg.startFrame < startFrame) {
-            PitchCorrectionSegment left = seg;
-            left.endFrame = startFrame;
-            const int leftLen = left.endFrame - left.startFrame;
-            if (leftLen > 0 && leftLen <= static_cast<int>(seg.f0Data.size())) {
-                left.f0Data.assign(seg.f0Data.begin(), seg.f0Data.begin() + leftLen);
-                kept.push_back(std::move(left));
-            }
-        }
-
-        if (seg.endFrame > endFrame) {
-            PitchCorrectionSegment right = seg;
-            right.startFrame = endFrame;
-            const int offset = right.startFrame - seg.startFrame;
-            const int rightLen = right.endFrame - right.startFrame;
-            if (offset >= 0 && rightLen > 0 && offset + rightLen <= static_cast<int>(seg.f0Data.size())) {
-                right.f0Data.assign(seg.f0Data.begin() + offset, seg.f0Data.begin() + offset + rightLen);
-                kept.push_back(std::move(right));
-            }
-        }
+        if (auto left = clipPitchCorrectionSegment(seg, seg.startFrame, startFrame))
+            kept.push_back(std::move(*left));
+        if (auto right = clipPitchCorrectionSegment(seg, endFrame, seg.endFrame))
+            kept.push_back(std::move(*right));
     }
 
     segments.swap(kept);
+}
+
+void preserveManualSegmentsOutsideEdits(
+    std::vector<PitchCorrectionSegment>& segments,
+    const std::vector<PitchCorrectionSegment>& originalSegments,
+    PitchCorrectionSegment& generated,
+    std::vector<F0FrameRange> editRanges)
+{
+    using Source = PitchCorrectionSegment::Source;
+    std::sort(editRanges.begin(), editRanges.end(), [](const auto& a, const auto& b) {
+        return a.startFrame < b.startFrame;
+    });
+
+    const auto preservePiece = [&](const PitchCorrectionSegment& segment, int start, int end) {
+        if (auto piece = clipPitchCorrectionSegment(segment, start, end)) {
+            // Leave these frames to the manual segment, not the regenerated note curve.
+            std::fill(generated.f0Data.begin() + (piece->startFrame - generated.startFrame),
+                      generated.f0Data.begin() + (piece->endFrame - generated.startFrame), 0.0f);
+            insertSegmentSorted(segments, std::move(*piece));
+        }
+    };
+
+    auto firstRange = editRanges.begin();
+    for (const auto& segment : originalSegments) {
+        if (segment.source != Source::HandDraw && segment.source != Source::LineAnchor)
+            continue;
+        int start = std::max(segment.startFrame, generated.startFrame);
+        const int end = std::min(segment.endFrame, generated.endFrame);
+        if (start >= end)
+            continue;
+        while (firstRange != editRanges.end() && firstRange->endFrameExclusive <= start)
+            ++firstRange;
+        for (auto range = firstRange;
+             range != editRanges.end() && range->startFrame < end && start < end; ++range) {
+            if (range->isEmpty() || range->endFrameExclusive <= start)
+                continue;
+            preservePiece(segment, start, range->startFrame);
+            start = range->endFrameExclusive;
+        }
+        preservePiece(segment, start, end);
+    }
 }
 
 float smootherstep(float t) noexcept
@@ -239,7 +264,8 @@ std::shared_ptr<const PitchCurveSnapshot> PitchCurve::applyCorrectionToRange(
     float retuneSpeed,
     float vibratoDepth,
     float vibratoRate,
-    float pitchDriftScale)
+    float pitchDriftScale,
+    const std::vector<F0FrameRange>* manualReplacementRanges)
 {
     auto oldSnapshot = getSnapshot();
     const auto& originalF0 = oldSnapshot->getOriginalF0();
@@ -673,6 +699,9 @@ std::shared_ptr<const PitchCurveSnapshot> PitchCurve::applyCorrectionToRange(
     newSeg.parameterSnapshot.vibratoRate = vibratoRate;
     newSeg.parameterSnapshot.pitchDriftScale = pitchDriftScale;
 
+    if (manualReplacementRanges != nullptr)
+        preserveManualSegmentsOutsideEdits(correctionSegments, oldSnapshot->getCorrectionSegments(),
+                                           newSeg, *manualReplacementRanges);
     insertVoicedSegmentPieces(correctionSegments, newSeg, originalF0);
 
     uint64_t newGen = incrementGeneration();

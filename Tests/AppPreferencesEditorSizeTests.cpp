@@ -1,4 +1,5 @@
 #include "Utils/AppPreferences.h"
+#include "Standalone/UI/ToolIds.h"
 
 #include <cstdio>
 
@@ -7,6 +8,46 @@ namespace {
 bool hasSize(const OpenTune::PluginEditorSize& actual, int width, int height)
 {
     return actual.width == width && actual.height == height;
+}
+
+bool testOpenDyneMixPreferenceAndTools()
+{
+    using namespace OpenTune;
+    using AudioEditingScheme::Scheme;
+    using AudioEditingScheme::allowsTuneDrawingTools;
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("OpenTuneAppPreferences-" + juce::Uuid().toString());
+    AppPreferences::StorageOptions options;
+    options.settingsDirectory = directory;
+    bool passed;
+    {
+        AppPreferences preferences(options);
+        passed = !preferences.getState().shared.openDyneMixEnabled;
+        preferences.setOpenDyneMixEnabled(true);
+        preferences.setAudioEditingScheme(Scheme::CorrectedF0Primary);
+    }
+    {
+        AppPreferences reopened(options);
+        passed = passed && reopened.getState().shared.openDyneMixEnabled
+            && reopened.getState().shared.audioEditingScheme == Scheme::CorrectedF0Primary;
+        reopened.setAudioEditingScheme(Scheme::NotesPrimary);
+        reopened.setOpenDyneMixEnabled(false);
+    }
+    {
+        AppPreferences reopened(options);
+        passed = passed && !reopened.getState().shared.openDyneMixEnabled
+            && reopened.getState().shared.audioEditingScheme == Scheme::NotesPrimary;
+    }
+    directory.deleteRecursively();
+
+    const auto mix = allowsTuneDrawingTools(Scheme::NotesPrimary, true);
+    const auto dyne = allowsTuneDrawingTools(Scheme::NotesPrimary, false);
+    return passed && mix && !dyne && allowsTuneDrawingTools(Scheme::CorrectedF0Primary, false)
+        && toolWithTuneDrawingAvailability(ToolId::DrawNote, mix) == ToolId::DrawNote
+        && toolWithTuneDrawingAvailability(ToolId::LineAnchor, mix) == ToolId::LineAnchor
+        && toolWithTuneDrawingAvailability(ToolId::DrawNote, dyne) == ToolId::Pitch
+        && toolWithTuneDrawingAvailability(ToolId::LineAnchor, dyne) == ToolId::Select
+        && toolWithTuneDrawingAvailability(ToolId::HandDraw, dyne) == ToolId::HandDraw;
 }
 
 bool testOutOfScaleDragPreference()
@@ -179,6 +220,11 @@ bool testShortcutDefaults()
 {
     using namespace OpenTune::KeyShortcutConfig;
     const auto settings = KeyShortcutSettings::getDefault();
+    if (findShortcutForBinding(settings, {'7', {}}, kPianoRollOpenDyneScope) != ShortcutId::ToolMixDrawNote
+        || findShortcutForBinding(settings, {'8', {}}, kPianoRollOpenDyneScope) != ShortcutId::ToolMixLineAnchor
+        || findShortcutForBinding(settings, {'7', {}}, kPianoRollOpenTuneScope) != ShortcutId::Count
+        || findShortcutForBinding(settings, {'8', {}}, kPianoRollOpenTuneScope) != ShortcutId::Count)
+        return false;
     for (const auto& info : kShortcutInfos) {
         if (info.scopes == 0)
             return false;
@@ -291,6 +337,8 @@ bool testLegacyShortcutMigration()
         juce::PropertiesFile legacySettings(propertiesOptions);
         legacySettings.setValue("shared.shortcuts.zoomHorizontalIn", "Ctrl+K");
         legacySettings.setValue("shared.shortcuts.zoomVerticalOut", "");
+        legacySettings.setValue("shared.shortcuts.delete", "7");
+        legacySettings.setValue("shared.shortcuts.toolLineAnchor", "8");
         legacySaved = legacySettings.save();
     }
     if (!legacySaved) {
@@ -301,6 +349,8 @@ bool testLegacyShortcutMigration()
     const auto horizontalZoomId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomHorizontalIn;
     const auto verticalZoomId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomVerticalOut;
     const auto verticalZoomInId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomVerticalIn;
+    using OpenTune::KeyShortcutConfig::ShortcutId;
+    using OpenTune::KeyShortcutConfig::getShortcutBinding;
     const OpenTune::KeyShortcutConfig::KeyBinding customKey(
         'K', juce::ModifierKeys::ctrlModifier);
     const OpenTune::KeyShortcutConfig::KeyBinding wheelBinding(
@@ -319,7 +369,11 @@ bool testLegacyShortcutMigration()
                    .bindings.empty()
             && OpenTune::KeyShortcutConfig::getShortcutBinding(shortcuts, verticalZoomInId)
                    .hasBinding({ OpenTune::KeyShortcutConfig::BindingType::WheelUp,
-                                 juce::ModifierKeys::shiftModifier });
+                                 juce::ModifierKeys::shiftModifier })
+            && getShortcutBinding(shortcuts, ShortcutId::Delete).hasBinding({'7', {}})
+            && getShortcutBinding(shortcuts, ShortcutId::ToolMixDrawNote).bindings.empty()
+            && getShortcutBinding(shortcuts, ShortcutId::ToolLineAnchor).hasBinding({'8', {}})
+            && getShortcutBinding(shortcuts, ShortcutId::ToolMixLineAnchor).hasBinding({'8', {}});
     }
 
     bool persistedMigration = false;
@@ -669,6 +723,11 @@ bool testAltShiftWheelZoomShortcut()
 
 int main()
 {
+    if (!testOpenDyneMixPreferenceAndTools()) {
+        std::fputs("FAIL: OpenDyne Mix preference and tool availability\n", stderr);
+        return 1;
+    }
+
     if (!testOutOfScaleDragPreference()) {
         std::fputs("FAIL: out-of-scale drag preference default and persistence\n", stderr);
         return 1;

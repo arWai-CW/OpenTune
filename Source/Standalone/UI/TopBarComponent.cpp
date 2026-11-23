@@ -10,13 +10,17 @@ constexpr float kAuroraTopBarFrameIntensity = 0.12f;
 
 } // namespace
 
-TopBarComponent::TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar)
+TopBarComponent::TopBarComponent(MenuBarComponent& menuBar, TransportBarComponent& transportBar,
+                                 juce::Component& toolStrip)
     : menuBar_(menuBar)
     , transportBar_(transportBar)
+    , toolStrip_(toolStrip)
 {
     transportBar_.setEmbeddedInTopBar(true);
     addAndMakeVisible(menuBar_);
     addAndMakeVisible(transportBar_);
+    addAndMakeVisible(toolStrip_);
+    addChildComponent(toolActions_);
 
     // 侧边栏开关按钮 - 使用箭头图标表示收起/展开功能
     trackPanelToggleButton_.setIcon(ToolbarIcons::getPanelRightIcon());
@@ -54,14 +58,6 @@ void TopBarComponent::setSidePanelsVisible(bool trackPanelVisible, bool paramete
     trackPanelToggleButton_.setToggleState(trackPanelVisible, juce::dontSendNotification);
     parameterPanelToggleButton_.setToggleState(parameterPanelVisible, juce::dontSendNotification);
     repaint();
-}
-
-void TopBarComponent::setSidePanelTogglesAccessible(bool accessible)
-{
-    for (auto* button : { &trackPanelToggleButton_, &parameterPanelToggleButton_ }) {
-        button->setWantsKeyboardFocus(accessible);
-        button->setAccessible(accessible);
-    }
 }
 
 void TopBarComponent::setTrackPanelToggleVisible(bool visible)
@@ -179,6 +175,21 @@ void TopBarComponent::paint(juce::Graphics& g)
     }
 }
 
+void TopBarComponent::addToolAction(juce::Button& button)
+{
+    toolActions_.addAndMakeVisible(button);
+    resized();
+}
+
+void TopBarComponent::setToolActionsVisible(bool visible)
+{
+    if (areToolActionsVisible() != visible)
+    {
+        toolActions_.setVisible(visible);
+        resized();
+    }
+}
+
 void TopBarComponent::resized()
 {
     // 阴影边距：与 paint 保持一致（Overdose 顶部贴边、底部 10px 阴影空间）
@@ -199,6 +210,25 @@ void TopBarComponent::resized()
         menuBar_.setBounds(bounds.removeFromTop(25));
     else
         menuBar_.setBounds({});
+
+    auto tools = bounds.removeFromBottom(kToolStripHeight).reduced(3, 4);
+    const int actionCount = toolActions_.getNumChildComponents();
+    if (areToolActionsVisible() && actionCount > 0)
+    {
+        constexpr int actionGap = 2;
+        constexpr int preferredActionWidth = 54;
+        const int preferredWidth = actionCount * (preferredActionWidth + actionGap) - actionGap;
+        toolActions_.setBounds(tools.removeFromRight(juce::jmin(preferredWidth, tools.getWidth() / 2)));
+        tools.removeFromRight(6);
+        auto actions = toolActions_.getLocalBounds();
+        const int actionWidth = juce::jmax(0, actions.getWidth() - actionGap * (actionCount - 1)) / actionCount;
+        for (auto* button : toolActions_.getChildren())
+        {
+            button->setBounds(actions.removeFromLeft(actionWidth));
+            actions.removeFromLeft(actionGap);
+        }
+    }
+    toolStrip_.setBounds(tools);
 
     // Transport 行：左/右留给侧边栏开关按钮
     const int pad = 3;

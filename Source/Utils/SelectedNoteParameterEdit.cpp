@@ -1,5 +1,6 @@
 #include "SelectedNoteParameterEdit.h"
 #include "Content/EditableContentSnapshot.h"
+#include "Content/ContentPatchGeometry.h"
 #include <algorithm>
 #include <utility>
 
@@ -16,31 +17,6 @@ std::vector<Note> notesInRange(const std::vector<Note>& notes, double startSecon
     return result;
 }
 
-std::vector<PitchCorrectionSegment> segmentsInRange(
-    const std::vector<PitchCorrectionSegment>& segments, int startFrame, int endFrame)
-{
-    std::vector<PitchCorrectionSegment> result;
-    for (const auto& segment : segments) {
-        if (segment.endFrame <= startFrame || segment.startFrame >= endFrame)
-            continue;
-
-        const int clippedStart = std::max(segment.startFrame, startFrame);
-        const int clippedEnd = std::min(segment.endFrame, endFrame);
-        const int offset = clippedStart - segment.startFrame;
-        const int length = clippedEnd - clippedStart;
-        if (offset < 0 || length <= 0 || offset + length > static_cast<int>(segment.f0Data.size()))
-            continue;
-
-        auto clipped = segment;
-        clipped.startFrame = clippedStart;
-        clipped.endFrame = clippedEnd;
-        clipped.f0Data.assign(segment.f0Data.begin() + offset,
-                              segment.f0Data.begin() + offset + length);
-        result.push_back(std::move(clipped));
-    }
-    return result;
-}
-
 } // namespace
 
 std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
@@ -53,7 +29,8 @@ std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
     float value,
     float retuneSpeedDefault,
     float vibratoDepthDefault,
-    float vibratoRateDefault)
+    float vibratoRateDefault,
+    bool preserveManualOutsideEdits)
 {
     if (!contentKey.isValid() || snapshot.notesRevision != expectedNotesRevision
         || snapshot.pitchCurve == nullptr
@@ -97,9 +74,14 @@ std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
 
     double dirtyStartTime = 1e30;
     double dirtyEndTime = -1e30;
+    std::vector<F0FrameRange> manualReplacementRanges;
     for (const auto position : valuePlan.changedPositions) {
-        dirtyStartTime = std::min(dirtyStartTime, valuePlan.notes[position].startTime);
-        dirtyEndTime = std::max(dirtyEndTime, valuePlan.notes[position].endTime);
+        const auto& note = valuePlan.notes[position];
+        dirtyStartTime = std::min(dirtyStartTime, note.startTime);
+        dirtyEndTime = std::max(dirtyEndTime, note.endTime);
+        if (preserveManualOutsideEdits)
+            manualReplacementRanges.push_back({
+                timeline.exclusiveFrameAt(note.startTime), timeline.exclusiveFrameAt(note.endTime)});
     }
     const auto editRange = timeline.rangeForTimes(dirtyStartTime, dirtyEndTime);
     if (editRange.isEmpty())
@@ -113,7 +95,8 @@ std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
         static_cast<float>(snapshot.pitchShiftSettings.getPitchRatio()),
         retuneSpeedDefault,
         vibratoDepthDefault,
-        vibratoRateDefault);
+        vibratoRateDefault, 1.0f,
+        preserveManualOutsideEdits ? &manualReplacementRanges : nullptr);
 
     patch.affectedRange = PitchCurve::expandNoteBasedCorrectionRange(
         editRange.startFrame, editRange.endFrameExclusive, timeline.endFrameExclusive());
@@ -121,11 +104,11 @@ std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
     const double affectedEndSeconds = timeline.timeAtFrame(patch.affectedRange.endFrameExclusive);
     patch.beforeNotes = notesInRange(snapshot.notes, affectedStartSeconds, affectedEndSeconds);
     patch.afterNotes = notesInRange(valuePlan.notes, affectedStartSeconds, affectedEndSeconds);
-    patch.beforeSegments = segmentsInRange(
+    patch.beforeSegments = clipSegmentsToFrameRange(
         curveSnapshot->getCorrectionSegments(),
         patch.affectedRange.startFrame,
         patch.affectedRange.endFrameExclusive);
-    patch.afterSegments = segmentsInRange(
+    patch.afterSegments = clipSegmentsToFrameRange(
         derivedSnapshot->getCorrectionSegments(),
         patch.affectedRange.startFrame,
         patch.affectedRange.endFrameExclusive);

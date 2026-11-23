@@ -43,27 +43,9 @@ inline std::vector<PitchCorrectionSegment> clipSegmentsToFrameRange(
     int rangeEndFrameExclusive)
 {
     std::vector<PitchCorrectionSegment> filtered;
-    for (const auto& seg : segments) {
-        if (seg.endFrame <= rangeStartFrame || seg.startFrame >= rangeEndFrameExclusive)
-            continue;
-
-        const int clipStart = std::max(seg.startFrame, rangeStartFrame);
-        const int clipEnd = std::min(seg.endFrame, rangeEndFrameExclusive);
-        if (clipEnd <= clipStart)
-            continue;
-
-        PitchCorrectionSegment clipped = seg;
-        const int startOffset = clipStart - seg.startFrame;
-        const int clipLen = clipEnd - clipStart;
-        if (startOffset >= 0 && clipLen > 0
-            && startOffset + clipLen <= static_cast<int>(seg.f0Data.size())) {
-            clipped.startFrame = clipStart;
-            clipped.endFrame = clipEnd;
-            clipped.f0Data.assign(seg.f0Data.begin() + startOffset,
-                                  seg.f0Data.begin() + startOffset + clipLen);
-            filtered.push_back(std::move(clipped));
-        }
-    }
+    for (const auto& seg : segments)
+        if (auto clipped = clipPitchCorrectionSegment(seg, rangeStartFrame, rangeEndFrameExclusive))
+            filtered.push_back(std::move(*clipped));
     return filtered;
 }
 
@@ -88,31 +70,10 @@ inline std::vector<PitchCorrectionSegment> replaceSegmentsInFrameRange(
             continue;
         }
 
-        // Segment crosses range boundary -> split and preserve outside parts
-        // Left part: segment starts before range
-        if (seg.startFrame < rangeStartFrame) {
-            PitchCorrectionSegment left = seg;
-            left.endFrame = rangeStartFrame;
-            const int leftLen = left.endFrame - left.startFrame;
-            if (leftLen > 0 && leftLen <= static_cast<int>(seg.f0Data.size())) {
-                left.f0Data.assign(seg.f0Data.begin(), seg.f0Data.begin() + leftLen);
-                mergedSegments.push_back(std::move(left));
-            }
-        }
-
-        // Right part: segment ends after range
-        if (seg.endFrame > rangeEndFrameExclusive) {
-            PitchCorrectionSegment right = seg;
-            right.startFrame = rangeEndFrameExclusive;
-            const int offset = right.startFrame - seg.startFrame;
-            const int rightLen = right.endFrame - right.startFrame;
-            if (offset >= 0 && rightLen > 0
-                && offset + rightLen <= static_cast<int>(seg.f0Data.size())) {
-                right.f0Data.assign(seg.f0Data.begin() + offset,
-                                    seg.f0Data.begin() + offset + rightLen);
-                mergedSegments.push_back(std::move(right));
-            }
-        }
+        if (auto left = clipPitchCorrectionSegment(seg, seg.startFrame, rangeStartFrame))
+            mergedSegments.push_back(std::move(*left));
+        if (auto right = clipPitchCorrectionSegment(seg, rangeEndFrameExclusive, seg.endFrame))
+            mergedSegments.push_back(std::move(*right));
     }
 
     // Callers already filtered the new segments to range-overlapping only.

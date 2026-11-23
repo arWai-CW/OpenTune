@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string_view>
 
 namespace {
 using namespace OpenTune;
@@ -130,6 +131,99 @@ bool testReferenceAlignment()
         && !align(guideOnsets, 0.0).grid;
 }
 
+bool testPooledSplitsCanAlignIndependently()
+{
+    const auto base = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 2.4, 2.4, HandleKind::InternalOnset},
+        {3, 2.95, 2.95, HandleKind::InternalOnset},
+        {4, 3.5, 3.5, HandleKind::InternalOnset},
+        {5, 6.0, 6.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection lead{10.0, 6.0, 0.0, 6.0};
+    const ContentTimelineProjection first{10.0, 2.0, 0.0, 2.0};
+    const ContentTimelineProjection second{13.0, 2.0, 2.0, 2.0};
+    const std::vector<TimingOnset> firstAttacks{{0.4, true}, {0.95, false}, {1.5, true}};
+    const std::vector<TimingOnset> firstReference{{0.46, true}, {1.01, false}, {1.56, true}};
+    const std::vector<TimingOnset> secondAttacks{{2.4, false}, {2.95, true}, {3.5, false}};
+    const std::vector<TimingOnset> secondReference{{3.34, false}, {3.89, true}, {4.44, false}};
+
+    const auto firstPlan = alignTimingToReference(firstAttacks, *base, first,
+        firstReference, *base, lead, 1.0, {{2.0, 4.0}, {4.0, 6.0}});
+    const auto copyConflict = alignTimingToReference(firstAttacks, *base, first,
+        firstReference, *base, lead, 1.0, {{0.0, 2.0}});
+    if (!firstPlan.grid || copyConflict.grid || !copyConflict.affectsProtectedTiming)
+        return false;
+    const auto alignSecond = [&](const TimeGridSnapshot& current) {
+        return alignTimingToReference(secondAttacks, current, second,
+            secondReference, *base, lead, 0.5, {{0.0, 2.0}, {4.0, 6.0}});
+    };
+    const auto preview = alignSecond(*base);
+    const auto combined = alignSecond(*firstPlan.grid);
+    if (!preview.grid || !combined.grid
+        || !preservesTimingAudioInRange(*preview.grid, *combined.grid, {2.0, 4.0})
+        || std::abs(combined.grid->tauForward(0.4) - 0.46) > 1e-9
+        || std::abs(combined.grid->tauForward(2.4) - 2.37) > 1e-9)
+        return false;
+
+    juce::AudioBuffer<float> input(1, sampleRate * 6);
+    for (int s = 0; s < input.getNumSamples(); ++s)
+        input.setSample(0, s, static_cast<float>(std::sin(2.0 * pi * 221 * s / sampleRate)));
+    SoundTouchStretcher stretcher(sampleRate, 1);
+    const auto firstAudio = stretcher.stretch(input, *firstPlan.grid);
+    const auto combinedAudio = stretcher.stretch(input, *combined.grid);
+    const auto restored = restoreOriginalTimingInRange(*combined.grid, {0.0, 2.0}, {{2.0, 4.0}});
+    if (!restored || !restored->isIdentityInOutputRange(0.0, 2.0))
+        return false;
+    const auto restoredAudio = stretcher.stretch(input, *restored);
+    for (int s = 0; s < input.getNumSamples(); ++s) {
+        if (s >= 2 * sampleRate && firstAudio.getSample(0, s) != input.getSample(0, s))
+            return false;
+        if ((s < 2 * sampleRate || s >= 4 * sampleRate)
+            && combinedAudio.getSample(0, s) != firstAudio.getSample(0, s))
+            return false;
+        if (restoredAudio.getSample(0, s) != (s < 2 * sampleRate
+            ? input.getSample(0, s) : combinedAudio.getSample(0, s)))
+            return false;
+    }
+    return true;
+}
+
+bool testSameTimeMapCanStillChangeStretchedSiblingAudio()
+{
+    const auto before = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 1.2, HandleKind::UserAdded},
+        {3, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    auto handles = before->handles();
+    handles.insert(handles.begin() + 2, {4, 2.0, before->tauForward(2.0), HandleKind::InternalOnset});
+    const auto after = TimeGridSnapshot::makeFromHandles(std::move(handles));
+    return after && preservesTimingAudioInRange(*before, *after, {0.0, 1.2})
+        && !preservesTimingAudioInRange(*before, *after, {1.2, 2.1});
+}
+
+bool testRestoreOriginalClipTiming()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.5, 0.6, HandleKind::OnsetVoiced},
+        {3, 1.0, 1.0, HandleKind::InternalOnset},
+        {4, 1.5, 1.4, HandleKind::UserAdded},
+        {5, 2.0, 2.0, HandleKind::InternalOnset},
+        {6, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    const auto restored = restoreOriginalTimingInRange(*grid, {0.0, 1.0}, {{1.0, 2.0}});
+    if (!restored || restored->tauForward(0.5) != 0.5 || restored->tauForward(1.5) != 1.4
+        || !preservesTimingAudioInRange(*grid, *restored, {1.0, 3.0})
+        || restoreOriginalTimingInRange(*grid, {0.0, 1.0}, {{0.25, 0.75}})
+        || restoreOriginalTimingInRange(*grid, {0.0, 0.8})
+        || restoreOriginalTimingInRange(*grid, {2.0, 3.0}))
+        return false;
+    const auto whole = restoreOriginalTimingInRange(*grid, {-0.05, 3.05});
+    return whole && whole->isIdentity() && whole->totalDurationSeconds() == 3.0;
+}
+
 bool testDetectAttacksAcrossPitch()
 {
     constexpr int rate = 16000;
@@ -175,6 +269,91 @@ bool testIsolatedAttackStaysPut()
         && std::any_of(result.grid->handles().begin(), result.grid->handles().end(), [](const auto& handle) {
             return handle.id == 5 && handle.output_seconds == 5.0;
         });
+}
+
+bool testLoudAudioOutsideOverlapDoesNotHideAttacks()
+{
+    constexpr int rate = 16000;
+    juce::AudioBuffer<float> targetAudio(1, 5 * rate), guideAudio(1, 5 * rate);
+    targetAudio.clear();
+    guideAudio.clear();
+    const auto pulse = [](auto& audio, double time, double amplitude) {
+        for (int i = 0; i < rate / 8; ++i)
+            audio.setSample(0, static_cast<int>(std::lround(time * rate)) + i,
+                static_cast<float>(amplitude * std::min(1.0, i / (rate * 0.01))
+                    * std::sin(2.0 * pi * 220.0 * i / rate)));
+    };
+
+    const auto grid = TimeGridSnapshot::makeIdentity(5.0);
+    const auto guideGrid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 2.0, HandleKind::UserAdded},
+        {3, 5.0, 5.0, HandleKind::ClipEnd}
+    });
+    if (!guideGrid)
+        return false;
+
+    // The guide starts inside its source, and its existing timing grid maps that
+    // cropped region to a different source range.
+    const ContentTimelineProjection targetPlacement{10.0, 5.0, 0.0, 5.0};
+    const ContentTimelineProjection guidePlacement{11.0, 3.0, 2.0, 3.0};
+    pulse(targetAudio, 0.35, 1.0);
+    pulse(guideAudio, 0.35, 1.0);
+    for (const double time : {11.35, 11.8, 12.45, 13.05}) {
+        pulse(targetAudio, targetPlacement.projectTimelineTimeToContent(time) + 0.04, 0.12);
+        pulse(guideAudio, guideGrid->tauInverse(guidePlacement.projectTimelineTimeToContent(time)), 0.12);
+    }
+
+    const auto targets = detectTimingOnsetsInOverlap(targetAudio, rate, *grid, targetPlacement, guidePlacement);
+    const auto guides = detectTimingOnsetsInOverlap(guideAudio, rate, *guideGrid, guidePlacement, targetPlacement);
+    const auto plan = alignTimingToReference(targets, *grid, targetPlacement, guides, *guideGrid, guidePlacement, 1.0);
+    return targets.size() == 4 && guides.size() == 4 && plan.grid && plan.movedAnchors == 4
+        && std::abs(plan.grid->tauForward(0.35) - 0.35) < 1e-9;
+}
+
+bool testTimingRejectionReportsStageAndCounts()
+{
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    const std::vector<TimingOnset> targets{{0.4, true}, {1.0, false}, {1.6, true}};
+    const std::vector<TimingOnset> guides{{0.44, true}, {1.04, false}, {2.1, true}};
+    const auto plan = [&](const std::vector<TimingOnset>& guide) {
+        return alignTimingToReference(targets, *grid, placement, guide, *grid, placement, 1.0);
+    };
+    const auto noAttacks = plan({});
+    const auto notEnoughMatches = plan(guides);
+    return !noAttacks.grid && noAttacks.rejection
+        && std::string_view(noAttacks.rejection).find("detected attacks") != std::string_view::npos
+        && noAttacks.targetAttacks == 3 && noAttacks.referenceAttacks == 0 && noAttacks.matchedAttacks == 0
+        && !notEnoughMatches.grid && notEnoughMatches.rejection
+        && std::string_view(notEnoughMatches.rejection).find("reliable matches") != std::string_view::npos
+        && notEnoughMatches.targetAttacks == 3 && notEnoughMatches.referenceAttacks == 3
+        && notEnoughMatches.matchedAttacks == 2;
+}
+
+bool testLastFramesOfOverlapCanProvideTheThirdMatch()
+{
+    constexpr int rate = 16000;
+    juce::AudioBuffer<float> targetAudio(1, 3 * rate), guideAudio(1, 3 * rate);
+    targetAudio.clear();
+    guideAudio.clear();
+    const auto attack = [](auto& audio, double time) {
+        const int start = static_cast<int>(std::lround(time * rate));
+        for (int i = 0; i < rate / 8; ++i)
+            audio.setSample(0, start + i, static_cast<float>(std::sin(2.0 * pi * 200.0 * i / rate)));
+    };
+    for (const double time : {0.49, 1.14, 1.99}) {
+        attack(guideAudio, time);
+        attack(targetAudio, time - 0.165);
+    }
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection targetPlacement{0.0, 3.0, 0.0, 3.0};
+    const ContentTimelineProjection guidePlacement{0.0, 2.0, 0.0, 2.0};
+    const auto targets = detectTimingOnsetsInOverlap(targetAudio, rate, *grid, targetPlacement, guidePlacement);
+    const auto guides = detectTimingOnsetsInOverlap(guideAudio, rate, *grid, guidePlacement, targetPlacement);
+    const auto plan = alignTimingToReference(targets, *grid, targetPlacement, guides, *grid, guidePlacement, 0.5);
+    return guides.size() == 3 && guides.back().sourceSeconds >= 1.985
+        && guides.back().sourceSeconds < 2.0 && plan.grid && plan.matchedAttacks == 3;
 }
 
 bool testPeriodicAttacksDoNotSlipByASyllable()
@@ -235,6 +414,89 @@ bool testBlockedAnchorDoesNotDriftAway()
     const std::vector<TimingOnset> guide{{0.46, true}, {0.69, false}, {1.25, true}, {1.85, false}};
     return !alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0).grid;
 }
+
+bool testBlockedAttackDoesNotDiscardSafeEdits()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.35, 0.35, HandleKind::UserAdded},
+        {3, 0.95, 0.95, HandleKind::UserAdded},
+        {4, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 3.0, 0.0, 3.0};
+    const std::vector<TimingOnset> target{{0.60, true}, {0.73, false},
+        {1.35, true}, {1.90, false}, {2.45, true}};
+    const std::vector<TimingOnset> guide{{0.552, true}, {0.763, false},
+        {1.39, true}, {1.94, false}, {2.49, true}};
+    for (const double strength : {0.5, 1.0}) {
+        const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, strength);
+        if (!plan.grid) {
+            std::fprintf(stderr, "Safe attacks discarded: %s\n", plan.rejection);
+            return false;
+        }
+        if (plan.matchedAttacks != 5 || plan.movedAnchors != 3
+            || std::abs(plan.maxMoveSeconds - 0.04 * strength) > 1e-9)
+            return false;
+        for (size_t i = 0; i < target.size(); ++i) {
+            const auto before = target[i].sourceSeconds;
+            const auto expected = i < 2 ? before : before + 0.04 * strength;
+            if (std::abs(plan.grid->tauForward(before) - expected) > 1e-9)
+                return false;
+        }
+    }
+    return true;
+}
+
+bool testBlockedAttackKeepsSafeNeighbor()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.34, 0.34, HandleKind::UserAdded},
+        {3, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {0.90, true}};
+    const std::vector<TimingOnset> guide{{0.56, true}, {0.643, false}, {0.915, true}};
+    const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    return plan.grid && plan.movedAnchors == 1 && plan.matchedAttacks == 3
+        && std::abs(plan.grid->tauForward(0.90) - 0.915) < 1e-9
+        && std::abs(plan.grid->tauForward(0.63) - 0.643) < 0.013;
+}
+
+bool testProtectedSiblingDoesNotDiscardIndependentMove()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.34, 0.34, HandleKind::UserAdded},
+        {3, 1.17, 1.17, HandleKind::UserAdded},
+        {4, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {0.90, true}, {1.50, false}};
+    const std::vector<TimingOnset> guide{{0.56, true}, {0.643, false}, {0.915, true}, {1.54, false}};
+    const TimingOutputRange sibling{1.0, 1.17};
+    const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0, {sibling});
+    return plan.grid && plan.movedAnchors == 1 && plan.matchedAttacks == 4
+        && std::abs(plan.grid->tauForward(1.50) - 1.54) < 1e-9
+        && preservesTimingAudioInRange(*grid, *plan.grid, sibling);
+}
+
+bool testUnpoolHintRequiresSafeUnpooledMoves()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.35, 0.35, HandleKind::UserAdded},
+        {3, 0.95, 0.95, HandleKind::UserAdded},
+        {4, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.60, true}, {0.73, false}, {1.35, true}};
+    const std::vector<TimingOnset> guide{{0.552, true}, {0.763, false}, {1.35, true}};
+    const auto unpooled = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    const auto pooled = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0, {{0.4, 0.5}});
+    return !unpooled.grid && !pooled.grid && pooled.matchedAttacks == 3 && !pooled.affectsProtectedTiming
+        && juce::String(pooled.rejection) == "stretch would worsen a reliable match";
+}
 }
 
 int main()
@@ -247,8 +509,44 @@ int main()
         std::fputs("Reference timing failed placement, strength, or preservation\n", stderr);
         return 1;
     }
+    if (!testBlockedAttackDoesNotDiscardSafeEdits()) {
+        std::fputs("A blocked attack discarded independent safe timing edits\n", stderr);
+        return 1;
+    }
+    if (!testBlockedAttackKeepsSafeNeighbor()) {
+        std::fputs("A blocked attack discarded a safe neighboring timing move\n", stderr);
+        return 1;
+    }
+    if (!testProtectedSiblingDoesNotDiscardIndependentMove()) {
+        std::fputs("A move affecting a pooled sibling discarded an independent timing move\n", stderr);
+        return 1;
+    }
+    if (!testUnpoolHintRequiresSafeUnpooledMoves()) {
+        std::fputs("Timing alignment suggested unpooling even though an independent clip cannot align\n", stderr);
+        return 1;
+    }
+    if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
+        std::fputs("Pooled timing edits failed to preserve sibling splits\n", stderr);
+        return 1;
+    }
+    if (!testRestoreOriginalClipTiming()) {
+        std::fputs("Restoring clip timing failed or affected audio outside the clip\n", stderr);
+        return 1;
+    }
     if (!testDetectAttacksAcrossPitch()) {
         std::fputs("Timing onset detection did not find synthetic attacks\n", stderr);
+        return 1;
+    }
+    if (!testLoudAudioOutsideOverlapDoesNotHideAttacks()) {
+        std::fputs("Loud audio outside the overlap hid matching timing attacks\n", stderr);
+        return 1;
+    }
+    if (!testTimingRejectionReportsStageAndCounts()) {
+        std::fputs("Timing alignment did not report the rejection stage and counts\n", stderr);
+        return 1;
+    }
+    if (!testLastFramesOfOverlapCanProvideTheThirdMatch()) {
+        std::fputs("Timing alignment missed an attack in the last frames of the overlap\n", stderr);
         return 1;
     }
     if (!testIsolatedAttackStaysPut()) {

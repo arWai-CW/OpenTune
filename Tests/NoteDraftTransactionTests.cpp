@@ -203,11 +203,83 @@ bool runInsertionAndDeletionTransactions()
                   "Draft deletion redo must retain the remaining notes");
 }
 
+bool runMixAutoSnapScope()
+{
+    using Source = PitchCorrectionSegment::Source;
+    OpenTuneAudioProcessor processor;
+    processor.prepareToPlay(44100.0, 512);
+    PitchCurve curve;
+    curve.setHopSize(1);
+    curve.setSampleRate(128.0);
+    curve.setOriginalF0(std::vector<float>(64, 220.0f));
+    curve.setManualCorrectionRange(0, 20, std::vector<float>(20, 220.0f), Source::NoteBased);
+    curve.setManualCorrectionRange(20, 40, std::vector<float>(20, 350.0f), Source::LineAnchor);
+    EditableContentSnapshot snapshot;
+    snapshot.pitchCurve = curve.setManualCorrectionRange(
+        40, 64, std::vector<float>(24, 220.0f), Source::NoteBased);
+    snapshot.notes = {makeNote(10.0 / 128, 20.0 / 128, 220.0f),
+                      makeNote(20.0 / 128, 40.0 / 128, 220.0f),
+                      makeNote(40.0 / 128, 50.0 / 128, 220.0f)};
+    const auto commands = processor.getContentCommands();
+    const auto snapOuterNotes = commands->planAutoSnap(
+        snapshot, std::vector<std::size_t>{0, 2}, ScaleSnapConfig{}, NoteGeneratorParams{}, true);
+    const auto snapDrawnNote = commands->planAutoSnap(
+        snapshot, std::vector<std::size_t>{1}, ScaleSnapConfig{}, NoteGeneratorParams{}, true);
+    using SnapStatus = ContentAutoSnapPlan::Status;
+    return expect(snapOuterNotes.status == SnapStatus::NoChange,
+                  "A drawing between snapped selections must not trigger a recompute")
+        && expect(snapDrawnNote.status == SnapStatus::Commit,
+                  "A drawing on the selected note must be replaced by Snap");
+}
+
+bool runMixParameterUndoRestoresLineBase()
+{
+    using Source = PitchCorrectionSegment::Source;
+    OpenTuneAudioProcessor processor;
+    processor.prepareToPlay(44100.0, 512);
+    auto& repository = *processor.getStandaloneContentRepository();
+    const auto key = repository.createClip();
+    auto* clip = repository.findClip(key);
+    auto curve = std::make_shared<PitchCurve>();
+    curve->setHopSize(1);
+    curve->setSampleRate(128.0);
+    curve->setOriginalF0(std::vector<float>(512, 220.0f));
+    std::vector<float> line(448);
+    for (std::size_t i = 0; i < line.size(); ++i)
+        line[i] = 300.0f + static_cast<float>(i);
+    curve->setManualCorrectionRange(1, 449, line, Source::LineAnchor);
+    clip->applyPitchCurve(std::move(curve));
+    clip->applyNotes({makeNote(240.0 / 128, 265.0 / 128, 220.0f)});
+
+    const auto before = processor.getContentSnapshot(key);
+    const auto edit = processor.editSelectedNoteParameter(
+        key, {0}, before->notesRevision, AudioEditingScheme::ParameterId::RetuneSpeed,
+        0.8f, 0.15f, 0.0f, 7.5f, "Mix Retune", true);
+    if (!expect(edit.changed && edit.contentSnapshot && edit.affectedRange.startFrame > 1,
+                "The parameter edit must start inside the drawing"))
+        return false;
+
+    processor.getUndoManager().undo();
+    const auto restored = processor.getContentSnapshot(key);
+    const int frame = 247;
+    for (const auto& segment : restored->pitchCurve->getCorrectionSegments()) {
+        if (segment.startFrame <= frame && frame < segment.endFrame) {
+            const auto offset = static_cast<std::size_t>(frame - segment.startFrame);
+            return expect(segment.source == Source::LineAnchor
+                              && offset < segment.baseF0Data.size()
+                              && segment.baseF0Data[offset] == line[frame - 1],
+                          "Undo must restore the drawing's base frequency at its original frame");
+        }
+    }
+    return expect(false, "Undo must restore the drawing at the edited frame");
+}
+
 } // namespace
 
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     return runTransactions() && runCorrectionDraftTransaction() && runInsertionAndDeletionTransactions()
+        && runMixAutoSnapScope() && runMixParameterUndoRestoresLineBase()
         ? 0 : 1;
 }

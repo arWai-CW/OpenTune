@@ -27,6 +27,7 @@
 #if JucePlugin_Enable_ARA
 #include "ARA/OpenTuneDocumentController.h"
 #include "DSP/TimingAlignment.h"
+#include "UI/ToolbarIcons.h"
 #include "Utils/TimeGridEditAction.h"
 #endif
 #include "Content/ContentKey.h"
@@ -108,7 +109,12 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
           LocalizationManager::LanguageState{ appPreferences_.getState().shared.language }))
     , languageBinding_(languageState_)
     , menuBar_(processor, MenuBarComponent::Profile::Plugin)
-    , topBar_(menuBar_, transportBar_)
+#if JucePlugin_Enable_ARA
+    , referenceTrackButton_(LOC(kReferenceTrack), ToolbarIcons::getTracksIcon())
+    , tuneToReferenceButton_(LOC(kTuneToPitchReference), ToolbarIcons::getAutoTuneIcon())
+    , alignTimingButton_(LOC(kAlignTimingToReference), ToolbarIcons::getTimeToolIcon())
+#endif
+    , topBar_(menuBar_, transportBar_, parameterPanel_.getToolStrip())
     , pianoRoll_(processor.getPlayHeadState(), processor.getUndoManager(),
                  [this](SpectrumArray& spectrum, SpectrumArray& peaks) {
                      processorRef_.copyOutputSpectrum(spectrum, peaks);
@@ -139,6 +145,8 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     // Undo/Redo 菜单项实时反映撤销栈状态
     menuBar_.canUndoQuery = [this]() { return processorRef_.getUndoManager().canUndo(); };
     menuBar_.canRedoQuery = [this]() { return processorRef_.getUndoManager().canRedo(); };
+    menuBar_.canRestoreSelectedNotesQuery = [this]() { return pianoRoll_.canRestoreSelectedNotes(); };
+    menuBar_.onRestoreSelectedNotes = [this]() { pianoRoll_.restoreSelectedNotes(); };
     LocalizationManager::getInstance().addListener(this);
 
     transportBar_.addListener(this);
@@ -192,9 +200,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                     safeEditor->tuneToPitchReference();
             });
             menu.addItem(LOC(kAlignTimingToReference), canAlignTimingToReference(), false, [safeEditor] {
-                    if (safeEditor != nullptr)
-                        safeEditor->alignTimingToPitchReference();
-                });
+                if (safeEditor != nullptr)
+                    safeEditor->alignTimingToPitchReference();
+            });
+            menu.addItem(LOC_RAW("Restore Original Clip Timing"), true, false, [safeEditor] {
+                if (safeEditor != nullptr)
+                    safeEditor->restoreOriginalClipTiming();
+            });
         }
 #endif
         // Accessibility: open with the first item highlighted, so the first Enter works
@@ -246,10 +258,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         showTransportMenu(2, transportBar_.getViewButton());
     };
 
-    // Accessibility: the plugin has no track panel and cannot hide the parameter panel, so the
-    // Tracks and Props toggles do nothing here. They stay on screen as in the original, but leave
-    // the Tab order and the screen reader tree, where they read as working "pressed" buttons.
-    topBar_.setSidePanelTogglesAccessible(false);
+    topBar_.setTrackPanelToggleVisible(false);
+    topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+    topBar_.onToggleParameterPanel = [this] {
+        isParameterPanelVisible_ = !isParameterPanelVisible_;
+        topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+        resized();
+    };
 
     // The plugin's piano roll has no use for Esc: REAPER gets it and closes the FX window.
     pianoRoll_.setEscapePassesToHost(true);
@@ -273,10 +288,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     tuneToReferenceButton_.onClick = [this] { tuneToPitchReference(); };
     alignTimingButton_.onClick = [this] { alignTimingToPitchReference(); };
     for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
-        contentRoot_.addChildComponent(*button);
+        topBar_.addToolAction(*button);
     refreshReferenceControls();
 #endif
-    contentRoot_.addAndMakeVisible(parameterPanel_);
+    contentRoot_.addChildComponent(parameterPanel_);
     parameterPanel_.addListener(this);
     parameterPanel_.onPitchGridModeChanged = [this](PitchGridMode mode) {
         if (auto* handler = pianoRoll_.getToolHandler())
@@ -319,7 +334,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                 [this] { syncSharedAppPreferences(); });
         },
         [this](bool) { resized(); },
-        [this] { pianoRoll_.grabKeyboardFocus(); });
+        [this] {
+            resized();
+            pianoRoll_.grabKeyboardFocus();
+        });
     contentRoot_.addChildComponent(*onboardingOverlay_);
 
     // Upstream 59387696 dropped the per-tick preference sync and left no call here, so a
@@ -434,27 +452,19 @@ void OpenTuneAudioProcessorEditor::resized()
     bounds.reduce(gap, gap);
 
     // TopBar: 固定高度
-    constexpr int topBarHeight = TOP_BAR_HEIGHT;
+    constexpr int topBarHeight = TOP_BAR_HEIGHT + TopBarComponent::kToolStripHeight;
     topBar_.setBounds(bounds.removeFromTop(topBarHeight));
     bounds.removeFromTop(gap);
 
-#if JucePlugin_Enable_ARA
-    if (referenceTrackButton_.isVisible()) {
-        auto row = bounds.removeFromTop(28);
-        const int actionWidth = juce::jmax(0, row.getWidth() - 2 * gap) / 3;
-        referenceTrackButton_.setBounds(row.removeFromLeft(actionWidth));
-        row.removeFromLeft(gap);
-        tuneToReferenceButton_.setBounds(row.removeFromLeft(actionWidth));
-        row.removeFromLeft(gap);
-        alignTimingButton_.setBounds(row);
-        bounds.removeFromTop(gap);
-    }
-#endif
-
     // 右侧 ParameterPanel
-    constexpr int paramPanelWidth = PARAMETER_PANEL_WIDTH;
-    parameterPanel_.setBounds(bounds.removeFromRight(paramPanelWidth));
-    bounds.removeFromRight(gap);
+    const bool showParameterPanel = isParameterPanelVisible_
+        || (onboardingOverlay_ != nullptr && onboardingOverlay_->isActive());
+    parameterPanel_.setVisible(showParameterPanel);
+    if (showParameterPanel)
+    {
+        parameterPanel_.setBounds(bounds.removeFromRight(PARAMETER_PANEL_WIDTH));
+        bounds.removeFromRight(gap);
+    }
 
     // 中央 PianoRoll
     pianoRoll_.setBounds(bounds);
@@ -532,7 +542,7 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     if (appliedThemeId_ != sharedPreferences.theme)
         applyThemeToEditor(sharedPreferences.theme);
 
-    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
+    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme, sharedPreferences.openDyneMixEnabled);
     pianoRoll_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     pianoRoll_.setNoteNameMode(visualPreferences.noteNameMode);
     pianoRoll_.setShowUnvoicedFrames(visualPreferences.showUnvoicedFrames);
@@ -555,7 +565,8 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
 #endif
     pianoRoll_.setExperimentalFeaturesEnabled(enableTimeTool);
     parameterPanel_.setExperimentalFeaturesEnabled(enableTimeTool);
-    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme));
+    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme),
+                                   sharedPreferences.openDyneMixEnabled);
     parameterPanel_.setActiveTool(static_cast<int>(pianoRoll_.getCurrentTool()));
 }
 
@@ -604,7 +615,7 @@ void OpenTuneAudioProcessorEditor::timerCallback()
     if (processorRef_.isBoundToARA())
         processorRef_.collectPlaybackSnapshots();
     const bool hasAraController = processorRef_.getDocumentController() != nullptr;
-    if (hasAraController != referenceTrackButton_.isVisible())
+    if (hasAraController != topBar_.areToolActionsVisible())
         refreshReferenceControls();
 #endif
     applyUiZoomIfNeeded();
@@ -1032,6 +1043,18 @@ juce::String referenceTrackName(const juce::ARARegionSequence& track)
     const auto name = juce::String::fromUTF8(track.getName());
     return name.isEmpty() ? LOC(kUnnamedReferenceTrack) : name;
 }
+
+std::vector<TimingOutputRange> protectedTimingRanges(
+    const juce::ARAPlaybackRegion& placement, double sourceOrigin)
+{
+    std::vector<TimingOutputRange> ranges;
+    for (const auto* sibling : placement.getAudioModification()->getPlaybackRegions()) {
+        if (sibling != &placement)
+            ranges.push_back({sibling->getStartInAudioModificationTime() - sourceOrigin,
+                              sibling->getEndInAudioModificationTime() - sourceOrigin});
+    }
+    return ranges;
+}
 }
 
 juce::PopupMenu OpenTuneAudioProcessorEditor::createPitchReferenceMenu()
@@ -1077,29 +1100,32 @@ bool OpenTuneAudioProcessorEditor::canAlignTimingToReference() const
 void OpenTuneAudioProcessorEditor::refreshReferenceControls()
 {
     const bool visible = processorRef_.getDocumentController() != nullptr;
-    const bool visibilityChanged = visible != referenceTrackButton_.isVisible();
-    for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
-        button->setVisible(visible);
+    topBar_.setToolActionsVisible(visible);
     if (visible) {
-        referenceTrackButton_.setButtonText(LOC(kReferenceTrack) + ": "
-            + (pitchReferenceTrack_ != nullptr ? referenceTrackName(*pitchReferenceTrack_) : LOC(kOff)));
-        referenceTrackButton_.setTooltip(referenceTrackButton_.getButtonText());
-        tuneToReferenceButton_.setButtonText(LOC(kTuneToPitchReference));
-        alignTimingButton_.setButtonText(LOC(kAlignTimingToReference));
-
         const bool hasReference = pitchReferenceTrack_ != nullptr;
         const bool canAlign = canAlignTimingToReference();
+        const auto referenceTitle = LOC(kReferenceTrack) + ": "
+            + (hasReference ? referenceTrackName(*pitchReferenceTrack_) : LOC(kOff));
+        const auto tuneTitle = LOC(kTuneToPitchReference);
+        const auto alignTitle = LOC(kAlignTimingToReference);
+        referenceTrackButton_.setToolbarLabel(LOC(kReferenceToolbarLabel));
+        tuneToReferenceButton_.setToolbarLabel(LOC(kTuneReferenceToolbarLabel));
+        alignTimingButton_.setToolbarLabel(LOC(kAlignReferenceToolbarLabel));
+        referenceTrackButton_.setTitle(referenceTitle);
+        tuneToReferenceButton_.setTitle(tuneTitle);
+        alignTimingButton_.setTitle(alignTitle);
+
         const auto chooseReference = LOC_RAW("Choose a reference track first.");
+        referenceTrackButton_.setTooltip(referenceTitle);
+        referenceTrackButton_.setToggleState(hasReference, juce::dontSendNotification);
         tuneToReferenceButton_.setEnabled(hasReference);
         tuneToReferenceButton_.setAlpha(hasReference ? 1.0f : 0.55f);
-        tuneToReferenceButton_.setTooltip(hasReference ? tuneToReferenceButton_.getButtonText() : chooseReference);
+        tuneToReferenceButton_.setTooltip(hasReference ? tuneTitle : chooseReference);
         alignTimingButton_.setEnabled(canAlign);
         alignTimingButton_.setAlpha(canAlign ? 1.0f : 0.55f);
         alignTimingButton_.setTooltip(!hasReference ? chooseReference
-            : timingAlignmentRunning_ ? LOC_RAW("Analyzing timing") : alignTimingButton_.getButtonText());
+            : timingAlignmentRunning_ ? LOC_RAW("Analyzing timing") : alignTitle);
     }
-    if (visibilityChanged)
-        resized();
 }
 
 void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequence* track)
@@ -1142,6 +1168,43 @@ void OpenTuneAudioProcessorEditor::tuneToPitchReference()
     }
 }
 
+void OpenTuneAudioProcessorEditor::restoreOriginalClipTiming()
+{
+    const auto* dc = processorRef_.getDocumentController();
+    if (dc == nullptr)
+        return;
+    parameterPanel_.commitPendingEdits();
+    const auto regions = dc->getPlaybackRegionProjectionsFor(resolveContentScopeRegions());
+    const auto focused = std::find_if(regions.begin(), regions.end(), [](const auto& region) {
+        return region.contentKey.isValid() && region.contentProjection.isValid();
+    });
+    const auto title = LOC_RAW("Restore Original Clip Timing");
+    const auto current = focused != regions.end() && focused->isPlaybackRenderable()
+        ? dc->readContentSnapshot(focused->contentKey) : nullptr;
+    if (!current || !current->timeGrid) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title, LOC_RAW("Select a clip with loaded audio."));
+        return;
+    }
+
+    const auto& projection = focused->contentProjection;
+    const TimingOutputRange range{projection.contentStartSeconds,
+                                  projection.contentStartSeconds + projection.contentDurationSeconds};
+    if (current->timeGrid->isIdentityInOutputRange(range.begin, range.end)) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title, LOC_RAW("This clip is already at its original timing."));
+        return;
+    }
+    const auto restored = restoreOriginalTimingInRange(*current->timeGrid, range,
+        protectedTimingRanges(*focused->playbackRegion, current->sourceWindow.sourceStartSeconds));
+    if (!restored || !processorRef_.applyTimeGridEdit(focused->contentKey, current->timeGrid, restored, title)) {
+        ConfirmDialogContent::showMessage(&contentRoot_, title,
+            LOC_RAW("This clip's timing cannot be restored without changing audio outside it or in another clip."));
+        return;
+    }
+
+    pianoRoll_.onTimeGridRevisionChanged();
+    a11y::announce(pianoRoll_, title);
+}
+
 void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
 {
     auto* dc = processorRef_.getDocumentController();
@@ -1159,17 +1222,36 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         Input input;
         size_t guideIndex;
         juce::String label;
+        std::vector<TimingOutputRange> protectedRanges;
+        std::vector<TimingOnset> onsets, guideOnsets;
         TimingAlignment gentle, tight;
     };
 
+    const auto protectedRangesFor = [](const Input& input) {
+        return protectedTimingRanges(*input.region.playbackRegion, input.snapshot->sourceWindow.sourceStartSeconds);
+    };
+    const auto makePlan = [](const Target& target, const Input& guide, const TimeGridSnapshot& grid,
+                             double strength, const std::vector<TimingOutputRange>& protectedRanges) {
+        return alignTimingToReference(target.onsets, grid, target.input.region.contentProjection,
+            target.guideOnsets, *guide.snapshot->timeGrid, guide.region.contentProjection, strength, protectedRanges);
+    };
+
     parameterPanel_.commitPendingEdits();
-    const auto load = [dc](const Region& region) -> Input {
-        if (!region.isPlaybackRenderable() || !region.contentProjection.isValid())
+    const auto load = [dc](const Region& region, juce::String& rejection) -> Input {
+        if (!region.contentProjection.isValid()) {
+            rejection = "no content projection (audio not loaded or invalid placement)";
             return {};
+        }
+        if (!region.isPlaybackRenderable()) {
+            rejection = "unsupported playback placement (timeline " + juce::String(region.durationInPlaybackTime, 3)
+                + " s, source " + juce::String(region.durationInModificationTime, 3) + " s)";
+            return {};
+        }
         auto snapshot = dc->readContentSnapshot(region.contentKey);
-        if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid
-            || snapshot->timeGrid->totalDurationSeconds() > 180.0)
+        if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid || snapshot->timeGrid->empty()) {
+            rejection = "audio or timing grid not loaded";
             return {};
+        }
         return {region, std::move(snapshot)};
     };
     const auto guideRegions = dc->getPlaybackRegionProjectionsFor(pitchReferenceTrack_->getPlaybackRegions());
@@ -1187,35 +1269,64 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
 
     const auto title = LOC(kAlignTimingToReference);
     if (selected.empty() || selected.size() > 6) {
-        ConfirmDialogContent::showMessage(&contentRoot_, title,
-            LOC_RAW("Select one to six target clips in the DAW, and choose a separate reference track."));
+        const auto reason = "Selection: " + juce::String(static_cast<int>(selected.size())) + " target clips (need 1–6)";
+        ConfirmDialogContent::showDiagnostic(&contentRoot_, title,
+            LOC_RAW("Select one to six target clips in the DAW, and choose a separate reference track.") + "\n" + reason,
+            reason);
         return;
     }
 
+    juce::StringArray diagnostics;
     std::vector<Input> guides;
     std::vector<Target> targets;
-    for (const auto& region : dc->getPlaybackRegionProjectionsFor(selected)) {
-        const auto* modification = region.playbackRegion->getAudioModification();
-        // A shared modification would also change unselected host placements.
-        if (modification == nullptr || modification->getPlaybackRegions().size() != 1)
+    const auto targetRegions = dc->getPlaybackRegionProjectionsFor(selected);
+    if (targetRegions.size() != selected.size())
+        diagnostics.add("Placement: " + juce::String(static_cast<int>(targetRegions.size())) + "/"
+            + juce::String(static_cast<int>(selected.size())) + " selected targets have a valid DAW placement");
+    for (const auto& region : targetRegions) {
+        const auto position = "Target @ " + juce::String(region.startInPlaybackTime, 2) + " s: ";
+        juce::String rejection;
+        const auto input = load(region, rejection);
+        if (!input.snapshot) {
+            diagnostics.add(position + rejection);
             continue;
-        const auto input = load(region);
-        if (!input.snapshot)
-            continue;
+        }
         Input bestGuide;
-        double bestOverlap = 0.5;
+        double bestOverlap = 0.0;
+        double maxOverlap = 0.0;
+        juce::String referenceRejection;
+        constexpr double maxTimingAnalysisSeconds = 180.0;
         for (const auto& guide : guideRegions) {
             const double overlap = std::min(region.endInPlaybackTime, guide.endInPlaybackTime)
                 - std::max(region.startInPlaybackTime, guide.startInPlaybackTime);
-            if (guide.contentKey == region.contentKey || overlap <= bestOverlap)
+            if (guide.contentKey == region.contentKey)
                 continue;
-            if (auto candidate = load(guide); candidate.snapshot) {
+            const auto previousMax = maxOverlap;
+            maxOverlap = std::max(maxOverlap, overlap);
+            if (overlap < minimumTimingOverlapSeconds || overlap <= bestOverlap)
+                continue;
+            if (overlap > maxTimingAnalysisSeconds) {
+                if (overlap >= previousMax)
+                    referenceRejection = "overlap exceeds the " + juce::String(static_cast<int>(maxTimingAnalysisSeconds))
+                        + " s timing analysis limit";
+                continue;
+            }
+            if (auto candidate = load(guide, rejection); candidate.snapshot) {
                 bestGuide = std::move(candidate);
                 bestOverlap = overlap;
+            } else if (overlap >= previousMax) {
+                referenceRejection = rejection;
             }
         }
-        if (!bestGuide.snapshot)
+        if (!bestGuide.snapshot) {
+            const auto reason = referenceRejection.isNotEmpty() ? referenceRejection
+                : juce::String("no eligible reference clip with enough overlap");
+            diagnostics.add(position + "reference: " + reason + " (max overlap "
+                + juce::String(maxOverlap, 3) + " s; need "
+                + juce::String(minimumTimingOverlapSeconds, 1) + " s; "
+                + juce::String(static_cast<int>(guideRegions.size())) + " reference clips)");
             continue;
+        }
         const auto existing = std::find_if(guides.begin(), guides.end(), [&](const auto& guide) {
             return guide.region.playbackRegion == bestGuide.region.playbackRegion;
         });
@@ -1227,11 +1338,25 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         if (name.isEmpty())
             name = LOC(kUnnamedReferenceTrack);
         name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
-        targets.push_back({input, guideIndex, std::move(name), {}, {}});
+        targets.push_back({input, guideIndex, std::move(name), protectedRangesFor(input), {}, {}, {}, {}});
     }
-    const auto noAlignment = LOC_RAW("No reliable timing changes. Read the reference and target audio first, then select overlapping takes of the same phrase.");
+    const auto sharedTargetHelp = juce::PluginHostType{}.isReaper()
+        ? Loc::format(LOC_RAW("Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}"),
+                      juce::String("Item: Remove active takes from ARA edit pool (unpool)"))
+        : LOC_RAW("Some targets share ARA edits. Make those clips independent in the DAW, then retry.");
+    const auto noAlignment = LOC_RAW("No reliable timing changes.");
+    const auto showFailure = [title, noAlignment, sharedTargetHelp](juce::Component& parent,
+                                                                 const juce::StringArray& details, bool sharedConflict) {
+        auto summary = details.isEmpty() ? noAlignment : noAlignment + "\n" + details[0];
+        auto copied = details.joinIntoString("\n");
+        if (sharedConflict) {
+            summary += "\n\n" + sharedTargetHelp;
+            copied += "\n" + sharedTargetHelp;
+        }
+        ConfirmDialogContent::showDiagnostic(&parent, title, summary, copied);
+    };
     if (targets.empty()) {
-        ConfirmDialogContent::showMessage(&contentRoot_, title, noAlignment);
+        showFailure(contentRoot_, diagnostics, false);
         return;
     }
 
@@ -1242,27 +1367,47 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     a11y::announce(pianoRoll_, LOC_RAW("Analyzing timing"));
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
-        guides = std::move(guides), targets = std::move(targets), title, noAlignment]() mutable {
-        const auto detect = [](const Input& input) {
-            return detectTimingOnsets(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate);
+        guides = std::move(guides), targets = std::move(targets), title, showFailure, sharedTargetHelp,
+        protectedRangesFor, makePlan,
+        diagnostics = std::move(diagnostics)]() mutable {
+        const auto detect = [](const Input& input, const Input& other) {
+            return detectTimingOnsetsInOverlap(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate,
+                *input.snapshot->timeGrid, input.region.contentProjection, other.region.contentProjection);
         };
+        bool sharedConflict = false;
         try {
-            std::vector<std::vector<TimingOnset>> guideOnsets;
-            for (const auto& guide : guides)
-                guideOnsets.push_back(detect(guide));
             for (auto& target : targets) {
                 const auto& guide = guides[target.guideIndex];
-                const auto onsets = detect(target.input);
+                target.onsets = detect(target.input, guide);
+                target.guideOnsets = detect(guide, target.input);
                 const auto plan = [&](double strength) {
-                    return alignTimingToReference(onsets, *target.input.snapshot->timeGrid,
-                        target.input.region.contentProjection, guideOnsets[target.guideIndex],
-                        *guide.snapshot->timeGrid, guide.region.contentProjection, strength);
+                    return makePlan(target, guide, *target.input.snapshot->timeGrid, strength, target.protectedRanges);
                 };
                 target.gentle = plan(0.5);
                 target.tight = plan(1.0);
+                if (!target.gentle.grid && !target.tight.grid) {
+                    const auto& a = target.tight;
+                    sharedConflict = sharedConflict || a.affectsProtectedTiming || target.gentle.affectsProtectedTiming;
+                    const auto& targetRegion = target.input.region;
+                    const double overlap = std::min(targetRegion.endInPlaybackTime, guide.region.endInPlaybackTime)
+                        - std::max(targetRegion.startInPlaybackTime, guide.region.startInPlaybackTime);
+                    const auto stage = [](const TimingAlignment& result) {
+                        return juce::String(result.alreadyAligned ? "already aligned" : result.rejection);
+                    };
+                    const auto tight = stage(a);
+                    const auto gentle = stage(target.gentle);
+                    const auto reason = tight == gentle ? tight : tight + " (tight), " + gentle + " (gentle)";
+                    diagnostics.add("Target @ " + juce::String(targetRegion.startInPlaybackTime, 2)
+                        + " s: " + reason + "; overlap "
+                        + juce::String(overlap, 3) + " s, attacks (target/ref) "
+                        + juce::String(static_cast<int>(a.targetAttacks)) + "/"
+                        + juce::String(static_cast<int>(a.referenceAttacks)) + ", matched "
+                        + juce::String(static_cast<int>(a.matchedAttacks)));
+                }
             }
         } catch (const std::exception& error) {
             AppLogger::warn("Timing alignment: " + juce::String(error.what()));
+            diagnostics.add("Analysis could not finish; see the OpenTune log.");
             targets.clear();
         }
         const bool alreadyAligned = targets.size() == count
@@ -1273,7 +1418,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             return !target.gentle.grid && !target.tight.grid;
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
-                targets = std::move(targets), title, noAlignment, alreadyAligned]() mutable {
+                targets = std::move(targets), title, showFailure, sharedTargetHelp,
+                protectedRangesFor, makePlan, diagnostics = std::move(diagnostics), alreadyAligned, sharedConflict]() mutable {
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
@@ -1283,8 +1429,11 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             }
             if (targets.empty()) {
                 safe->refreshReferenceControls();
-                ConfirmDialogContent::showMessage(&safe->contentRoot_, title, alreadyAligned
-                    ? LOC_RAW("The matched attacks are already aligned. No timing change was applied.") : noAlignment);
+                if (alreadyAligned)
+                    ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
+                        LOC_RAW("The matched attacks are already aligned. No timing change was applied."));
+                else
+                    showFailure(safe->contentRoot_, diagnostics, sharedConflict);
                 return;
             }
 
@@ -1292,6 +1441,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             if (count != targets.size())
                 detail += "\n" + Loc::format(LOC_RAW("{0} selected clips have no safe alignment and will be skipped."),
                                              juce::String(static_cast<int>(count - targets.size())));
+            if (sharedConflict)
+                detail += "\n" + sharedTargetHelp;
             auto preview = std::make_unique<juce::AlertWindow>(title, detail,
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
             const auto label = [](const juce::String& mode, const TimingAlignment& plan) {
@@ -1318,7 +1469,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             window.setCentrePosition(bounds.getCentreX(), bounds.getCentreY());
             safe->contentRoot_.addChildComponent(window);
             window.enterModalState(true, juce::ModalCallbackFunction::create(
-                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title](int choice) {
+                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title,
+                 showFailure, protectedRangesFor, makePlan](int choice) {
                     if (safe == nullptr)
                         return;
                     const auto dialog = std::move(safe->timingAlignmentPreview_);
@@ -1346,18 +1498,42 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                     for (size_t i = 0; i < targets.size(); ++i) {
                         const auto* box = dialog->getComboBoxComponent(juce::String(static_cast<int>(i)));
                         const auto& target = targets[i];
-                        const auto after = box->getSelectedId() == 2 ? target.gentle.grid
-                            : box->getSelectedId() == 3 ? target.tight.grid : nullptr;
-                        if (!after)
+                        const auto mode = box->getSelectedId();
+                        const auto previewGrid = mode == 2 ? target.gentle.grid
+                            : mode == 3 ? target.tight.grid : nullptr;
+                        if (!previewGrid)
                             continue;
                         const auto& input = target.input;
                         if (safe->pitchReferenceTrack_ != guideTrack || !unchanged(input)
-                            || !unchanged(guides[target.guideIndex])
-                            || input.region.playbackRegion->getAudioModification()->getPlaybackRegions().size() != 1) {
+                            || !unchanged(guides[target.guideIndex])) {
                             stale();
                             return;
                         }
-                        changes.push_back({input.region.contentKey, input.snapshot->timeGrid, after});
+                        const auto ranges = protectedRangesFor(input);
+                        const auto previous = std::find_if(changes.begin(), changes.end(), [&](const auto& change) {
+                            return change.key == input.region.contentKey;
+                        });
+                        if (previous == changes.end()) {
+                            if (std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+                                    return !preservesTimingAudioInRange(*input.snapshot->timeGrid, *previewGrid, range);
+                                })) {
+                                showFailure(safe->contentRoot_, {}, true);
+                                return;
+                            }
+                            changes.push_back({input.region.contentKey, input.snapshot->timeGrid, previewGrid});
+                            continue;
+                        }
+                        // Build one undoable grid per modification, with each split limited to its own audio.
+                        auto combined = makePlan(target, guides[target.guideIndex], *previous->after,
+                                                 mode == 2 ? 0.5 : 1.0, ranges);
+                        const auto& projection = input.region.contentProjection;
+                        if (!combined.grid || !preservesTimingAudioInRange(*previewGrid, *combined.grid,
+                                {projection.contentStartSeconds, projection.contentStartSeconds + projection.contentDurationSeconds})) {
+                            ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
+                                LOC_RAW("These clip edits could not be combined safely. Try aligning fewer clips at once."));
+                            return;
+                        }
+                        previous->after = std::move(combined.grid);
                     }
                     if (changes.empty())
                         return;
@@ -1927,6 +2103,7 @@ void OpenTuneAudioProcessorEditor::undoRequested()
     if (auto* action = processorRef_.getUndoManager().undo()) {
         syncContentProjectionToPianoRoll();
         pianoRoll_.onNotesRevisionChanged();
+        pianoRoll_.onTimeGridRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Undone: {0}"), action->getDescription()));
     } else {
         a11y::announce(pianoRoll_, processorRef_.getUndoManager().canUndo()
@@ -1941,6 +2118,7 @@ void OpenTuneAudioProcessorEditor::redoRequested()
     if (auto* action = processorRef_.getUndoManager().redo()) {
         syncContentProjectionToPianoRoll();
         pianoRoll_.onNotesRevisionChanged();
+        pianoRoll_.onTimeGridRevisionChanged();
         a11y::announce(pianoRoll_, Loc::format(LOC_RAW("Redone: {0}"), action->getDescription()));
     } else {
         a11y::announce(pianoRoll_, processorRef_.getUndoManager().canRedo()

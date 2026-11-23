@@ -23,6 +23,17 @@ enum class ToolId : int
     Eraser = 12
 };
 
+inline ToolId toolWithTuneDrawingAvailability(ToolId tool, bool tuneDrawingAvailable) noexcept
+{
+    if (!tuneDrawingAvailable) {
+        if (tool == ToolId::DrawNote)
+            return ToolId::Pitch;
+        if (tool == ToolId::LineAnchor)
+            return ToolId::Select;
+    }
+    return tool;
+}
+
 // Pitch Grid 全局开关：控制 Pitch 工具拖拽时的吸附行为（OpenDyne 模式）
 enum class PitchGridMode : int {
     NoSnap = 0,      // 自由拖动，音分级精度
@@ -31,4 +42,3 @@ enum class PitchGridMode : int {
 };
 
 } // namespace OpenTune
-

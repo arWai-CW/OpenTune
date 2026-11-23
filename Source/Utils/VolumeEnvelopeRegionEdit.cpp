@@ -1,6 +1,7 @@
 #include "VolumeEnvelopeRegionEdit.h"
 #include "Content/EditableContentSnapshot.h"
 #include <algorithm>
+#include <cmath>
 
 namespace OpenTune {
 
@@ -10,14 +11,39 @@ AutomationLane applyVolumeEnvelopeRegionDelta(const AutomationLane& beforeEnvelo
                                               float deltaGainDb)
 {
     AutomationLane envelope = beforeEnvelope;
+    std::vector<double> selectedMidpoints;
+    selectedMidpoints.reserve(selectedNoteIndices.size());
     for (const int index : selectedNoteIndices) {
         if (index < 0 || index >= static_cast<int>(notes.size()))
             continue;
         const auto& note = notes[static_cast<size_t>(index)];
-        envelope.setRegionGain(
+        const double midpoint = note.startTime + (note.endTime - note.startTime) * 0.5;
+        if (std::isfinite(midpoint))
+            selectedMidpoints.push_back(midpoint);
+    }
+    std::sort(selectedMidpoints.begin(), selectedMidpoints.end());
+
+    const auto setRegionGain = [&envelope, &selectedMidpoints](double start, double end, float gain) {
+        // A ramp may meet another selected note's midpoint but must not overwrite it.
+        double leading = AutomationLane::kDefaultRampSeconds;
+        double trailing = leading;
+        const auto left = std::lower_bound(selectedMidpoints.begin(), selectedMidpoints.end(), start);
+        if (left != selectedMidpoints.begin())
+            leading = std::min(leading, start - *std::prev(left));
+        const auto right = std::upper_bound(selectedMidpoints.begin(), selectedMidpoints.end(), end);
+        if (right != selectedMidpoints.end())
+            trailing = std::min(trailing, *right - end);
+        envelope.setRegionGain(start, end, gain, leading, trailing);
+    };
+
+    for (const int index : selectedNoteIndices) {
+        if (index < 0 || index >= static_cast<int>(notes.size()))
+            continue;
+        const auto& note = notes[static_cast<size_t>(index)];
+        setRegionGain(
             note.startTime,
             note.endTime,
-            beforeEnvelope.evalAt(note.startTime) + deltaGainDb);
+            beforeEnvelope.evalNoteGain(note.startTime, note.endTime) + deltaGainDb);
     }
     return envelope;
 }

@@ -402,6 +402,46 @@ static bool runDebugSelfTests(OpenTuneAudioProcessor& processor, juce::AudioProc
         if (content->getHeight() > viewport->getMaximumVisibleHeight()
             || viewport->getVerticalScrollBar().isVisible())
             return false;
+
+        juce::Component topBar;
+        topBar.setSize(622, 40); // Plugin minimum, minus margins and padding.
+        auto& strip = panel.getToolStrip();
+        topBar.addAndMakeVisible(strip);
+        strip.setBounds(topBar.getLocalBounds());
+        panel.setVisible(false);
+
+        const auto stripFits = [&topBar, &strip](int expectedCount) {
+            int count = 0;
+            for (auto* control : strip.getChildren()) {
+                if (!control->isVisible())
+                    continue;
+                const auto* hit = topBar.getComponentAt(control->getBounds().getCentre());
+                if ((hit != control && !control->isParentOf(hit)) || control->getBounds().isEmpty()
+                    || !strip.getLocalBounds().contains(control->getBounds()))
+                    return false;
+                for (auto* other : strip.getChildren())
+                    if (other != control && other->isVisible()
+                        && control->getBounds().intersects(other->getBounds()))
+                        return false;
+                ++count;
+            }
+            return count == expectedCount;
+        };
+        topBar.setVisible(true);
+        if (!stripFits(7))
+            return false;
+        panel.setExperimentalFeaturesEnabled(true);
+        if (!stripFits(8))
+            return false;
+        panel.setOpenDyneMode(true);
+        if (!stripFits(12) || !panel.getPitchGridControl().isVisible())
+            return false;
+        panel.setExperimentalFeaturesEnabled(false);
+        if (!stripFits(11) || panel.getToolComponent(ToolId::TimeTool)->isVisible())
+            return false;
+        panel.setOpenDyneMode(false);
+        if (!stripFits(7) || panel.getPitchGridControl().isVisible())
+            return false;
     }
 
     // --- TransportBar 生产阈值：两个 LayoutProfile 的 Full/Compact/Overflow 边界与槽位不越界 ---
@@ -621,7 +661,7 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
           LocalizationManager::LanguageState{ appPreferences_.getState().shared.language }))
     , languageBinding_(languageState_)
     , menuBar_(p, MenuBarComponent::Profile::Standalone)
-    , topBar_(menuBar_, transportBar_)
+    , topBar_(menuBar_, transportBar_, parameterPanel_.getToolStrip())
     , arrangementView_(p)
     , pianoRoll_(p.getPlayHeadState(), p.getUndoManager(),
                  [this](SpectrumArray& spectrum, SpectrumArray& peaks) {
@@ -673,6 +713,8 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     // Undo/Redo 菜单项实时反映撤销栈状态
     menuBar_.canUndoQuery = [this]() { return processorRef_.getUndoManager().canUndo(); };
     menuBar_.canRedoQuery = [this]() { return processorRef_.getUndoManager().canRedo(); };
+    menuBar_.canRestoreSelectedNotesQuery = [this]() { return pianoRoll_.canRestoreSelectedNotes(); };
+    menuBar_.onRestoreSelectedNotes = [this]() { pianoRoll_.restoreSelectedNotes(); };
 
 #if JUCE_MAC
     // Populate the macOS system menu bar with File/Edit/View menus.
@@ -798,7 +840,7 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     parameterPanel_.setRetuneSpeed(PitchControlConfig::kDefaultRetuneSpeedPercent);
     pianoRoll_.setRetuneSpeed(PitchControlConfig::kDefaultRetuneSpeedNormalized);
 
-    contentRoot_.addAndMakeVisible(parameterPanel_);
+    contentRoot_.addChildComponent(parameterPanel_);
 
     arrangementView_.addListener(this);
     contentRoot_.addAndMakeVisible(arrangementView_);
@@ -1363,7 +1405,7 @@ void OpenTuneAudioProcessorEditor::showDemoTourStep(DemoTourStep step)
             break;
         case DemoTourStep::Tools:
             demoTourCallout_.show(LOC_RAW("Editing tools"),
-                LOC_RAW("The tools on the right edit pitch and notes. Long-press any tool to see its name and how to use it."),
+                LOC_RAW("The tools at the top edit pitch and notes. Long-press any tool to see its name and how to use it."),
                 LOC_RAW("Done"), skip);
             break;
     }
@@ -1430,15 +1472,11 @@ void OpenTuneAudioProcessorEditor::updateDemoTour()
             break;
 
         case DemoTourStep::Tools:
-            if (!isParameterPanelVisible_)
-            {
-                isParameterPanelVisible_ = true;
-                parameterPanel_.setVisible(true);
-                topBar_.setSidePanelsVisible(isTrackPanelVisible_, isParameterPanelVisible_);
-                resized();
-            }
-            target = contentRoot_.getLocalArea(&parameterPanel_, parameterPanel_.getLocalBounds());
+        {
+            auto& toolStrip = parameterPanel_.getToolStrip();
+            target = contentRoot_.getLocalArea(&toolStrip, toolStrip.getLocalBounds());
             break;
+        }
     }
     demoTourCallout_.setTarget(target);
 }
@@ -1822,7 +1860,8 @@ void OpenTuneAudioProcessorEditor::resized()
     bounds.reduce(gap, gap); // Global padding
 
 // TopBar: height + shadow margin (12px top and bottom)
-    const int topBarHeight = menuBar_.isVisible() ? (MENU_BAR_HEIGHT + TRANSPORT_BAR_HEIGHT) : TRANSPORT_BAR_HEIGHT;
+    const int topBarHeight = (menuBar_.isVisible() ? MENU_BAR_HEIGHT : 0)
+        + TRANSPORT_BAR_HEIGHT + TopBarComponent::kToolStripHeight;
     const int topBarHeightWithShadow = topBarHeight + shadowMargin * 2;
     topBar_.setBounds(bounds.removeFromTop(topBarHeightWithShadow));
 // Visual gap: subtract bottom shadow margin already consumed
@@ -2258,7 +2297,7 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     if (appliedThemeId_ != effectiveTheme)
         applyThemeToEditor(effectiveTheme);
 
-    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
+    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme, sharedPreferences.openDyneMixEnabled);
     pianoRoll_.setExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
     pianoRoll_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     pianoRoll_.setNoteNameMode(visualPreferences.noteNameMode);
@@ -2272,7 +2311,8 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     menuBar_.setShowPianoKeyboard(visualPreferences.showPianoKeyboard);
     menuBar_.setScaleAssistEnabled(visualPreferences.scaleAssistEnabled);
     parameterPanel_.setExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
-    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme));
+    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme),
+                                   sharedPreferences.openDyneMixEnabled);
     parameterPanel_.setActiveTool(static_cast<int>(pianoRoll_.getCurrentTool()));
     arrangementView_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     menuBar_.setNoteNameMode(visualPreferences.noteNameMode);

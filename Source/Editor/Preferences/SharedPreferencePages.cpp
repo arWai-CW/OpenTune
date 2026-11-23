@@ -455,7 +455,7 @@ private:
 class SharedEditingPage final : public juce::Component
 {
 public:
-    static constexpr int kContentHeight = 472; // Includes the accessibility mode toggle.
+    static constexpr int kContentHeight = 516;
 
     SharedEditingPage(AppPreferences& appPreferences,
                       std::function<void()> onPreferencesChanged,
@@ -482,9 +482,20 @@ public:
             applyProcessingPreferencePatch(appPreferences_, patch, {}, onPreferencesChanged_);
             wholeNoteMoveSnapSelector_.setEnabled(
                 *patch.audioEditingScheme != AudioEditingScheme::Scheme::NotesPrimary);
+            mixToggle_.setEnabled(AudioEditingScheme::usesNotesPrimaryScheme(*patch.audioEditingScheme));
         };
         initialiseComboBox(schemeSelector_);
         addAndMakeVisible(schemeSelector_);
+
+        mixToggle_.setButtonText(LOC(kOpenDyneMix));
+        mixToggle_.setToggleState(state.shared.openDyneMixEnabled, juce::dontSendNotification);
+        mixToggle_.setEnabled(AudioEditingScheme::usesNotesPrimaryScheme(state.shared.audioEditingScheme));
+        mixToggle_.onClick = [this] {
+            appPreferences_.setOpenDyneMixEnabled(mixToggle_.getToggleState());
+            notifyChanged();
+        };
+        initialiseToggleButton(mixToggle_);
+        addAndMakeVisible(mixToggle_);
 
         initialiseLabel(horizontalLabel_, LOC(kHorizontalZoomSensitivity));
         addAndMakeVisible(horizontalLabel_);
@@ -636,6 +647,9 @@ public:
         schemeSelector_.setBounds(row.removeFromLeft(240).reduced(0, 4));
 
         bounds.removeFromTop(10);
+        mixToggle_.setBounds(bounds.removeFromTop(rowHeight));
+
+        bounds.removeFromTop(10);
         row = bounds.removeFromTop(rowHeight);
         horizontalLabel_.setBounds(row.removeFromLeft(labelWidth));
         horizontalSlider_.setBounds(row);
@@ -698,6 +712,7 @@ private:
     ZoomSensitivityConfig::ZoomSensitivitySettings zoomSettings_;
     juce::Label schemeLabel_;
     a11y::AccessibleComboBox schemeSelector_;
+    a11y::AccessibleToggleButton mixToggle_;
     juce::Label horizontalLabel_;
     a11y::AccessibleKnob horizontalSlider_;
     juce::Label verticalLabel_;
@@ -1052,6 +1067,7 @@ public:
             KeyShortcutConfig::ShortcutId::ToolODSelect, KeyShortcutConfig::ShortcutId::ToolODPitch,
             KeyShortcutConfig::ShortcutId::ToolODPitchModulation, KeyShortcutConfig::ShortcutId::ToolODPitchDrift,
             KeyShortcutConfig::ShortcutId::ToolODVolumeEnvelope, KeyShortcutConfig::ShortcutId::ToolODScissors,
+            KeyShortcutConfig::ShortcutId::ToolMixDrawNote, KeyShortcutConfig::ShortcutId::ToolMixLineAnchor,
         };
 
         // 内容高度，与 resized() 布局一一对应：

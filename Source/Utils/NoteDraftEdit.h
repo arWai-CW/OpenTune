@@ -21,4 +21,8 @@ struct NoteDraftEditPlan
 NoteDraftEditPlan planNoteDraftEdit(const std::vector<Note>& baselineNotes,
                                     const std::vector<Note>& workingNotes);
 
+std::vector<F0FrameRange> changedNoteFrameRanges(const std::vector<Note>& baselineNotes,
+                                                const std::vector<Note>& workingNotes,
+                                                const F0Timeline& timeline);
+
 } // namespace OpenTune

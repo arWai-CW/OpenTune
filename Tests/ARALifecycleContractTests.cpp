@@ -4,6 +4,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/ARA/OpenTuneDocumentController.h"
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
+#include "../Source/DSP/TimingAlignment.h"
 #include "../Source/Utils/TimeGridEditAction.h"
 #include <algorithm>
 #include <atomic>
@@ -164,6 +165,9 @@ struct HostAudioAccess final : ARA::Host::AudioAccessControllerInterface
             return false;
 
         std::fill_n(static_cast<float*>(buffers[0]), static_cast<size_t>(samplesPerChannel), 0.25f);
+        // Near Nyquist: the canonical 44.1 kHz path cannot preserve this 48 kHz signal.
+        for (auto i = std::max(ARA::ARASamplePosition{36000}, samplePosition); i < samplePosition + sampleCount; ++i)
+            static_cast<float*>(buffers[0])[i - samplePosition] += (i % 2 == 0 ? 0.125f : -0.125f);
         return true;
     }
 
@@ -196,6 +200,8 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                                             ARA::Host::DocumentController& hostDocumentController,
                                             ARA::ARAAudioSourceRef audioSource,
                                             ARA::ARAPlaybackRegionRef playbackRegionRef,
+                                            ARA::ARAAudioModificationRef modificationRef,
+                                            ARA::ARARegionSequenceRef sequenceRef,
                                             ARA::ARAPlaybackRegionRef& secondTargetRef,
                                             ARA::ARAAudioModificationRef& secondModificationRef)
 {
@@ -337,6 +343,66 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
                    && undone->timeGridRevision > after->timeGridRevision,
                "stretch_undo_did_not_restore_identity");
         expectAudible(*firstRenderer, "undo_did_not_restore_unwarped_playback", true);
+
+        ARA::ARAPlaybackRegionProperties tailProperties{};
+        tailProperties.structSize = sizeof(tailProperties);
+        tailProperties.regionSequenceRef = sequenceRef;
+        tailProperties.startInModificationTime = 0.75;
+        tailProperties.durationInModificationTime = 0.25;
+        tailProperties.startInPlaybackTime = 2.0;
+        tailProperties.durationInPlaybackTime = 0.25;
+        const auto tail = hostDocumentController.createPlaybackRegion(modificationRef, nullptr, &tailProperties);
+        if (!expect(tail != nullptr, "pooled_sibling_create_failed"))
+            return false;
+        firstInstance->playbackRendererInterface->addPlaybackRegion(firstInstance->playbackRendererRef, tail);
+        const auto headWarp = TimeGridSnapshot::makeFromHandles({
+            {1, 0.0, 0.0, HandleKind::ClipStart},
+            {2, 0.25, 0.30, HandleKind::UserAdded},
+            {3, 0.65, 0.65, HandleKind::InternalOnset},
+            {4, 1.0, 1.0, HandleKind::ClipEnd}
+        });
+        expect(firstProcessor.applyTimeGridEdit(key, before->timeGrid, headWarp, "Pooled timing"),
+               "pooled_timing_grid_commit_failed");
+        service->drainRenderWorker();
+        controller->collectPlaybackSnapshots();
+        const auto pooled = controller->readContentSnapshot(key);
+        expect(pooled && service->getTimeStretchCache().sliceForOutputRange(key,
+                   pooled->contentRevision, pooled->timeGridRevision, 40800, rendered,
+                   0, blockSize, initialSampleRate) == blockSize,
+               "pooled_timing_stage2_pcm_missing");
+        juce::AudioBuffer<float> siblingAudio(1, blockSize);
+        auto tailPosition = positionInfo;
+        tailPosition.setTimeInSamples(100800);
+        const bool processed = firstRenderer->processBlock(siblingAudio, juce::AudioProcessor::Realtime::yes, tailPosition);
+        expect(processed && siblingAudio.getSample(0, 0) == 0.375f && siblingAudio.getSample(0, 1) == 0.125f,
+               "pooled_sibling_lost_native_rate_pcm");
+        const auto restored = restoreOriginalTimingInRange(*headWarp, {0.0, 0.65}, {{0.75, 1.0}});
+        if (!expect(restored && firstProcessor.applyTimeGridEdit(key, headWarp, restored, "Restore timing"),
+                    "restore_original_clip_timing_failed"))
+            return false;
+        const auto restoredSnapshot = controller->readContentSnapshot(key);
+        expect(restoredSnapshot && restoredSnapshot->timeGrid == restored && restored->isIdentity()
+                   && restoredSnapshot->contentRevision == before->contentRevision
+                   && restoredSnapshot->pitchRevision == before->pitchRevision,
+               "restore_timing_changed_pitch_or_canonical_content");
+        expectAudible(*firstRenderer, "restore_did_not_resume_unwarped_playback", true);
+        siblingAudio.clear();
+        expect(firstRenderer->processBlock(siblingAudio, juce::AudioProcessor::Realtime::yes, tailPosition)
+                   && siblingAudio.getSample(0, 0) == 0.375f && siblingAudio.getSample(0, 1) == 0.125f,
+               "restore_timing_changed_pooled_sibling_pcm");
+        auto& pooledHistory = firstProcessor.getUndoManager();
+        const auto* restoreAction = pooledHistory.peekUndo();
+        expect(secondProcessor.applyTimeGridEdit(key, restored, warp, "Newer timing")
+                   && pooledHistory.undo() == nullptr && pooledHistory.peekUndo() == restoreAction
+                   && controller->readContentSnapshot(key)->timeGrid == warp,
+               "restore_undo_overwrote_newer_timing");
+        expect(secondProcessor.getUndoManager().undo() != nullptr,
+               "undo_newer_timing_failed");
+        expect(pooledHistory.undo() != nullptr && controller->readContentSnapshot(key)->timeGrid == headWarp,
+               "undo_restore_did_not_reinstate_timing_alignment");
+        expect(firstProcessor.getUndoManager().undo() != nullptr, "pooled_timing_undo_failed");
+        firstInstance->playbackRendererInterface->removePlaybackRegion(firstInstance->playbackRendererRef, tail);
+        hostDocumentController.destroyPlaybackRegion(tail);
 
         auto* secondTarget = ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(secondTargetRef);
         const auto secondRegions = controller->getPlaybackRegionProjectionsFor({secondTarget});
@@ -697,7 +763,8 @@ int runChild(int argc, char** argv)
         return 1;
 
     const bool rendererLifecyclePassed = runPlaybackRendererLifecycleRegression(
-        instance->documentControllerRef, documentController, source, region, secondTarget, extraModifications.front());
+        instance->documentControllerRef, documentController, source, region, modification, regionSequence,
+        secondTarget, extraModifications.front());
     documentController.enableAudioSourceSamplesAccess(source, false);
 
     documentController.destroyPlaybackRegion (region);

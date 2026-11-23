@@ -56,6 +56,8 @@ public:
         // adjacency in the sorted plan.
         uint32_t continuityGroup{0};
         PlaybackSampleGeometry::Placement placement;
+        PlaybackSampleGeometry::Placement nativePlacement;
+        bool readsNativeTiming{false};
         PlaybackReadSource source;
     };
 

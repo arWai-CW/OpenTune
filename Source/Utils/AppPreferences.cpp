@@ -15,6 +15,7 @@ namespace {
 constexpr const char* kSharedLanguageKey = "shared.language";
 constexpr const char* kSharedThemeKey = "shared.theme.activeTheme";
 constexpr const char* kSharedAudioEditingSchemeKey = "shared.audioEditing.scheme";
+constexpr const char* kSharedOpenDyneMixKey = "shared.audioEditing.openDyneMix";
 constexpr const char* kSharedPianoRollNoteNameModeKey = "shared.pianoRoll.noteNameMode";
 constexpr const char* kSharedPianoRollShowUnvoicedFramesKey = "shared.pianoRoll.showUnvoicedFrames";
 constexpr const char* kSharedPianoRollShowPianoKeyboardKey = "shared.pianoRoll.showPianoKeyboard";
@@ -378,6 +379,18 @@ KeyShortcutConfig::KeyShortcutSettings decodeShortcutSettings(const juce::Proper
         }
     }
 
+    using namespace KeyShortcutConfig;
+    for (const auto id : {ShortcutId::ToolMixDrawNote, ShortcutId::ToolMixLineAnchor}) {
+        const auto& info = getShortcutInfo(id);
+        if (!properties.containsKey(info.storageKey)) {
+            auto& bindings = settings.bindings[static_cast<size_t>(id)].bindings;
+            const auto conflicts = std::remove_if(bindings.begin(), bindings.end(), [&](const KeyBinding& binding) {
+                return findShortcutForBinding(settings, binding, info.scopes) != id;
+            });
+            bindings.erase(conflicts, bindings.end());
+        }
+    }
+
     // Shift+Option/Alt+wheel zoom was added after these settings were stored: add it unless the
     // user cleared the zoom shortcut or already uses that wheel gesture for something else.
     if (adoptAltShiftWheelZoom) {
@@ -456,6 +469,7 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     state.shared.theme = themeFromToken(properties.getValue(kSharedThemeKey, toThemeToken(state.shared.theme)));
     state.shared.audioEditingScheme = audioEditingSchemeFromToken(
         properties.getValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme)));
+    state.shared.openDyneMixEnabled = properties.getBoolValue(kSharedOpenDyneMixKey, state.shared.openDyneMixEnabled);
     state.shared.pianoRollVisualPreferences.noteNameMode = noteNameModeFromToken(
         properties.getValue(kSharedPianoRollNoteNameModeKey,
                             toNoteNameModeToken(state.shared.pianoRollVisualPreferences.noteNameMode)));
@@ -557,6 +571,7 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
     properties.setValue(kSharedLanguageKey, toLanguageToken(state.shared.language));
     properties.setValue(kSharedThemeKey, toThemeToken(state.shared.theme));
     properties.setValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme));
+    properties.setValue(kSharedOpenDyneMixKey, state.shared.openDyneMixEnabled);
     properties.setValue(kSharedPianoRollNoteNameModeKey,
                         toNoteNameModeToken(state.shared.pianoRollVisualPreferences.noteNameMode));
     properties.setValue(kSharedPianoRollShowUnvoicedFramesKey,
@@ -1117,6 +1132,13 @@ bool AppPreferences::getOutOfScaleDragEnabled() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     return state_.shared.outOfScaleDragEnabled;
+}
+
+void AppPreferences::setOpenDyneMixEnabled(bool enabled)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    state_.shared.openDyneMixEnabled = enabled;
+    saveLocked();
 }
 
 void AppPreferences::setAccessibilityModeEnabled(bool enabled)

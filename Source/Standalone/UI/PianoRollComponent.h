@@ -256,7 +256,7 @@ public:
         overlay_->repaint();
     }
     void setScale(int rootNote, int scaleType);
-    void setAudioEditingScheme(AudioEditingScheme::Scheme scheme) { applyAudioEditingScheme(scheme); }
+    void setAudioEditingScheme(AudioEditingScheme::Scheme scheme, bool mixEnabled = false);
     bool isOpenDyne() const noexcept { return AudioEditingScheme::usesNotesPrimaryScheme(audioEditingScheme_); }
 
     /** 轨道主题色注入：OpenDyne waveform blob 的填充/描边色。 */
@@ -355,6 +355,8 @@ public:
 
     AutoTuneApplyResult applyAutoTuneToSelection();
     AutoTuneApplyResult tuneToPitchReference();
+    bool canRestoreSelectedNotes() const;
+    void restoreSelectedNotes();
 
     // Note Copy / Paste / Duplicate
     void copySelectedNotes();
@@ -549,7 +551,10 @@ private:
 
     void initializeUIComponents();
     void initializeRenderer();
-    void applyAudioEditingScheme(AudioEditingScheme::Scheme scheme);
+    bool allowsTuneDrawingTools() const noexcept
+    {
+        return AudioEditingScheme::allowsTuneDrawingTools(audioEditingScheme_, openDyneMixEnabled_);
+    }
     void stopNotePitchAudition();
     /** OpenDyne 语义保证：切入 OpenDyne 模式或加载内容时，若已有 F0 数据但无音符则生成。 */
     void ensureOpenDyneNotesIfNeeded();
@@ -619,6 +624,7 @@ private:
     bool userHasManuallyZoomed_ = false;
     ZoomSensitivityConfig::ZoomSensitivitySettings zoomSensitivity_ = ZoomSensitivityConfig::ZoomSensitivitySettings::getDefault();
     AudioEditingScheme::Scheme audioEditingScheme_ = AudioEditingScheme::Scheme::CorrectedF0Primary;
+    bool openDyneMixEnabled_ = false;
     KeyShortcutConfig::KeyShortcutSettings shortcutSettings_ = KeyShortcutConfig::KeyShortcutSettings::getDefault();
     const KeyShortcutConfig::KeyBinding* pointerShortcutBinding_ = nullptr;
     juce::Colour trackDisplayColour_{0xFF4A90D9};

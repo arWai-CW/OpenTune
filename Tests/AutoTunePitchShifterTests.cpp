@@ -2637,6 +2637,208 @@ void testShiftChunkSkipsStaleHeldPeriodForRateContract()
 
 } // namespace
 
+// A light edit followed by unedited audio in the same chunk: once the edit
+// ends, the shifter realigns to the input and the rest is the source again.
+void testIdentityRealignsAfterEditedSpan()
+{
+    constexpr int kSampleRate = 44100;
+    constexpr double kFrameRate = 100.0;
+    constexpr int kNumFrames = 40;
+    constexpr int kNumSamples = 441 * kNumFrames;
+    constexpr int kHistory = OpenTune::AutoTunePeriodDetector::kRequiredLookbehindSamples;
+    const std::vector<float> full = makeSineSegment(
+        220.0, kSampleRate, 0, kHistory + kNumSamples + Shifter::kLookaheadSamples, 0.5);
+    const float* input = full.data() + kHistory;
+
+    std::vector<float> originalF0(static_cast<size_t>(kNumFrames), 220.0f);
+    std::vector<float> correctedF0(static_cast<size_t>(kNumFrames), 0.0f);
+    for (int frame = 0; frame < 15; ++frame)
+        correctedF0[static_cast<size_t>(frame)] =
+            static_cast<float>(220.0 * std::exp2(50.0 / 1200.0));
+
+    const auto detector = OpenTune::AutoTunePeriodDetector::analyze(
+        full.data(), kHistory, input, kNumSamples, kSampleRate,
+        originalF0.data(), kNumFrames, kFrameRate, 0.0);
+    Shifter shifter(static_cast<double>(kSampleRate));
+    const auto result = shifter.shiftChunkWithOctaveRepair(
+        input, kNumSamples, originalF0.data(), correctedF0.data(), kNumFrames,
+        kFrameRate, 0.0, input + kNumSamples, Shifter::kLookaheadSamples,
+        full.data(), kHistory, detector.data(), kNumSamples, true);
+    expectTrue(result.success && static_cast<int>(result.audio.size()) == kNumSamples,
+               "identity realign: light render succeeds");
+    if (!result.success || static_cast<int>(result.audio.size()) != kNumSamples)
+        return;
+
+    double editedError = 0.0;
+    for (int i = 441 * 5; i < 441 * 14; ++i)
+        editedError = std::max(editedError, std::fabs(static_cast<double>(
+            result.audio[static_cast<size_t>(i)] - input[i])));
+    double tailError = 0.0;
+    for (int i = 441 * 20; i < kNumSamples; ++i)
+        tailError = std::max(tailError, std::fabs(static_cast<double>(
+            result.audio[static_cast<size_t>(i)] - input[i])));
+    expectTrue(editedError > 0.01, "identity realign: edited span is shifted");
+    expectTrue(tailError == 0.0, "identity realign: unedited tail is sample-exact");
+}
+
+void testClearIdentityCorrections()
+{
+    const std::vector<float> original{0.0f, 220.0f, 220.0f, 220.0f, 220.0f};
+    std::vector<float> corrected{
+        220.0f,
+        static_cast<float>(220.0 * std::exp2(0.5 / 1200.0)),
+        static_cast<float>(220.0 * std::exp2(-0.9 / 1200.0)),
+        static_cast<float>(220.0 * std::exp2(2.0 / 1200.0)),
+        0.0f};
+    std::vector<float> chunk(corrected.begin() + 1, corrected.end());
+    OpenTune::clearIdentityCorrections(chunk, original, 1);
+    expectTrue(chunk[0] == 0.0f && chunk[1] == 0.0f,
+               "clear identity: corrections within 1 cent become no correction");
+    expectTrue(chunk[2] > 0.0f, "clear identity: a 2 cent correction is kept");
+    OpenTune::clearIdentityCorrections(corrected, original, 0);
+    expectTrue(corrected[0] == 220.0f, "clear identity: unvoiced source frames are untouched");
+}
+
+void testPlanLightRenderSplitsPerFrame()
+{
+    constexpr int kFrames = 20;
+    constexpr int kSamples = 441 * kFrames;
+    std::vector<float> original(static_cast<size_t>(kFrames), 220.0f);
+    std::vector<float> corrected(static_cast<size_t>(kFrames), 0.0f);
+    for (int f = 2; f < 18; ++f)
+        corrected[static_cast<size_t>(f)] = static_cast<float>(220.0 * std::exp2(30.0 / 1200.0));
+    corrected[4] = static_cast<float>(220.0 * std::exp2(200.0 / 1200.0));
+
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> det(static_cast<size_t>(kSamples));
+    for (auto& d : det) { d.valid = true; d.periodSamples = 44100.0f / 220.0f; d.trackingUpdated = true; }
+    for (int i = 441 * 8; i < 441 * 9; ++i) det[static_cast<size_t>(i)].valid = false;   // 10 ms
+    for (int i = 441 * 12; i < 441 * 17; ++i) det[static_cast<size_t>(i)].valid = false; // 50 ms
+
+    const auto plan = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        det.data(), kSamples, 44100.0, 100.0, 0.0);
+    expectTrue(plan.needsVocoder, "plan: out-of-contract frame needs the vocoder");
+    expectTrue(plan.vocoderFrames[4] == 1 && plan.vocoderFrames[3] == 0 && plan.vocoderFrames[5] == 0,
+               "plan: only the out-of-contract frame goes to the vocoder");
+    const double clampedCents = 1200.0 * std::log2(plan.dspTarget[4] / 220.0);
+    expectTrue(std::fabs(clampedCents - OpenTune::kLightClampCents) < 0.01,
+               "plan: light target is clamped inside the contract");
+    expectTrue(plan.vocoderFrames[8] == 0 && plan.dspTarget[8] == 0.0f,
+               "plan: short detector-invalid run passes through uncorrected");
+    bool longRunVocoder = true;
+    for (int f = 12; f < 17; ++f)
+        longRunVocoder = longRunVocoder && plan.vocoderFrames[static_cast<size_t>(f)] == 1
+            && plan.dspTarget[static_cast<size_t>(f)] == 0.0f;
+    expectTrue(longRunVocoder, "plan: long detector-invalid run goes to the vocoder");
+    expectTrue(plan.dspTarget[10] == corrected[10], "plan: other frames keep their target");
+
+    std::vector<float> inContract = corrected;
+    inContract[4] = inContract[3];
+    const auto lightOnly = OpenTune::planLightRender(inContract, original.data(), kFrames,
+        nullptr, 0, 44100.0, 100.0, 0.0);
+    expectTrue(!lightOnly.needsVocoder, "plan: in-contract chunk stays light");
+
+    // Without snap the light render glides back from the clamped target; the
+    // vocoder region covers that glide instead of handing over mid-glide.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> sparse(static_cast<size_t>(kSamples));
+    for (int i = 0; i < kSamples; ++i) {
+        auto& d = sparse[static_cast<size_t>(i)];
+        d.valid = true; d.periodSamples = 44100.0f / 220.0f; d.trackingUpdated = i % 5 == 0;
+    }
+    const auto glide = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, false);
+    expectTrue(glide.vocoderFrames[5] == 1 && glide.vocoderFrames[6] == 1,
+               "plan: vocoder region covers the light glide after a large correction");
+    const auto snapped = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(snapped.vocoderFrames[5] == 0, "plan: snap mode needs no glide cover");
+
+    // A 25 ms invalid run touching four frames still passes through.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> straddle(sparse);
+    for (int i = 441 * 8 + 400; i < 441 * 8 + 400 + 1102; ++i)
+        straddle[static_cast<size_t>(i)].valid = false;
+    const auto shortRun = OpenTune::planLightRender(inContract, original.data(), kFrames,
+        straddle.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(!shortRun.needsVocoder, "plan: short invalid run across four frames stays light");
+
+    // Snap mode along a gliding target: the held rate between two detector
+    // updates must not grow the region along the glide.
+    std::vector<float> ramp(static_cast<size_t>(kFrames), 0.0f);
+    for (int f = 2; f < 18; ++f)
+        ramp[static_cast<size_t>(f)] = static_cast<float>(220.0 * std::exp2((10.0 + 3.5 * f) / 1200.0));
+    ramp[4] = static_cast<float>(220.0 * std::exp2(200.0 / 1200.0));
+    const auto rampPlan = OpenTune::planLightRender(ramp, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(rampPlan.vocoderFrames[4] == 1 && rampPlan.vocoderFrames[6] == 0
+                   && rampPlan.vocoderFrames[2] == 0,
+               "plan: held rate between updates does not grow the region along a glide");
+
+    // The shifter holds its rate when a detector-relative target leaves the
+    // contract; the plan must follow that instead of simulating a glide.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> sharp(sparse);
+    for (int i = 441 * 4; i < 441 * 5; ++i)
+        sharp[static_cast<size_t>(i)].periodSamples =
+            static_cast<float>(44100.0 / 220.0 * std::exp2(10.0 / 1200.0));
+    const auto heldPlan = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sharp.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(heldPlan.vocoderFrames[6] == 0,
+               "plan: a held out-of-contract update does not invent a glide");
+    expectTrue(shortRun.dspTarget[8] == 0.0f && shortRun.dspTarget[11] == 0.0f,
+               "plan: frames touched by a short invalid run pass through");
+}
+
+void testVocoderSpliceWeightsAndMix()
+{
+    constexpr int kFrames = 60;
+    constexpr int kSamples = 441 * kFrames;
+    std::vector<uint8_t> frames(static_cast<size_t>(kFrames), 0);
+    for (int f = 25; f < 30; ++f) frames[static_cast<size_t>(f)] = 1;
+    std::vector<float> source(static_cast<size_t>(kSamples), 0.3f);
+    for (int i = 441 * 23; i < 441 * 23 + 300; ++i) source[static_cast<size_t>(i)] = 0.0f;
+
+    const auto w = OpenTune::buildVocoderSpliceWeights(frames, kSamples, 44100.0, 100.0, 0.0, source.data());
+    expectTrue(static_cast<int>(w.size()) == kSamples, "splice: one weight per sample");
+    bool inside = true;
+    for (int i = 441 * 25; i < 441 * 30; ++i) inside = inside && w[static_cast<size_t>(i)] == 1.0f;
+    expectTrue(inside, "splice: vocoder region has full weight");
+    expectTrue(w[441 * 10] == 0.0f && w[441 * 50] == 0.0f, "splice: far audio stays light");
+    bool monotone = true;
+    for (int i = 441 * 15; i < 441 * 25; ++i)
+        monotone = monotone && w[static_cast<size_t>(i)] >= w[static_cast<size_t>(i - 1)];
+    expectTrue(monotone, "splice: fade-in is monotone");
+    int fadeStart = 0;
+    while (fadeStart < kSamples && w[static_cast<size_t>(fadeStart)] == 0.0f) ++fadeStart;
+    expectTrue(fadeStart < 441 * 25 - 220 - 882 + 32,
+               "splice: fade moves toward the quiet source span");
+
+    OpenTune::VocoderSplicePayload payload;
+    payload.weights = w;
+    payload.numChannels = 2;
+    payload.lightAudio.assign(static_cast<size_t>(kSamples) * 2, 0.25f);
+    const std::vector<float> vocoder(static_cast<size_t>(kSamples), -0.5f);
+    const auto mixed = OpenTune::spliceVocoderIntoLight(payload, vocoder);
+    expectTrue(mixed.size() == payload.lightAudio.size(), "splice: keeps every channel plane");
+    if (mixed.size() == payload.lightAudio.size()) {
+        expectTrue(mixed[441 * 10] == 0.25f && mixed[static_cast<size_t>(kSamples) + 441 * 10] == 0.25f,
+                   "splice: light samples are untouched");
+        expectTrue(mixed[441 * 27] == -0.5f && mixed[static_cast<size_t>(kSamples) + 441 * 27] == -0.5f,
+                   "splice: vocoder region is the vocoder in every channel");
+    }
+    payload.numChannels = 1;
+    expectTrue(OpenTune::spliceVocoderIntoLight(payload, vocoder).empty(),
+               "splice: mismatched planes are rejected");
+
+    std::vector<uint8_t> tailFrames(static_cast<size_t>(kFrames), 0);
+    tailFrames[57] = 1;
+    const auto tail = OpenTune::buildVocoderSpliceWeights(tailFrames, kSamples, 44100.0, 100.0, 0.0, source.data());
+    expectTrue(tail[441 * 57 + 200] == 1.0f && tail.back() < 0.01f,
+               "splice: fade-out finishes inside the chunk near its end");
+    std::vector<uint8_t> headFrames(static_cast<size_t>(kFrames), 0);
+    headFrames[1] = 1;
+    const auto head = OpenTune::buildVocoderSpliceWeights(headFrames, kSamples, 44100.0, 100.0, 0.0, source.data());
+    expectTrue(head.front() < 0.01f && head[441 + 200] == 1.0f,
+               "splice: fade-in starts inside the chunk near its start");
+}
+
 int main()
 {
     testIdentityRampSampleAlignment();
@@ -2685,6 +2887,10 @@ int main()
     testLightPitchRoutingBounds();
     testShiftChunkSkipsStaleHeldPeriodForRateContract();
     testStereoChannelsShareRepairedTimeline();
+    testIdentityRealignsAfterEditedSpan();
+    testClearIdentityCorrections();
+    testPlanLightRenderSplitsPerFrame();
+    testVocoderSpliceWeightsAndMix();
 
     if (g_failures == 0) {
         std::printf("All AutoTunePitchShifter tests passed.\n");
