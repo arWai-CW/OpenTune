@@ -254,4 +254,23 @@ bool TimeGridSnapshot::isIdentity() const noexcept
     return true;
 }
 
+bool TimeGridSnapshot::isIdentityInOutputRange(double begin, double end) const noexcept
+{
+    if (empty() || !std::isfinite(begin) || !std::isfinite(end) || end <= begin)
+        return false;
+
+    const auto first = std::upper_bound(handles_.begin(), handles_.end(), begin,
+        [](double time, const TimeHandle& handle) { return time < handle.output_seconds; });
+    constexpr double boundaryEpsilon = 1.0e-9;
+    for (auto right = std::max(first, handles_.begin() + 1); right != handles_.end(); ++right) {
+        const auto left = right - 1;
+        if (left->output_seconds >= end - boundaryEpsilon)
+            break;
+        if (right->output_seconds > begin + boundaryEpsilon
+            && (left->source_seconds != left->output_seconds || right->source_seconds != right->output_seconds))
+            return false;
+    }
+    return true;
+}
+
 } // namespace OpenTune

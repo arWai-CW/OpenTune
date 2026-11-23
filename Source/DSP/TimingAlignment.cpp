@@ -330,12 +330,16 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
     }
 
     auto handles = targetGrid.handles();
+    const double firstOutput = std::max(0.0, targetPlacement.projectTimelineTimeToContent(begin));
+    const double lastOutput = std::min(targetGrid.totalDurationSeconds(), targetPlacement.projectTimelineTimeToContent(end));
     // Opening the time tool can seed an untouched identity grid. Those seeds
     // aren't manual edits and shouldn't block detected attacks in the overlap.
-    if (targetGrid.isIdentity()) {
+    if (targetGrid.isIdentityInOutputRange(firstOutput, lastOutput)) {
+        constexpr double boundaryEpsilon = 1.0e-9;
         handles.erase(std::remove_if(handles.begin(), handles.end(), [&](const auto& handle) {
-            const auto time = targetPlacement.projectContentTimeToTimeline(handle.output_seconds);
-            return handle.kind == HandleKind::InternalOnset && time > begin && time < end;
+            return handle.kind == HandleKind::InternalOnset
+                && handle.output_seconds > firstOutput + boundaryEpsilon
+                && handle.output_seconds < lastOutput - boundaryEpsilon;
         }), handles.end());
     }
     uint64_t id = 0;
@@ -351,8 +355,6 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
             return true;
         return insertAnchor(handles, {++id, targetGrid.tauInverse(output), output, HandleKind::InternalOnset});
     };
-    const double firstOutput = std::max(0.0, targetPlacement.projectTimelineTimeToContent(begin));
-    const double lastOutput = std::min(targetGrid.totalDurationSeconds(), targetPlacement.projectTimelineTimeToContent(end));
     const auto lockBoundary = [&](double output, double step) -> std::optional<double> {
         for (int attempt = 0; attempt <= 12 && output >= firstOutput && output <= lastOutput;
              ++attempt, output += step)

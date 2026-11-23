@@ -137,6 +137,7 @@ public:
      * O(N).
      */
     bool isIdentity() const noexcept;
+    bool isIdentityInOutputRange(double begin, double end) const noexcept;
 
 private:
     explicit TimeGridSnapshot(std::vector<TimeHandle> h)
