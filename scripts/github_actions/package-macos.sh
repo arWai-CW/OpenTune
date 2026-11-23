@@ -640,7 +640,7 @@ echo "  ✓ ${APP_DEST}"
 # ── 安装 VST3 插件 ──────────────────────────────────────────────────────────
 echo "▶ 安装 VST3 插件"
 mkdir -p "$(dirname "${VST3_DEST}")"
-if [ -d "${VST3_DEST}" ]; then
+if [ -e "${VST3_DEST}" ] || [ -L "${VST3_DEST}" ]; then
     rm -rf "${VST3_DEST}"
 fi
 cp -R "${VST3_SRC}" "${VST3_DEST}"
@@ -744,7 +744,7 @@ echo "  ✓ ${APP_DEST}"
 # ── Install VST3 plugin ──────────────────────────────────────────────────────
 echo "▶ Installing VST3 plugin"
 mkdir -p "$(dirname "${VST3_DEST}")"
-if [ -d "${VST3_DEST}" ]; then
+if [ -e "${VST3_DEST}" ] || [ -L "${VST3_DEST}" ]; then
     rm -rf "${VST3_DEST}"
 fi
 cp -R "${VST3_SRC}" "${VST3_DEST}"
