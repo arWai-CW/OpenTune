@@ -14,7 +14,6 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
-#include <thread>
 
 namespace OpenTune {
 void AppLogger::debug(const juce::String&) {}
@@ -78,7 +77,7 @@ void measure(const char* label, double seconds, Run run)
             samples.push_back(time);
     }
     std::sort(samples.begin(), samples.end());
-    std::cout << "- " << label << ' ' << seconds << " s: median " << samples[measured/2]
+    std::cout << "- " << label << ' ' << seconds << " s: median " << samples[measured / 2]
               << " ms, range " << samples.front() << "–" << samples.back()
               << " ms, output " << count << ", mean |output| " << absMean << '\n';
 }
@@ -100,7 +99,7 @@ int main(int argc, char** argv) try
     auto start = Clock::now();
     OpenTune::FCPEExtractor extractor(std::make_unique<Ort::Session>(env, argv[3], options(true, coreml)),
                                       std::make_shared<OpenTune::ResamplingManager>());
-    std::cout << "- FCPE session and extractor init: " << elapsedMs(start) << " ms\n";
+    std::cout << "- FCPE session and extractor init: " << elapsedMs(start) << " ms\n" << std::flush;
     for (const int seconds : {5, 20})
     {
         constexpr int sampleRate = 48000;
@@ -121,7 +120,7 @@ int main(int argc, char** argv) try
 
     start = Clock::now();
     OpenTune::PCNSFHifiGANVocoder vocoder(std::make_unique<Ort::Session>(env, argv[4], options(false, coreml)));
-    std::cout << "- HiFiGAN session and vocoder init: " << elapsedMs(start) << " ms\n";
+    std::cout << "- HiFiGAN session and vocoder init: " << elapsedMs(start) << " ms\n" << std::flush;
     for (const double seconds : {0.5, 3.0})
     {
         const size_t frames = static_cast<size_t>(std::ceil(seconds * vocoder.getSampleRate() / vocoder.getHopSize()));
@@ -132,7 +131,7 @@ int main(int argc, char** argv) try
             pitch[frame] = static_cast<float>(190.0 + 20.0 * std::sin(frame * 0.06));
             for (size_t bin = 0; bin < bins; ++bin)
                 conditioning[bin * frames + frame] = static_cast<float>(
-                    -2.0 - 6.5 * static_cast<double>(bin)/bins + 0.6 * std::sin(frame * 0.15 + bin * 0.6));
+                    -2.0 - 6.5 * static_cast<double>(bin) / bins + 0.6 * std::sin(frame * 0.15 + bin * 0.6));
         }
         measure("HiFiGAN render synthesis", seconds, [&] {
             return vocoder.synthesize(pitch, {}, conditioning.data(), conditioning.size(), runOptions);
