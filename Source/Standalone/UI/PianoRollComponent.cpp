@@ -3367,6 +3367,7 @@ AudioEditingScheme::ParameterEditResult PianoRollComponent::editParameter(AudioE
         for (const auto& [startFrame, endFrameExclusive] : frameSel.ranges) {
             if (endFrameExclusive <= startFrame) continue;
             if (!currentCurve_->hasCorrectionInRange(startFrame, endFrameExclusive)) continue;
+            const std::vector<F0FrameRange> replacementRanges{{startFrame, endFrameExclusive}};
             snap = scratchCurve->applyCorrectionToRange(
                 notes,
                 startFrame,
@@ -3374,7 +3375,8 @@ AudioEditingScheme::ParameterEditResult PianoRollComponent::editParameter(AudioE
                 static_cast<float>(contentSnapshot->pitchShiftSettings.getPitchRatio()),
                 effectiveRetuneSpeed,
                 effectiveVibratoDepth,
-                effectiveVibratoRate);
+                effectiveVibratoRate, 1.0f,
+                openDyneMixEnabled_ ? &replacementRanges : nullptr);
             anyBaked = true;
         }
         if (!anyBaked) {
