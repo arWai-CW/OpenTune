@@ -1536,6 +1536,7 @@ OpenTuneAudioProcessorEditor::resolveCurrentContentSync()
     if (const auto* dc = processorRef_.getDocumentController()) {
         const auto projections = dc->getPlaybackRegionProjectionsFor(resolveContentScopeRegions());
         juce::ARAPlaybackRegion* activeRegion = nullptr;
+        std::vector<const juce::ARAPlaybackRegion*> placedRegions;
         for (const auto& region : projections) {
             if (!region.contentKey.isValid() || !region.contentProjection.isValid())
                 continue;
@@ -1546,10 +1547,27 @@ OpenTuneAudioProcessorEditor::resolveCurrentContentSync()
             }
             if (track != sync.focusedAraTrack)
                 continue;
+            placedRegions.push_back(region.playbackRegion);
             sync.placements.push_back(makePlacement(region.contentKey, region.contentProjection,
                 region.displayColour.value_or(UIColors::noteBlock)));
         }
         processorRef_.setNotePitchAuditionTargetRegion(activeRegion);
+
+        // Hosts such as REAPER give each chopped item its own plug-in instance, so the
+        // instance scope holds one clip. Show the rest of the focused track as well;
+        // the scoped clip stays first and remains the edited one.
+        if (sync.focusedAraTrack != nullptr) {
+            for (const auto& region : dc->getPlaybackRegionProjectionsFor(
+                     sync.focusedAraTrack->getPlaybackRegions())) {
+                if (!region.contentKey.isValid() || !region.contentProjection.isValid()
+                    || std::find(placedRegions.begin(), placedRegions.end(), region.playbackRegion)
+                           != placedRegions.end())
+                    continue;
+                placedRegions.push_back(region.playbackRegion);
+                sync.placements.push_back(makePlacement(region.contentKey, region.contentProjection,
+                    region.displayColour.value_or(UIColors::noteBlock)));
+            }
+        }
 
         if (sync.placements.empty())
             return sync;
