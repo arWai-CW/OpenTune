@@ -32,6 +32,10 @@ public:
     void undo() override;
     void redo() override;
     void setErasedRangePatch() noexcept { hasErasedRangePatch_ = true; }
+    void setVolumeEnvelopePatch(AutomationLane before, AutomationLane after)
+    {
+        volumeEnvelopePatch_.emplace(std::move(before), std::move(after));
+    }
     juce::String getDescription() const override { return description_; }
     bool dependsOnContent(ContentKey key) const noexcept override { return contentKey_ == key; }
 
@@ -45,6 +49,7 @@ private:
     std::vector<F0FrameRange> beforeErasedRanges_, afterErasedRanges_;
     bool hasErasedRangePatch_ = false;
     std::vector<ContentEditRangeFrames> affectedRanges_;
+    std::optional<std::pair<AutomationLane, AutomationLane>> volumeEnvelopePatch_;
 };
 
 } // namespace OpenTune

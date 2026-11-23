@@ -31,6 +31,16 @@ struct ContentEditRangeFrames {
     int endFrameExclusive{0};
 };
 
+struct SelectedNoteResetPlan {
+    std::vector<Note> notes;
+    std::vector<ContentEditRangeFrames> pitchRanges;
+    std::optional<AutomationLane> volumeEnvelope;
+};
+
+SelectedNoteResetPlan planSelectedNoteReset(const EditableContentSnapshot& snapshot,
+                                            const std::vector<int>& selectedIndices,
+                                            uint64_t expectedNotesRevision);
+
 using ContentEditRangeSeconds = NoteRangeSeconds;
 
 struct ContentNoteRangePatch {

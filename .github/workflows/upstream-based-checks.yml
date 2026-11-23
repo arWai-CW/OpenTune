@@ -34,14 +34,14 @@ jobs:
       - name: Build
         run: >-
           cmake --build --preset windows-ara-release
-          --target OpenTune_VST3 OpenTuneAutoTuneTests OpenTunePlaybackCacheRealtimeTests OpenTunePitchReferenceTests OpenTuneTimeStretchTests ARALifecycleContractTests OpenTuneAppPreferencesEditorSizeTests
+          --target OpenTune_VST3 OpenTuneAutoTuneTests OpenTunePlaybackCacheRealtimeTests OpenTunePitchReferenceTests OpenTuneTimeStretchTests ARALifecycleContractTests OpenTuneAppPreferencesEditorSizeTests OpenTuneSelectedNoteResetTests
           OpenTuneDrawNoteEditTests OpenTuneSelectedNoteParameterEditTests
 
       - name: Test
         run: >-
           ctest --test-dir build-ara-overlay-vs18-clean -C Release
           --output-on-failure --no-tests=error
-          -R '^(AutoTunePitchShifterTests|PlaybackCacheRealtimeTests|PitchReferenceTests|TimeStretchTests|ARALifecycleContractTests|AppPreferencesEditorSizeTests|DrawNoteEditTests|SelectedNoteParameterEditTests)$'
+          -R '^(AutoTunePitchShifterTests|PlaybackCacheRealtimeTests|PitchReferenceTests|TimeStretchTests|ARALifecycleContractTests|AppPreferencesEditorSizeTests|SelectedNoteResetTests|DrawNoteEditTests|SelectedNoteParameterEditTests)$'
 
   macos:
     name: macOS Universal2 build

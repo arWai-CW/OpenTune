@@ -5456,6 +5456,49 @@ OpenTuneAudioProcessor::SelectedNoteEqEditResult OpenTuneAudioProcessor::editSel
     return result;
 }
 
+ContentCommitSnapshot OpenTuneAudioProcessor::restoreSelectedPianoRollNotes(
+    ContentKey key, const std::vector<int>& selectedIndices, uint64_t expectedNotesRevision)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    const auto before = getContentSnapshot(key);
+    if (before == nullptr || contentCommands_ == nullptr)
+        return {};
+
+    auto plan = planSelectedNoteReset(*before, selectedIndices, expectedNotesRevision);
+    if (plan.pitchRanges.empty() && !plan.volumeEnvelope)
+        return {};
+
+    const auto description = LOC(kRestoreSelectedNotes);
+    auto after = before;
+    std::unique_ptr<PianoRollEditAction> pitchAction;
+    if (!plan.pitchRanges.empty()) {
+        after = commitContentNotesAndSegmentsInRanges(key, std::move(plan.notes), {}, plan.pitchRanges);
+        if (after == nullptr)
+            return {};
+        pitchAction = contentCommands_->createPianoRollEditAction(
+            key, before->notes, before->pitchCurve->getCorrectionSegments(), after,
+            plan.pitchRanges, description);
+    }
+
+    if (plan.volumeEnvelope) {
+        if (auto withGain = commitVolumeEnvelope(key, *plan.volumeEnvelope)) {
+            after = std::move(withGain);
+            if (pitchAction)
+                pitchAction->setVolumeEnvelopePatch(before->volumeEnvelope, std::move(*plan.volumeEnvelope));
+            else
+                undoManager_.addAction(std::make_unique<VolumeEnvelopeEditAction>(
+                    contentCommands_, key, description, before->volumeEnvelope, std::move(*plan.volumeEnvelope)));
+        }
+    }
+    if (pitchAction)
+        undoManager_.addAction(std::move(pitchAction));
+    if (after == before)
+        return {};
+
+    notifyContentEditCompleted(key);
+    return after;
+}
+
 SelectedNoteDeleteResult OpenTuneAudioProcessor::deleteSelectedPianoRollNotes(
     ContentKey key,
     const std::vector<int>& selectedNoteIndices,

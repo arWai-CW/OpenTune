@@ -27,6 +27,7 @@
 #if JucePlugin_Enable_ARA
 #include "ARA/OpenTuneDocumentController.h"
 #include "DSP/TimingAlignment.h"
+#include "UI/ToolbarIcons.h"
 #include "Utils/TimeGridEditAction.h"
 #endif
 #include "Content/ContentKey.h"
@@ -108,7 +109,12 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
           LocalizationManager::LanguageState{ appPreferences_.getState().shared.language }))
     , languageBinding_(languageState_)
     , menuBar_(processor, MenuBarComponent::Profile::Plugin)
-    , topBar_(menuBar_, transportBar_)
+#if JucePlugin_Enable_ARA
+    , referenceTrackButton_(LOC(kReferenceTrack), ToolbarIcons::getTracksIcon())
+    , tuneToReferenceButton_(LOC(kTuneToPitchReference), ToolbarIcons::getAutoTuneIcon())
+    , alignTimingButton_(LOC(kAlignTimingToReference), ToolbarIcons::getTimeToolIcon())
+#endif
+    , topBar_(menuBar_, transportBar_, parameterPanel_.getToolStrip())
     , pianoRoll_(processor.getPlayHeadState(), processor.getUndoManager(),
                  [this](SpectrumArray& spectrum, SpectrumArray& peaks) {
                      processorRef_.copyOutputSpectrum(spectrum, peaks);
@@ -139,6 +145,8 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     // Undo/Redo 菜单项实时反映撤销栈状态
     menuBar_.canUndoQuery = [this]() { return processorRef_.getUndoManager().canUndo(); };
     menuBar_.canRedoQuery = [this]() { return processorRef_.getUndoManager().canRedo(); };
+    menuBar_.canRestoreSelectedNotesQuery = [this]() { return pianoRoll_.canRestoreSelectedNotes(); };
+    menuBar_.onRestoreSelectedNotes = [this]() { pianoRoll_.restoreSelectedNotes(); };
     LocalizationManager::getInstance().addListener(this);
 
     transportBar_.addListener(this);
@@ -246,10 +254,13 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
         showTransportMenu(2, transportBar_.getViewButton());
     };
 
-    // Accessibility: the plugin has no track panel and cannot hide the parameter panel, so the
-    // Tracks and Props toggles do nothing here. They stay on screen as in the original, but leave
-    // the Tab order and the screen reader tree, where they read as working "pressed" buttons.
-    topBar_.setSidePanelTogglesAccessible(false);
+    topBar_.setTrackPanelToggleVisible(false);
+    topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+    topBar_.onToggleParameterPanel = [this] {
+        isParameterPanelVisible_ = !isParameterPanelVisible_;
+        topBar_.setSidePanelsVisible(false, isParameterPanelVisible_);
+        resized();
+    };
 
     // The plugin's piano roll has no use for Esc: REAPER gets it and closes the FX window.
     pianoRoll_.setEscapePassesToHost(true);
@@ -273,10 +284,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
     tuneToReferenceButton_.onClick = [this] { tuneToPitchReference(); };
     alignTimingButton_.onClick = [this] { alignTimingToPitchReference(); };
     for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
-        contentRoot_.addChildComponent(*button);
+        topBar_.addToolAction(*button);
     refreshReferenceControls();
 #endif
-    contentRoot_.addAndMakeVisible(parameterPanel_);
+    contentRoot_.addChildComponent(parameterPanel_);
     parameterPanel_.addListener(this);
     parameterPanel_.onPitchGridModeChanged = [this](PitchGridMode mode) {
         if (auto* handler = pianoRoll_.getToolHandler())
@@ -319,7 +330,10 @@ OpenTuneAudioProcessorEditor::OpenTuneAudioProcessorEditor(OpenTuneAudioProcesso
                 [this] { syncSharedAppPreferences(); });
         },
         [this](bool) { resized(); },
-        [this] { pianoRoll_.grabKeyboardFocus(); });
+        [this] {
+            resized();
+            pianoRoll_.grabKeyboardFocus();
+        });
     contentRoot_.addChildComponent(*onboardingOverlay_);
 
     // Upstream 59387696 dropped the per-tick preference sync and left no call here, so a
@@ -434,27 +448,19 @@ void OpenTuneAudioProcessorEditor::resized()
     bounds.reduce(gap, gap);
 
     // TopBar: 固定高度
-    constexpr int topBarHeight = TOP_BAR_HEIGHT;
+    constexpr int topBarHeight = TOP_BAR_HEIGHT + TopBarComponent::kToolStripHeight;
     topBar_.setBounds(bounds.removeFromTop(topBarHeight));
     bounds.removeFromTop(gap);
 
-#if JucePlugin_Enable_ARA
-    if (referenceTrackButton_.isVisible()) {
-        auto row = bounds.removeFromTop(28);
-        const int actionWidth = juce::jmax(0, row.getWidth() - 2 * gap) / 3;
-        referenceTrackButton_.setBounds(row.removeFromLeft(actionWidth));
-        row.removeFromLeft(gap);
-        tuneToReferenceButton_.setBounds(row.removeFromLeft(actionWidth));
-        row.removeFromLeft(gap);
-        alignTimingButton_.setBounds(row);
-        bounds.removeFromTop(gap);
-    }
-#endif
-
     // 右侧 ParameterPanel
-    constexpr int paramPanelWidth = PARAMETER_PANEL_WIDTH;
-    parameterPanel_.setBounds(bounds.removeFromRight(paramPanelWidth));
-    bounds.removeFromRight(gap);
+    const bool showParameterPanel = isParameterPanelVisible_
+        || (onboardingOverlay_ != nullptr && onboardingOverlay_->isActive());
+    parameterPanel_.setVisible(showParameterPanel);
+    if (showParameterPanel)
+    {
+        parameterPanel_.setBounds(bounds.removeFromRight(PARAMETER_PANEL_WIDTH));
+        bounds.removeFromRight(gap);
+    }
 
     // 中央 PianoRoll
     pianoRoll_.setBounds(bounds);
@@ -605,7 +611,7 @@ void OpenTuneAudioProcessorEditor::timerCallback()
     if (processorRef_.isBoundToARA())
         processorRef_.collectPlaybackSnapshots();
     const bool hasAraController = processorRef_.getDocumentController() != nullptr;
-    if (hasAraController != referenceTrackButton_.isVisible())
+    if (hasAraController != topBar_.areToolActionsVisible())
         refreshReferenceControls();
 #endif
     applyUiZoomIfNeeded();
@@ -1067,29 +1073,32 @@ bool OpenTuneAudioProcessorEditor::canAlignTimingToReference() const
 void OpenTuneAudioProcessorEditor::refreshReferenceControls()
 {
     const bool visible = processorRef_.getDocumentController() != nullptr;
-    const bool visibilityChanged = visible != referenceTrackButton_.isVisible();
-    for (auto* button : { &referenceTrackButton_, &tuneToReferenceButton_, &alignTimingButton_ })
-        button->setVisible(visible);
+    topBar_.setToolActionsVisible(visible);
     if (visible) {
-        referenceTrackButton_.setButtonText(LOC(kReferenceTrack) + ": "
-            + (pitchReferenceTrack_ != nullptr ? referenceTrackName(*pitchReferenceTrack_) : LOC(kOff)));
-        referenceTrackButton_.setTooltip(referenceTrackButton_.getButtonText());
-        tuneToReferenceButton_.setButtonText(LOC(kTuneToPitchReference));
-        alignTimingButton_.setButtonText(LOC(kAlignTimingToReference));
-
         const bool hasReference = pitchReferenceTrack_ != nullptr;
         const bool canAlign = canAlignTimingToReference();
+        const auto referenceTitle = LOC(kReferenceTrack) + ": "
+            + (hasReference ? referenceTrackName(*pitchReferenceTrack_) : LOC(kOff));
+        const auto tuneTitle = LOC(kTuneToPitchReference);
+        const auto alignTitle = LOC(kAlignTimingToReference);
+        referenceTrackButton_.setToolbarLabel(LOC(kReferenceToolbarLabel));
+        tuneToReferenceButton_.setToolbarLabel(LOC(kTuneReferenceToolbarLabel));
+        alignTimingButton_.setToolbarLabel(LOC(kAlignReferenceToolbarLabel));
+        referenceTrackButton_.setTitle(referenceTitle);
+        tuneToReferenceButton_.setTitle(tuneTitle);
+        alignTimingButton_.setTitle(alignTitle);
+
         const auto chooseReference = LOC_RAW("Choose a reference track first.");
+        referenceTrackButton_.setTooltip(referenceTitle);
+        referenceTrackButton_.setToggleState(hasReference, juce::dontSendNotification);
         tuneToReferenceButton_.setEnabled(hasReference);
         tuneToReferenceButton_.setAlpha(hasReference ? 1.0f : 0.55f);
-        tuneToReferenceButton_.setTooltip(hasReference ? tuneToReferenceButton_.getButtonText() : chooseReference);
+        tuneToReferenceButton_.setTooltip(hasReference ? tuneTitle : chooseReference);
         alignTimingButton_.setEnabled(canAlign);
         alignTimingButton_.setAlpha(canAlign ? 1.0f : 0.55f);
         alignTimingButton_.setTooltip(!hasReference ? chooseReference
-            : timingAlignmentRunning_ ? LOC_RAW("Analyzing timing") : alignTimingButton_.getButtonText());
+            : timingAlignmentRunning_ ? LOC_RAW("Analyzing timing") : alignTitle);
     }
-    if (visibilityChanged)
-        resized();
 }
 
 void OpenTuneAudioProcessorEditor::setPitchReferenceTrack(juce::ARARegionSequence* track)

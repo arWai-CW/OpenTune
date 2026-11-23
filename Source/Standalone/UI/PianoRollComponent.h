@@ -348,6 +348,8 @@ public:
 
     AutoTuneApplyResult applyAutoTuneToSelection();
     AutoTuneApplyResult tuneToPitchReference();
+    bool canRestoreSelectedNotes() const;
+    void restoreSelectedNotes();
 
     // Note Copy / Paste / Duplicate
     void copySelectedNotes();
