@@ -6,8 +6,8 @@
 
 | Requirement | Windows | macOS |
 |-------------|---------|-------|
-| **System** | Windows 10 1903+ | macOS 12.0+ (Intel / Apple Silicon) |
-| **Architecture** | x64 | universal2 (x86_64 + arm64) |
+| **System** | Windows 10 1903+ | macOS 12.0+ (Apple Silicon) |
+| **Architecture** | x64 | arm64 |
 | **Compiler** | Visual Studio 2022 (MSVC 17+) | Xcode Command Line Tools / Apple Clang |
 | **CMake** | 3.22+ | 3.22+ |
 | **Python** | Python 3 (`python`) | Python 3 (`python3`) |
@@ -15,7 +15,7 @@
 | **Build System** | MSBuild (VS Generator) / Ninja | Ninja |
 
 > **Note:** Windows builds support both Visual Studio Generator + MSBuild and Ninja. Visual Studio Generator is recommended for full development, while Ninja is suitable for quick builds.
-> macOS Release uses the single `macos-universal2-ara-ninja` preset. The same artifact supports Intel, native Apple Silicon, and DAWs running under Rosetta on Apple Silicon; Ninja is required.
+> macOS Release uses the single `macos-arm64-ara-ninja` preset and supports Apple Silicon only (no Intel Macs, no DAWs running under Rosetta); Ninja is required. The `macos-universal2-ara-ninja` preset remains for local Universal2 builds.
 
 ## Dependency Preparation
 
@@ -190,7 +190,7 @@ Except for the r8brain source included in the repository, obtain the following d
 | `ThirdParty/onnxruntime-osx-universal2-1.20.0/` | Yes | Generate it with `./scripts/build-onnxruntime-macos.sh`. The script builds from [Microsoft ONNX Runtime v1.20.0](https://github.com/microsoft/onnxruntime/tree/v1.20.0) and fetches Eigen at [this official repository revision](https://gitlab.com/libeigen/eigen/-/archive/e7248b26a1ed53fa030c5c459f7ea095dfd276ac/eigen-e7248b26a1ed53fa030c5c459f7ea095dfd276ac.zip), then builds arm64 and x86_64 separately. The packaging script does not invoke this builder. |
 | `models/fcpe.onnx` | Yes | Download from this [pinned KCKT0112/HachiTune commit](https://raw.githubusercontent.com/KCKT0112/HachiTune/d68808c37dede264d80d2d1050dce27af34ad654/Resources/models/fcpe.onnx); verify SHA-256 `013b507acd406de122b61ee497300ac6be082511101bc2136b886e48d9737e5d`. The upstream model author is [CNChTu/FCPE](https://github.com/CNChTu/FCPE). |
 | `pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` | Yes | Download the `.oudep` linked above and unzip it. Place its `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` at this path. The build copies it to `models/hifigan.onnx`. |
-Recommended macOS Buildbot order: obtain the required dependencies and models above from their third-party sources; run `./scripts/build-onnxruntime-macos.sh` if the ORT package is not cached; then run `./scripts/package-macos.sh --format pkg`. The packaging script configures and builds Universal2, validates the artifacts, and creates the PKG. `Installer/NOTICE.md` is included in the repository.
+Recommended macOS Buildbot order: obtain the required dependencies and models above from their third-party sources; run `./scripts/build-onnxruntime-macos.sh` if the ORT package is not cached; then run `./scripts/package-macos.sh --format pkg`. The packaging script configures and builds arm64, thins the universal2 ORT dylib to arm64, validates the artifacts, and creates the PKG. `Installer/NOTICE.md` is included in the repository.
 
 ## Complete Directory Structure Overview
 
@@ -313,17 +313,17 @@ For development in Visual Studio IDE:
 **macOS (Ninja + CMake)**
 
 ```bash
-# macOS Universal2 Release (x86_64 + arm64, minimum macOS 12.0)
-cmake --preset macos-universal2-ara-ninja
-cmake --build --preset macos-universal2-ara-release
+# macOS Apple Silicon Release (arm64, minimum macOS 12.0)
+cmake --preset macos-arm64-ara-ninja
+cmake --build --preset macos-arm64-ara-release
 ```
 
 Packaging commands:
 ```bash
-# Generate a Universal2 PKG by default
+# Generate an arm64 PKG by default
 ./scripts/package-macos.sh
 
-# Optional: generate a Universal2 DMG
+# Optional: generate an arm64 DMG
 ./scripts/package-macos.sh --format dmg
 
 # Generate both PKG and DMG
@@ -336,9 +336,9 @@ The PKG installs the app in `/Applications` and the VST3 and AU in the system-wi
 
 | Format | Windows | macOS |
 |--------|---------|-------|
-| Standalone | `build-ara-overlay-vs18-clean/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.exe` | `build-macos-universal2-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app` |
-| VST3 ARA2 | `build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` | `build-macos-universal2-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` |
-| AUv2 | — | `build-macos-universal2-ninja/OpenTuneAU_artefacts/Release/AU/OpenTune.component/` |
+| Standalone | `build-ara-overlay-vs18-clean/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.exe` | `build-macos-arm64-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app` |
+| VST3 ARA2 | `build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` | `build-macos-arm64-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` |
+| AUv2 | — | `build-macos-arm64-ninja/OpenTuneAU_artefacts/Release/AU/OpenTune.component/` |
 
 After build completion, runtime DLLs, model files, and D3D12 directory will be automatically copied to the artifact directory, requiring no manual operation.
 

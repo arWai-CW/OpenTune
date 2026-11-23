@@ -81,10 +81,10 @@ jobs:
           fi
 
   macos:
-    name: macOS Universal2
+    name: macOS arm64
     needs: prepare
     # macos-15（arm64）长期拿不到 hosted runner，排队 15 分钟后被取消；
-    # macos-15-intel 池可用。包体由 package-macos.sh 交叉编译并 lipo 校验为 Universal2。
+    # macos-15-intel 池可用。包体由 package-macos.sh 交叉编译为 arm64 并 lipo 校验。
     runs-on: macos-15-intel
     env:
       OPENTUNE_BUILD_LABEL: ${{ needs.prepare.outputs.label }}
@@ -182,7 +182,7 @@ jobs:
       - name: Upload macOS packages
         uses: actions/upload-artifact@v4
         with:
-          name: OpenTune-macOS-Universal2
+          name: OpenTune-macOS-arm64
           path: dist/*.pkg
           if-no-files-found: error
 
@@ -315,7 +315,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             tag="${GITHUB_REF_NAME}"
           else
-            pkgs=(artifacts/OpenTune-macOS-Universal2/*.pkg)
+            pkgs=(artifacts/OpenTune-macOS-arm64/*.pkg)
             if [ "${#pkgs[@]}" -ne 1 ]; then
               echo "Expected one pkg to name the release, found ${#pkgs[@]}"
               exit 1
@@ -328,7 +328,7 @@ jobs:
             tag="v${version}"
           fi
           assets=()
-          for file in artifacts/OpenTune-macOS-Universal2/*; do
+          for file in artifacts/OpenTune-macOS-arm64/*; do
             if [ -f "${file}" ]; then
               assets+=("${file}")
             fi
@@ -348,5 +348,5 @@ jobs:
             gh release create "${tag}" "${assets[@]}" \
               --target "${GITHUB_SHA}" \
               --title "OpenTune ${tag}" \
-              --notes "The macOS package is a notarized Universal2 PKG. The Windows package is a signed Setup installer."
+              --notes "The macOS package is a notarized Apple Silicon (arm64) PKG. The Windows package is a signed Setup installer."
           fi
