@@ -8,7 +8,7 @@ namespace {
 
 constexpr double kReferencePitchCenterWindowSeconds = 0.4;
 constexpr double kReferencePitchOffsetJumpThresholdCents = 50.0;
-constexpr double kReferencePitchMinimumJumpSegmentSeconds = 0.12;
+constexpr double kReferencePitchOffsetMedianWindowSeconds = 0.12;
 constexpr double kReferencePitchChangeToleranceCents = 0.5;
 constexpr double kPi = 3.14159265358979323846;
 
@@ -86,8 +86,11 @@ PitchReferenceCorrection planPitchReferenceCorrection(
     if (centerWindowFrames % 2 == 0)
         ++centerWindowFrames;
     const int centerWindowRadius = centerWindowFrames / 2;
-    const int minimumJumpSegmentFrames = std::max(1, static_cast<int>(std::ceil(
-        kReferencePitchMinimumJumpSegmentSeconds / frameSeconds)));
+    int medianWindowFrames = std::max(1, static_cast<int>(std::lround(
+        kReferencePitchOffsetMedianWindowSeconds / frameSeconds)));
+    if (medianWindowFrames % 2 == 0)
+        ++medianWindowFrames;
+    const int medianWindowRadius = medianWindowFrames / 2;
     const auto& originalF0 = target.curve->getOriginalF0();
 
     struct RunFrame
@@ -103,61 +106,39 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
-            std::vector<int> noteBoundaries;
+            std::vector<float> filteredOffsets(static_cast<size_t>(count));
+            std::vector<float> medianWindow;
+            medianWindow.reserve(static_cast<size_t>(medianWindowFrames));
+            for (int i = 0; i < count; ++i) {
+                const int begin = std::max(0, i - medianWindowRadius);
+                const int end = std::min(count, i + medianWindowRadius + 1);
+                medianWindow.clear();
+                for (int j = begin; j < end; ++j)
+                    medianWindow.push_back(run[static_cast<size_t>(j)].offsetCents);
+                std::sort(medianWindow.begin(), medianWindow.end());
+                const size_t middle = medianWindow.size() / 2;
+                float median = medianWindow[middle];
+                if (medianWindow.size() % 2 == 0)
+                    median = (medianWindow[middle - 1] + medianWindow[middle]) * 0.5f;
+                filteredOffsets[static_cast<size_t>(i)] = median;
+            }
+
+            std::vector<int> boundaries{0, count};
             for (const auto& note : target.notes) {
                 const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
                 const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
                 if (noteStart > 0 && noteStart < count)
-                    noteBoundaries.push_back(noteStart);
+                    boundaries.push_back(noteStart);
                 if (noteEnd > 0 && noteEnd < count)
-                    noteBoundaries.push_back(noteEnd);
+                    boundaries.push_back(noteEnd);
             }
-            std::sort(noteBoundaries.begin(), noteBoundaries.end());
-            noteBoundaries.erase(std::unique(noteBoundaries.begin(), noteBoundaries.end()),
-                                 noteBoundaries.end());
-
-            std::vector<int> jumpBoundaries;
             for (int i = 1; i < count; ++i) {
-                if (std::abs(static_cast<double>(run[static_cast<size_t>(i)].offsetCents)
-                        - run[static_cast<size_t>(i - 1)].offsetCents) > kReferencePitchOffsetJumpThresholdCents
-                    && !std::binary_search(noteBoundaries.begin(), noteBoundaries.end(), i))
-                    jumpBoundaries.push_back(i);
+                if (std::abs(static_cast<double>(filteredOffsets[static_cast<size_t>(i)])
+                        - filteredOffsets[static_cast<size_t>(i - 1)]) > kReferencePitchOffsetJumpThresholdCents)
+                    boundaries.push_back(i);
             }
-
-            const auto buildBoundaries = [&] {
-                std::vector<int> result{0, count};
-                result.insert(result.end(), noteBoundaries.begin(), noteBoundaries.end());
-                result.insert(result.end(), jumpBoundaries.begin(), jumpBoundaries.end());
-                std::sort(result.begin(), result.end());
-                result.erase(std::unique(result.begin(), result.end()), result.end());
-                return result;
-            };
-            auto boundaries = buildBoundaries();
-            std::vector<int> mergedJumpBoundaries;
-            for (size_t boundaryIndex = 1; boundaryIndex < boundaries.size(); ++boundaryIndex) {
-                const int segmentStart = boundaries[boundaryIndex - 1];
-                const int segmentEnd = boundaries[boundaryIndex];
-                if (segmentEnd - segmentStart >= minimumJumpSegmentFrames)
-                    continue;
-                const bool startsAtJump = std::binary_search(
-                    jumpBoundaries.begin(), jumpBoundaries.end(), segmentStart);
-                const bool endsAtJump = std::binary_search(
-                    jumpBoundaries.begin(), jumpBoundaries.end(), segmentEnd);
-                if (!startsAtJump || !endsAtJump)
-                    continue;
-                mergedJumpBoundaries.push_back(segmentStart);
-                mergedJumpBoundaries.push_back(segmentEnd);
-            }
-            if (!mergedJumpBoundaries.empty()) {
-                std::sort(mergedJumpBoundaries.begin(), mergedJumpBoundaries.end());
-                mergedJumpBoundaries.erase(std::unique(mergedJumpBoundaries.begin(),
-                    mergedJumpBoundaries.end()), mergedJumpBoundaries.end());
-                for (const int boundary : mergedJumpBoundaries) {
-                    jumpBoundaries.erase(std::remove(jumpBoundaries.begin(), jumpBoundaries.end(),
-                                                     boundary), jumpBoundaries.end());
-                }
-                boundaries = buildBoundaries();
-            }
+            std::sort(boundaries.begin(), boundaries.end());
+            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
 
             PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
                                            PitchCorrectionSegment::Source::HandDraw};
@@ -175,7 +156,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     const int lag = j > i ? j - i : i - j;
                     const double weight = centerWindowRadius == 0 ? 1.0
                         : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
-                    weightedOffsetSum += run[static_cast<size_t>(j)].offsetCents * weight;
+                    weightedOffsetSum += filteredOffsets[static_cast<size_t>(j)] * weight;
                     weightSum += weight;
                 }
                 const double smoothedCents = weightedOffsetSum / weightSum;

@@ -179,6 +179,90 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
+bool testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()
+{
+    constexpr int frameCount = 90;
+    constexpr int ornamentStartFrame = 20;
+    constexpr int ornamentEndFrame = 26;
+    constexpr int stepFrame = 34;
+    constexpr double frameSeconds = 0.01;
+    constexpr double baseHz = 200.0;
+    const float firstReferenceHz = 220.0f;
+    const float ornamentHz = static_cast<float>(firstReferenceHz * std::exp2(150.0 / 1200.0));
+    const float secondReferenceHz = static_cast<float>(firstReferenceHz * std::exp2(100.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount, firstReferenceHz);
+    for (int i = ornamentStartFrame; i < ornamentEndFrame; ++i)
+        referenceF0[static_cast<size_t>(i)] = ornamentHz;
+    for (int i = stepFrame; i < frameCount; ++i)
+        referenceF0[static_cast<size_t>(i)] = secondReferenceHz;
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(baseHz)), {}, 1, 100.0)};
+    target.notes = {{0.0, duration, static_cast<float>(baseHz)}};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    return nearPitch(corrected[2], firstReferenceHz, 1.0)
+        && nearPitch(corrected[stepFrame - 1], firstReferenceHz, 1.0)
+        && nearPitch(corrected[stepFrame + 10], secondReferenceHz, 2.0)
+        && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
+}
+
+bool testNoteBoundaryReferenceOvershootIsMedianFiltered()
+{
+    constexpr int frameCount = 100;
+    constexpr int boundaryFrame = 40;
+    constexpr int overshootEndFrame = 45;
+    constexpr double frameSeconds = 0.01;
+    constexpr double baseHz = 200.0;
+    const float firstReferenceHz = 220.0f;
+    const float secondReferenceHz = static_cast<float>(firstReferenceHz * std::exp2(100.0 / 1200.0));
+    const float overshootHz = static_cast<float>(secondReferenceHz * std::exp2(120.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount);
+    for (int i = 0; i < frameCount; ++i) {
+        referenceF0[static_cast<size_t>(i)] = i < boundaryFrame ? firstReferenceHz
+            : i < overshootEndFrame ? overshootHz : secondReferenceHz;
+    }
+    const double duration = frameCount * frameSeconds;
+    const double boundarySeconds = boundaryFrame * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(baseHz)), {}, 1, 100.0)};
+    target.notes = {
+        {0.0, boundarySeconds, static_cast<float>(baseHz)},
+        {boundarySeconds, duration, static_cast<float>(baseHz)},
+    };
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    double maximumOvershootDeviationCents = 0.0;
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int i = boundaryFrame; i < overshootEndFrame; ++i) {
+        maximumOvershootDeviationCents = std::max(maximumOvershootDeviationCents,
+                                                  pitchErrorCents(corrected[i], secondReferenceHz));
+    }
+    return nearPitch(corrected[boundaryFrame - 2], firstReferenceHz, 1.0)
+        && maximumOvershootDeviationCents < 40.0
+        && nearPitch(corrected[overshootEndFrame + 10], secondReferenceHz, 2.0)
+        && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
+}
+
 bool testLeadingReferenceNoteChangeKeepsJumpBoundary()
 {
     constexpr int frameCount = 60;
@@ -245,7 +329,7 @@ bool testShortReferenceOrnamentDoesNotBecomeTargetOrnament()
                                          pitchErrorCents(hz, static_cast<float>(referenceHz)));
     return nearPitch(plan.segments[0].f0Data[10], static_cast<float>(referenceHz), 1.0)
         && nearPitch(plan.segments[0].f0Data[89], static_cast<float>(referenceHz), 1.0)
-        && maximumDeviationCents < 45.0;
+        && maximumDeviationCents < 40.0;
 }
 
 bool testLegatoNotesKeepIndependentReferenceOffsets()
@@ -387,6 +471,14 @@ int main()
     }
     if (!testConstantTargetMovesPitchCenterWithoutChangingRegister()) {
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
+        return 1;
+    }
+    if (!testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()) {
+        std::fputs("FAIL: Reference tuning keeps a sustained step after an ornament and brief return\n", stderr);
+        return 1;
+    }
+    if (!testNoteBoundaryReferenceOvershootIsMedianFiltered()) {
+        std::fputs("FAIL: Reference tuning median-filters note boundary overshoot\n", stderr);
         return 1;
     }
     if (!testLeadingReferenceNoteChangeKeepsJumpBoundary()) {
