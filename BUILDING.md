@@ -6,8 +6,8 @@
 
 | 需求 | Windows | macOS |
 |------|---------|-------|
-| **系统** | Windows 10 1903+ | macOS 12.0+ (Intel / Apple Silicon) |
-| **架构** | x64 | universal2 (x86_64 + arm64) |
+| **系统** | Windows 10 1903+ | macOS 12.0+ (Apple Silicon) |
+| **架构** | x64 | arm64 |
 | **编译器** | Visual Studio 2022 (MSVC 17+) | Xcode Command Line Tools / Apple Clang |
 | **CMake** | 3.22+ | 3.22+ |
 | **Python** | Python 3 (`python`) | Python 3 (`python3`) |
@@ -15,7 +15,7 @@
 | **构建系统** | MSBuild (VS Generator) / Ninja | Ninja |
 
 > **注意：** Windows 构建支持 Visual Studio Generator + MSBuild 或 Ninja 两种方式。推荐使用 Visual Studio Generator 进行完整开发，Ninja 适合快速构建。
-> macOS Release 使用唯一的 `macos-universal2-ara-ninja` 预设；同一产物支持 Intel、Apple Silicon 原生和 Apple Silicon 上以 Rosetta 运行的 DAW，因此需要安装 Ninja。
+> macOS Release 使用唯一的 `macos-arm64-ara-ninja` 预设，仅支持 Apple Silicon（不支持 Intel Mac 及以 Rosetta 运行的 DAW），需要安装 Ninja。`macos-universal2-ara-ninja` 预设保留用于本地 Universal2 构建。
 
 ## 依赖准备
 
@@ -199,7 +199,7 @@ ThirdParty/microsoft.direct3d.d3d12.1.619.5/
 | `ThirdParty/onnxruntime-osx-universal2-1.20.0/` | 必需 | 运行 `./scripts/build-onnxruntime-macos.sh` 生成。该脚本从 [Microsoft ONNX Runtime v1.20.0](https://github.com/microsoft/onnxruntime/tree/v1.20.0) 源码构建，并从 [Eigen 官方仓库固定 revision](https://gitlab.com/libeigen/eigen/-/archive/e7248b26a1ed53fa030c5c459f7ea095dfd276ac/eigen-e7248b26a1ed53fa030c5c459f7ea095dfd276ac.zip) 获取 Eigen；分别构建 arm64、x86_64。打包脚本不会调用此脚本。 |
 | `models/fcpe.onnx` | 必需 | 从 [KCKT0112/HachiTune 固定提交](https://raw.githubusercontent.com/KCKT0112/HachiTune/d68808c37dede264d80d2d1050dce27af34ad654/Resources/models/fcpe.onnx) 下载；核对 SHA-256 为 `013b507acd406de122b61ee497300ac6be082511101bc2136b886e48d9737e5d`。模型上游作者为 [CNChTu/FCPE](https://github.com/CNChTu/FCPE)。 |
 | `pc_nsf_hifigan_44.1k_ONNX/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` | 必需 | 下载上方的 `.oudep` 并按 zip 解压，把包内的 `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.onnx` 放到该路径。构建时复制为 `models/hifigan.onnx`。 |
-推荐的 macOS Buildbot 顺序：从第三方来源获取以上必需依赖和模型；依赖未缓存时运行 `./scripts/build-onnxruntime-macos.sh`；随后运行 `./scripts/package-macos.sh --format pkg`。打包脚本会配置并构建 Universal2，再验证和生成 PKG。`Installer/NOTICE.md` 随仓库提供。
+推荐的 macOS Buildbot 顺序：从第三方来源获取以上必需依赖和模型；依赖未缓存时运行 `./scripts/build-onnxruntime-macos.sh`；随后运行 `./scripts/package-macos.sh --format pkg`。打包脚本会先运行 `patch-juce-ara.py`，再配置并构建 arm64，构建后将 VST3 符号链接到 `~/Library/Audio/Plug-Ins/VST3`（已有的非链接 VST3 会改名为 `.bak-<时间>`），将 universal2 ORT dylib 裁剪为 arm64，再验证和生成 PKG。`Installer/NOTICE.md` 随仓库提供。
 
 ## 完整目录结构概览
 
@@ -298,17 +298,17 @@ ONNX Runtime、DirectML、D3D12 和 FCPE/HifiGAN 模型都位于同一套 Releas
 **macOS (Ninja + CMake)**
 
 ```bash
-# macOS Universal2 Release (x86_64 + arm64, minimum macOS 12.0)
-cmake --preset macos-universal2-ara-ninja
-cmake --build --preset macos-universal2-ara-release
+# macOS Apple Silicon Release (arm64, minimum macOS 12.0)
+cmake --preset macos-arm64-ara-ninja
+cmake --build --preset macos-arm64-ara-release
 ```
 
 打包命令：
 ```bash
-# 默认生成 Universal2 PKG
+# 默认生成 arm64 PKG
 ./scripts/package-macos.sh
 
-# 可选：生成 Universal2 DMG
+# 可选：生成 arm64 DMG
 ./scripts/package-macos.sh --format dmg
 
 # 同时生成 PKG 与 DMG
@@ -321,9 +321,9 @@ PKG 双击安装到 `/Applications`，并将 VST3、AU 分别安装到系统级 
 
 | 格式 | Windows | macOS |
 |------|---------|-------|
-| Standalone | `build-ara-overlay-vs18-clean/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.exe` | `build-macos-universal2-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app` |
-| VST3 ARA2 | `build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` | `build-macos-universal2-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` |
-| AUv2 | — | `build-macos-universal2-ninja/OpenTuneAU_artefacts/Release/AU/OpenTune.component/` |
+| Standalone | `build-ara-overlay-vs18-clean/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.exe` | `build-macos-arm64-ninja/OpenTuneStandalone_artefacts/Release/Standalone/OpenTune.app` |
+| VST3 ARA2 | `build-ara-overlay-vs18-clean/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` | `build-macos-arm64-ninja/OpenTune_artefacts/Release/VST3/OpenTune.vst3/` |
+| AUv2 | — | `build-macos-arm64-ninja/OpenTuneAU_artefacts/Release/AU/OpenTune.component/` |
 
 构建完成后，运行时 DLL、模型文件、D3D12 目录会自动复制到产物目录旁，无需手动操作。
 
