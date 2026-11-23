@@ -19,6 +19,7 @@
     { Keys::kExternalEditCurveCorrupt, "返回的曲線檔案已損壞。外部編輯會話保持打開，請在獨立編輯器中修復或重新儲存曲線後重試。" },
     { Keys::kUndo, "撤銷" },
     { Keys::kRedo, "重做" },
+    { Keys::kRestoreSelectedNotes, "還原所選音符" },
     { Keys::kShowWaveform, "顯示波形" },
     { Keys::kPianoKeyboard, "鋼琴鍵盤" },
     { Keys::kScaleBrightness, "音階明暗" },

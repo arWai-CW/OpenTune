@@ -33,6 +33,16 @@ inline std::vector<Note> filterNotesToRange(const std::vector<Note>& notes,
     return filtered;
 }
 
+inline void sliceSegmentSamples(PitchCorrectionSegment& dest, const PitchCorrectionSegment& src,
+                                int offset, int length)
+{
+    dest.f0Data.assign(src.f0Data.begin() + offset, src.f0Data.begin() + offset + length);
+    if (static_cast<int>(src.baseF0Data.size()) >= offset + length)
+        dest.baseF0Data.assign(src.baseF0Data.begin() + offset, src.baseF0Data.begin() + offset + length);
+    else
+        dest.baseF0Data.clear();
+}
+
 // Filters incoming segments to the affected frame range and clips boundary
 // crossings, maintaining the f0Data offset so each clipped segment keeps the
 // samples that belong to its retained frame span. Segments fully outside the
@@ -59,8 +69,7 @@ inline std::vector<PitchCorrectionSegment> clipSegmentsToFrameRange(
             && startOffset + clipLen <= static_cast<int>(seg.f0Data.size())) {
             clipped.startFrame = clipStart;
             clipped.endFrame = clipEnd;
-            clipped.f0Data.assign(seg.f0Data.begin() + startOffset,
-                                  seg.f0Data.begin() + startOffset + clipLen);
+            sliceSegmentSamples(clipped, seg, startOffset, clipLen);
             filtered.push_back(std::move(clipped));
         }
     }
@@ -95,7 +104,7 @@ inline std::vector<PitchCorrectionSegment> replaceSegmentsInFrameRange(
             left.endFrame = rangeStartFrame;
             const int leftLen = left.endFrame - left.startFrame;
             if (leftLen > 0 && leftLen <= static_cast<int>(seg.f0Data.size())) {
-                left.f0Data.assign(seg.f0Data.begin(), seg.f0Data.begin() + leftLen);
+                sliceSegmentSamples(left, seg, 0, leftLen);
                 mergedSegments.push_back(std::move(left));
             }
         }
@@ -108,8 +117,7 @@ inline std::vector<PitchCorrectionSegment> replaceSegmentsInFrameRange(
             const int rightLen = right.endFrame - right.startFrame;
             if (offset >= 0 && rightLen > 0
                 && offset + rightLen <= static_cast<int>(seg.f0Data.size())) {
-                right.f0Data.assign(seg.f0Data.begin() + offset,
-                                    seg.f0Data.begin() + offset + rightLen);
+                sliceSegmentSamples(right, seg, offset, rightLen);
                 mergedSegments.push_back(std::move(right));
             }
         }

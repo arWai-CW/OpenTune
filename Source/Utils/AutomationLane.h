@@ -39,6 +39,10 @@ public:
         return prev->gainDb + (it->gainDb - prev->gainDb) * t01;
     }
 
+    float evalNoteGain(double startTime, double endTime) const {
+        return evalAt(startTime + (endTime - startTime) * 0.5);
+    }
+
     // Insert/modify breakpoints for a note's time region with ramp transitions.
     // rampDuration: smooth transition in seconds (default 5ms).
     void setRegionGain(double startTime, double endTime, float gainDb,
