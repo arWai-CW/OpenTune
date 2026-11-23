@@ -117,7 +117,6 @@
     { Keys::kGpuFirst, "GPU 優先" },
     { Keys::kCpuFirst, "CPU 優先" },
     { Keys::kHybridMode, "混合模式:小修用dsp，大修用聲碼器" },
-    { Keys::kAraF0AnalysisCache, "緩存 ARA 原始音高分析" },
     { Keys::kModelsFolder, "選擇模型資料夾…" },
     { Keys::kModelsFolderRestart, "重啓 OpenTune 或 DAW 以應用模型資料夾。" },
     { Keys::kModelsFolderSaveFailed, "無法儲存模型資料夾。" },

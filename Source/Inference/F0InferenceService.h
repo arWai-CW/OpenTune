@@ -1,10 +1,8 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
-#include <array>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 #include <functional>
@@ -12,38 +10,39 @@
 #include <atomic>
 #include "IF0Extractor.h"
 #include "../Utils/Error.h"
+#include "../Utils/AccelerationDetector.h"
 
 namespace Ort { struct Env; }
 
 namespace OpenTune {
 
-/**
- * F0 run owner identity for termination. Each extraction origin owns a distinct
- * state; shared_ptr ownership removes raw-pointer identity. Queue origin terminalization
- * closes admission first; terminateActiveRun synchronizes pending and active leases
- * through runMutex_.
- */
-class F0InferenceService;
-
+// Processor services own one state. Each ARA origin owns its own state;
+// closing it also rejects a late admission after cold initialization.
 struct F0RunOwnerState {
     std::atomic<bool> closed{false};
-    std::function<bool(const std::shared_ptr<F0InferenceService>&)> registerInferenceService;
+};
+
+struct F0ModelVersion
+{
+    juce::File file;
+    int64_t bytes{0};
+    juce::Time writeTime;
+
+    bool operator==(const F0ModelVersion& rhs) const noexcept
+    {
+        return file == rhs.file && bytes == rhs.bytes && writeTime == rhs.writeTime;
+    }
 };
 
 struct F0ExtractionConfigSnapshot
 {
     F0ModelType modelType{F0ModelType::FCPE};
     std::string modelDirectory;
-    std::string modelPath;
-    std::array<uint8_t, 32> modelWeightDigest{};
-    bool modelWeightDigestAvailable{false};
     float confidence{0.006f};
     float f0Min{32.7f};
     float f0Max{1975.5f};
-    std::string backend;
-    int algorithmVersion{1};
-    int resamplingAlgorithmVersion{1};
-    int energyAlgorithmVersion{1};
+    AccelerationDetector::BackendSelection backend;
+    uint64_t selectionRevision{0};
 };
 
 /**
@@ -52,7 +51,7 @@ struct F0ExtractionConfigSnapshot
  * Responsibilities:
  * - Configure F0 extraction: store model directory, selected model type, and
  *   extraction parameters (confidence, f0Min, f0Max) without loading an ONNX
- *   session. isInitialized() reflects "service configured", not "session loaded".
+ *   session.
  * - On-demand session lifecycle: each extractF0() call creates a local
  *   Ort::Session via ModelFactory, runs inference, and destroys the session
  *   before returning. No session persists across calls.
@@ -104,13 +103,14 @@ public:
         std::function<void(float)> progressCallback = nullptr,
         std::function<void(const std::vector<float>&, int)> partialCallback = nullptr);
 
-    std::optional<F0ExtractionConfigSnapshot> snapshotExtractionConfig(bool includeModelDigest = true) const;
+    F0ExtractionConfigSnapshot snapshotExtractionConfig() const;
     Result<std::vector<float>> extractF0ForAnalysis(
         const float* audio,
         size_t length,
         int sampleRate,
         std::shared_ptr<F0RunOwnerState> ownerState,
-        const F0ExtractionConfigSnapshot* config,
+        const F0ExtractionConfigSnapshot& config,
+        const F0ModelVersion& model,
         int& actualHopSize,
         int& actualSampleRate,
         std::string& actualBackend);
@@ -136,44 +136,12 @@ public:
     bool setF0Model(F0ModelType type, std::string* errorMessage = nullptr);
 
     /**
-     * Get current F0 model type
-     */
-    F0ModelType getCurrentF0Model() const;
-
-    /**
-     * Get available F0 models in model directory
-     */
-    std::vector<F0ModelInfo> getAvailableF0Models() const;
-
-    /**
-     * Configure F0 extraction parameters
-     */
-    void setConfidenceThreshold(float threshold);
-    void setF0Min(float minFreq);
-    void setF0Max(float maxFreq);
-
-    float getConfidenceThreshold() const;
-    float getF0Min() const;
-    float getF0Max() const;
-
-    /**
      * Get F0 extraction parameters
      */
     int getF0HopSize() const;
     int getF0SampleRate() const;
 
-    bool isInitialized() const;
-    static uint64_t getConfigurationRevision() noexcept
-    {
-        return configurationRevision_.load(std::memory_order_acquire);
-    }
-    static void advanceConfigurationRevision() noexcept
-    {
-        configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
-    }
-
 private:
-    static std::atomic<uint64_t> configurationRevision_;
     class Impl;
     std::unique_ptr<Impl> pImpl_;
 

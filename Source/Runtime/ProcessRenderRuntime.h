@@ -148,18 +148,17 @@ public:
      * shutdownAndJoin uses the same Stop path without a message completion;
      * it waits on the mutex-paired worker-exit predicate, unlocks, joins, then
      * drains every accepted async delivery while the module is still loaded.
-     * Callers may invoke it from the message thread or from any other thread:
-     * all runtime deliveries queued before the final shutdown are executed
-     * before it returns, and later deliveries are rejected, so no runtime
-     * message-thread callback remains queued after module unload.
+     * It returns after those messages have run or the message queue has
+     * destroyed them, and rejects later posts.
      */
     void shutdownAsync(std::function<void()> completion);
     void shutdownAndJoin();
 
-    // Single entry for process-runtime message-thread deliveries. Normal
-    // operation preserves juce::MessageManager::callAsync ordering; the final
-    // shutdown observes every accepted delivery through this fence.
+    // Both overloads return whether the message was accepted. The settling
+    // overload receives true on message-thread dispatch and false on rejection
+    // or queue destruction. False is value-side cleanup and may run off-thread.
     static bool postAsyncCallback(std::function<void()> callback);
+    static bool postAsyncCallback(std::function<void(bool dispatched)> settle);
 
     // Registered by ContentRenderService along its execution lease attach and
     // detach. A successful shared backend change notifies every registered
@@ -211,16 +210,20 @@ public:
     bool isVocoderReconfiguring() const noexcept;
 
     std::size_t controlQueueDepth() const noexcept;
+    bool hasActiveTransaction() const noexcept;
+
+private:
+    friend struct ProcessRenderRuntimeTestAccess;
+
+    // Production code reads only controlQueueDepth/hasActiveTransaction
+    // (Control PrefsModels). The remaining probes exist for the runtime
+    // contract tests and stay reachable through ProcessRenderRuntimeTestAccess.
     std::size_t deferredRetryCount() const noexcept;
     std::size_t deferredRetrySnapshotBytes() const;
-    bool hasActiveTransaction() const noexcept;
     int domainSubmitInFlight() const noexcept;
     uint64_t vocoderGeneration() const noexcept;
     int ownerCount() const noexcept;
     bool isControlWorkerJoinable() const noexcept;
-
-private:
-    friend struct ProcessRenderRuntimeTestAccess;
 
     ProcessRenderRuntime();
     ~ProcessRenderRuntime() = default;
@@ -285,8 +288,10 @@ private:
     // behind every accepted command and starts the worker when needed.
     void beginShutdownLocked(bool postCompletion);
     void completeAsyncShutdown(uint64_t generation);
-    bool postAsyncDelivery(std::function<void()> callback);
+    struct AsyncDelivery;
+    bool postAsyncDelivery(std::function<void(bool)> settle);
     void drainAsyncDeliveries();
+    void releaseRegisteredDeliveriesLocked() noexcept;
     void finishShutdown(uint64_t generation);
     void shutdownLocked(std::unique_lock<std::mutex>& shutdownLock);
     void postBackendChangeNotification();
@@ -320,6 +325,8 @@ private:
     bool asyncDeliveryClosed_{false}; // asyncDeliveryMutex_ protected
     int asyncPostingCount_{0}; // asyncDeliveryMutex_ protected
     int asyncOutstandingCount_{0}; // asyncDeliveryMutex_ protected
+    // Accepted deliveries awaiting dispatch or value-side release.
+    std::vector<AsyncDelivery*> asyncDeliveries_; // asyncDeliveryMutex_ protected
     int ownerCount_{0}; // shutdownMutex_ protected
     std::shared_ptr<ControlTransaction> activeTransaction_; // controlMutex_ protected
     std::mutex backendListenersMutex_;

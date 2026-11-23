@@ -221,32 +221,32 @@ void RenderCache::setCanonicalSource(
 // cropped canonical storage by resampling the retained native source. Only the
 // actual native source boundaries zero-extend; the canonical crop boundary
 // itself is filled with real PCM.
-void RenderCache::fillCanonicalContextFromNative(std::vector<float>& context,
-                                                 int64_t globalBegin,
-                                                 int64_t globalEnd,
-                                                 int64_t contextGlobalBegin,
-                                                 int channel)
+bool RenderCache::appendCanonicalContextFromNative(std::vector<float>& context,
+                                                   int64_t globalBegin,
+                                                   int64_t globalEnd,
+                                                    int channel)
 {
-    if (globalEnd <= globalBegin)
-        return;
     const auto* nativeBuffer = nativeSource_.buffer.get();
     if (nativeBuffer == nullptr
-        || nativeSource_.sampleRate <= 0.0
+        || !(nativeSource_.sampleRate > 0.0)
         || nativeBuffer->getNumChannels() <= 0
-        || nativeBuffer->getNumSamples() <= 0)
-        return;
+        || nativeBuffer->getNumSamples() <= 0) {
+        AppLogger::error("RenderCache: missing or invalid native PCM for prepared SRC halo");
+        return false;
+    }
 
     const int64_t outputLength = globalEnd - globalBegin;
-    if (outputLength > static_cast<int64_t>(std::numeric_limits<int>::max()))
-        return;
+    if (outputLength > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        AppLogger::error("RenderCache: prepared SRC halo exceeds the resampler range");
+        return false;
+    }
 
-    auto halo = preparedResampler_.resampleRange(
-        nativeBuffer->getReadPointer(channelOrFirst(channel, nativeBuffer->getNumChannels())),
-        nativeBuffer->getNumSamples(),
+    const auto halo = preparedResampler_.resampleRange(
+        nativeBuffer->getReadPointer(channelOrFirst(channel, nativeBuffer->getNumChannels())), nativeBuffer->getNumSamples(),
         nativeSource_.sampleRate, kSampleRate,
         nativeSource_.firstSourceSample, globalBegin, static_cast<int>(outputLength));
-    std::copy(halo.begin(), halo.end(),
-                context.begin() + static_cast<size_t>(globalBegin - contextGlobalBegin));
+    context.insert(context.end(), halo.begin(), halo.end());
+    return true;
 }
 
 // Builds one continuous canonical input context for the exact filter support of
@@ -260,34 +260,36 @@ std::vector<float> RenderCache::resampleCanonicalRange(
     double targetSampleRate,
     int channel)
 {
-    const int64_t inputLength = support.end - support.begin;
-    std::vector<float> context(static_cast<size_t>(inputLength), 0.0f);
-
-    const int64_t canonicalSamples = canonicalBuffer_ != nullptr
-        ? static_cast<int64_t>(canonicalBuffer_->getNumSamples()) : 0;
+    const auto* canonicalBuffer = canonicalBuffer_.get();
+    const int64_t canonicalSamples = canonicalBuffer != nullptr ? canonicalBuffer->getNumSamples() : 0;
     const int64_t canonicalGlobalEnd = firstCanonicalSample_ + canonicalSamples;
-    const int64_t localBegin = support.begin - firstCanonicalSample_;
-    const int64_t copyBegin = std::max<int64_t>(localBegin, 0);
-    const int64_t copyEnd = std::min<int64_t>(localBegin + inputLength, canonicalSamples);
-    if (canonicalBuffer_ != nullptr
-        && canonicalBuffer_->getNumChannels() > 0
-        && copyEnd > copyBegin)
-    {
-        const int sourceChannel = channelOrFirst(channel, canonicalBuffer_->getNumChannels());
-        std::copy_n(canonicalBuffer_->getReadPointer(sourceChannel) + copyBegin,
-                    static_cast<size_t>(copyEnd - copyBegin),
-                    context.data() + (copyBegin - localBegin));
+    const int64_t copyBegin = std::max(support.begin, firstCanonicalSample_);
+    const int64_t copyEnd = std::min(support.end, canonicalGlobalEnd);
+
+    const auto inputLength = static_cast<size_t>(support.end - support.begin);
+    std::vector<float> context;
+    context.reserve(inputLength);
+    if (support.begin < firstCanonicalSample_
+        && !appendCanonicalContextFromNative(context, support.begin,
+            std::min(support.end, firstCanonicalSample_), channel))
+        return {};
+
+    if (copyEnd > copyBegin) {
+        if (canonicalBuffer->getNumChannels() <= 0) {
+            AppLogger::error("RenderCache: canonical PCM has no channels for prepared SRC");
+            return {};
+        }
+        const auto* canonical = canonicalBuffer->getReadPointer(channelOrFirst(channel, canonicalBuffer->getNumChannels()));
+        context.insert(context.end(), canonical + (copyBegin - firstCanonicalSample_),
+                       canonical + (copyEnd - firstCanonicalSample_));
     }
 
-    if (support.begin < firstCanonicalSample_) {
-        fillCanonicalContextFromNative(context, support.begin,
-            std::min(support.end, firstCanonicalSample_), support.begin, channel);
-    }
-    if (support.end > canonicalGlobalEnd) {
-        fillCanonicalContextFromNative(context, std::max(support.begin, canonicalGlobalEnd),
-            support.end, support.begin, channel);
-    }
+    if (support.end > canonicalGlobalEnd
+        && !appendCanonicalContextFromNative(context, std::max(support.begin, canonicalGlobalEnd),
+            support.end, channel))
+        return {};
 
+    jassertquiet(context.size() == inputLength);
     for (const auto& edit : canonicalSnapshot.chunks) {
         if (!edit.audio || edit.audio->empty())
             continue;
@@ -444,13 +446,14 @@ bool RenderCache::rebuildPrepared(double requestedSampleRate)
 
             std::vector<float> resampled;
             try {
-                resampled = resampleCanonicalRange(
-                    *canonicalSnapshot, support, pc.startSample, outputLength, targetSr, 0);
-                if (numChannels > 1)
-                    resampled.reserve(numChannels * static_cast<size_t>(outputLength));
-                for (size_t channel = 1; channel < numChannels; ++channel) {
+                resampled.reserve(numChannels * static_cast<size_t>(outputLength));
+                for (size_t channel = 0; channel < numChannels; ++channel) {
                     auto plane = resampleCanonicalRange(*canonicalSnapshot, support,
                         pc.startSample, outputLength, targetSr, static_cast<int>(channel));
+                    if (plane.size() != static_cast<size_t>(outputLength)) {
+                        releaseRenderCacheBytes(reservedBytes);
+                        return false;
+                    }
                     resampled.insert(resampled.end(), plane.begin(), plane.end());
                 }
             } catch (...) {

@@ -1,201 +1,40 @@
 #include "F0ExtractionService.h"
-#include "../Inference/F0InferenceService.h"
-#include "../Utils/AppLogger.h"
-#include <juce_events/juce_events.h>
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
 #include "../Inference/ModelFactory.h"
-#include "../Services/F0AnalysisCache.h"
-#include "../Services/ImportedClipF0Extraction.h"
 #include "../Runtime/ProcessF0Runtime.h"
-#include "../Utils/AppPreferences.h"
+#include "../Runtime/ProcessRenderRuntime.h"
+#include "../Utils/AppLogger.h"
 #include "../Utils/ModelPathResolver.h"
+#include "ImportedClipF0Extraction.h"
+#include <juce_cryptography/juce_cryptography.h>
+#include <juce_events/juce_events.h>
 #include <algorithm>
-#endif
-
-#include <atomic>
-#include <algorithm>
-#include <condition_variable>
-#include <deque>
 #include <exception>
-#include <map>
-#include <unordered_map>
-
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
+#include <limits>
 #include <optional>
-#endif
 
 namespace OpenTune {
-namespace {
-std::atomic<uint64_t> nextF0TaskId{1};
 
-F0TaskId allocateTaskId() noexcept
-{
-    return F0TaskId{nextF0TaskId.fetch_add(1, std::memory_order_relaxed)};
-}
-}
-
-struct F0ExtractionService::SharedState
-{
-    using Commit = F0ExtractionService::CommitFn;
-    using ResultType = F0ExtractionService::Result;
-
-    struct DispatcherFailure
-    {
-        Commit callback;
-        std::shared_ptr<ResultType> result;
-    };
-
-    class DispatcherFailureMailbox final : public juce::AsyncUpdater
-    {
-    public:
-        void enqueue(Commit callback, std::shared_ptr<ResultType> result);
-        void cancelAndClear();
-        void handleAsyncUpdate() override;
-
-    private:
-        std::mutex mutex_;
-        std::deque<DispatcherFailure> queue_;
-    };
-
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-    struct AraOrigin
-    {
-        F0TaskId taskId;
-        uint64_t token{0};
-        uint64_t submissionOrder{0};
-        AraF0Pcm pcm;
-        std::vector<AraF0Receiver> receivers;
-        std::shared_ptr<F0RunOwnerState> ownerState;
-        std::optional<F0ExtractionConfigSnapshot> config;
-        std::string initializationError;
-        F0AnalysisCache::KeyConfig keyConfig;
-        F0AnalysisCache::Digest pcmDigest{};
-        F0AnalysisCache::Digest digest{};
-        bool hasTrustedDigest{false};
-        bool deliveryClaimed{false};
-    };
-
-    struct AraGroup
-    {
-        F0TaskId groupId;
-        F0TaskId ownerTaskId;
-        F0TaskId publisherTaskId;
-        bool hasDigest{false};
-        F0AnalysisCache::Digest digest{};
-        bool ownsQueueSlot{true};
-        bool publicationGranted{false};
-        SharedAraF0Outcome outcome;
-        std::vector<std::shared_ptr<AraOrigin>> origins;
-    };
-#endif
-
-    enum class Phase : uint8_t { General, Prepare, Execute };
-
-    struct Task
-    {
-        F0TaskId taskId;
-        F0RequestKey requestKey;
-        uint64_t token{0};
-        Phase phase{Phase::General};
-        std::shared_ptr<F0RunOwnerState> ownerState;
-        F0ExtractionService::ExecuteFn execute;
-        F0ExtractionService::CommitFn commit;
-        F0ExtractionService::CommitFn dispatcherFailure;
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-        std::shared_ptr<AraOrigin> origin;
-        F0TaskId groupId;
-#endif
-    };
-
-    struct ActiveEntry
-    {
-        uint64_t token{0};
-        std::shared_ptr<F0RunOwnerState> ownerState;
-        std::weak_ptr<F0InferenceService> runService;
-        bool ownsQueueSlot{false};
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-        F0TaskId groupId;
-        std::shared_ptr<AraOrigin> origin;
-#endif
-    };
-
-    explicit SharedState(F0ExtractionService::WorkerTopology workerTopology)
-        : topology(workerTopology) {}
-
-    std::function<std::shared_ptr<F0InferenceService>()> f0ServiceResolver;
-    std::deque<Task> queue;
-    size_t maxQueueSize{0};
-    size_t pendingSlots{0};
-    std::condition_variable queueCv;
-    std::unordered_map<F0TaskId, ActiveEntry, F0TaskIdHash> activeEntries;
-    std::unordered_map<ContentKey, F0TaskId> processorTaskIds;
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-    std::unordered_map<F0TaskId, std::shared_ptr<AraGroup>, F0TaskIdHash> araGroups;
-    std::map<F0AnalysisCache::Digest, F0TaskId> digestGroups;
-#endif
-    mutable std::mutex entriesMutex;
-    uint64_t tokenCounter{1};
-    uint64_t submissionCounter{1};
-    bool shutdownStarted{false};
-    F0ExtractionService::WorkerTopology topology;
-    std::shared_ptr<DispatcherFailureMailbox> dispatcherFailureMailbox;
-
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-    std::shared_ptr<AraGroup> takeAraGroupLocked(F0TaskId groupId)
-    {
-        const auto found = araGroups.find(groupId);
-        if (found == araGroups.end())
-            return {};
-        auto group = found->second;
-        if (group->hasDigest)
-        {
-            const auto digest = digestGroups.find(group->digest);
-            if (digest != digestGroups.end() && digest->second == groupId)
-                digestGroups.erase(digest);
-        }
-        if (group->ownsQueueSlot)
-        {
-            --pendingSlots;
-            group->ownsQueueSlot = false;
-        }
-        for (const auto& origin : group->origins)
-        {
-            const auto active = activeEntries.find(origin->taskId);
-            if (active != activeEntries.end() && active->second.origin == origin)
-                activeEntries.erase(active);
-        }
-        araGroups.erase(found);
-        return group;
-    }
-#endif
-};
-
-F0ExtractionService::F0ExtractionService(
-    int workerCount, size_t maxQueueSize,
-    std::function<std::shared_ptr<F0InferenceService>()> f0ServiceResolver,
-    WorkerTopology topology)
-    : state_(std::make_shared<SharedState>(topology))
+F0ExtractionService::F0ExtractionService(int workerCount, size_t maxQueueSize,
+                                          std::function<std::shared_ptr<F0InferenceService>()> f0ServiceResolver)
+    : state_(std::make_shared<SharedState>())
     , f0ServiceResolver_(std::move(f0ServiceResolver))
 {
-    state_->maxQueueSize = maxQueueSize;
-    state_->f0ServiceResolver = f0ServiceResolver_;
-    if (topology == WorkerTopology::General)
-    {
-        state_->dispatcherFailureMailbox = std::make_shared<SharedState::DispatcherFailureMailbox>();
-        const int count = (workerCount <= 0) ? 1 : workerCount;
-        for (int i = 0; i < count; ++i)
-            workers_.emplace_back([state = state_]() { workerLoop(state); });
-    }
-    else
-    {
-        jassert(workerCount == 2);
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-        workers_.emplace_back([state = state_]() { araPreparationLoop(state); });
-        workers_.emplace_back([state = state_]() { araExecutionLoop(state); });
-#else
-        jassertfalse;
-#endif
-    }
+    state_->maxQueueSize_ = maxQueueSize;
+    state_->processorRunOwner_ = std::make_shared<F0RunOwnerState>();
+    state_->dispatcherFailureMailbox_ = std::make_shared<SharedState::DispatcherFailureMailbox>();
+    const int count = std::max(1, workerCount);
+    workers_.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+        workers_.emplace_back([state = state_] { processorWorkerLoop(state); });
+}
+
+F0ExtractionService::F0ExtractionService(size_t maxQueueSize)
+    : state_(std::make_shared<SharedState>())
+{
+    state_->maxQueueSize_ = maxQueueSize;
+    workers_.reserve(2);
+    workers_.emplace_back([state = state_] { prepareAraTasks(state); });
+    workers_.emplace_back([state = state_] { executeAraTasks(state); });
 }
 
 F0ExtractionService::~F0ExtractionService()
@@ -205,77 +44,57 @@ F0ExtractionService::~F0ExtractionService()
 
 void F0ExtractionService::shutdown()
 {
-    std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
-    if (state_->dispatcherFailureMailbox)
-        state_->dispatcherFailureMailbox->cancelAndClear();
-    for (const auto& worker : workers_)
-    {
-        if (worker.joinable() && worker.get_id() == std::this_thread::get_id())
-        {
-            AppLogger::error("[F0ExtractionService] shutdown called from worker thread");
-            jassertfalse;
-            std::terminate();
-        }
-    }
-
-    std::deque<SharedState::Task> discardedTasks;
-    std::unordered_map<F0TaskId, SharedState::ActiveEntry, F0TaskIdHash> discardedEntries;
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-    std::unordered_map<F0TaskId, std::shared_ptr<SharedState::AraGroup>, F0TaskIdHash> discardedGroups;
-    std::map<F0AnalysisCache::Digest, F0TaskId> discardedDigests;
-#endif
-    {
-        std::lock_guard<std::mutex> lock(state_->entriesMutex);
-        if (!state_->shutdownStarted)
-        {
-            state_->shutdownStarted = true;
-            discardedTasks.swap(state_->queue);
-            discardedEntries.swap(state_->activeEntries);
-            state_->processorTaskIds.clear();
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-            discardedGroups.swap(state_->araGroups);
-            discardedDigests.swap(state_->digestGroups);
-#endif
-            state_->pendingSlots = 0;
-            for (auto& [taskId, entry] : discardedEntries)
-            {
-                juce::ignoreUnused(taskId);
-                entry.ownerState->closed.store(true, std::memory_order_release);
+    std::call_once(shutdownOnce_, [this] {
+        auto& state = *state_;
+        if (state.dispatcherFailureMailbox_)
+            state.dispatcherFailureMailbox_->cancelAndClear();
+        for (const auto& worker : workers_) {
+            if (worker.get_id() == std::this_thread::get_id()) {
+                AppLogger::error("[F0ExtractionService] shutdown called from worker thread");
+                jassertfalse;
+                std::terminate();
             }
         }
-    }
 
-    state_->queueCv.notify_all();
-
-    std::shared_ptr<F0InferenceService> resolvedService;
-    for (auto& [taskId, entry] : discardedEntries)
-    {
-        juce::ignoreUnused(taskId);
-        auto service = entry.runService.lock();
-        if (!service && f0ServiceResolver_)
+        std::deque<Job> discardedTasks;
+        ProcessorEntries discardedProcessorEntries;
+        std::set<F0TaskId> araTasks;
         {
-            if (!resolvedService)
-                resolvedService = f0ServiceResolver_();
-            service = resolvedService;
+            std::lock_guard<std::mutex> lock(state.entriesMutex_);
+            state.shutdownStarted_ = true;
+            // Revoke delivery before detaching queued work. Any undispatched
+            // result is released as a value without calling its owner.
+            discardedProcessorEntries.swap(state.processorEntries_);
+            for (auto& [id, entry] : state.araEntries_) {
+                entry.sink.reset();
+                araTasks.insert(id);
+            }
+            discardedTasks.swap(state.queue_);
+            if (state.processorRunOwner_)
+                state.processorRunOwner_->closed.store(true, std::memory_order_release);
         }
-        if (service)
-            service->terminateActiveRun(entry.ownerState);
-    }
 
-    for (auto& worker : workers_)
-        if (worker.joinable())
+        abortTasks(araTasks, AraF0Abort::Orphaned);
+        if (f0ServiceResolver_) {
+            if (auto svc = f0ServiceResolver_())
+                svc->terminateActiveRun(state.processorRunOwner_);
+        }
+
+        state.queueCv_.notify_all();
+        for (auto& worker : workers_)
             worker.join();
-    if (state_->dispatcherFailureMailbox)
-        state_->dispatcherFailureMailbox->cancelAndClear();
+        workers_.clear();
+        if (state.dispatcherFailureMailbox_)
+            state.dispatcherFailureMailbox_->cancelAndClear();
+    });
 }
 
 void F0ExtractionService::SharedState::DispatcherFailureMailbox::enqueue(
-    F0ExtractionService::CommitFn callback,
-    std::shared_ptr<F0ExtractionService::Result> result)
+    CommitFn callback, std::shared_ptr<Result> result)
 {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push_back(DispatcherFailure{std::move(callback), std::move(result)});
+        queue_.emplace_back(std::move(callback), std::move(result));
     }
     triggerAsyncUpdate();
 }
@@ -289,826 +108,611 @@ void F0ExtractionService::SharedState::DispatcherFailureMailbox::cancelAndClear(
 
 void F0ExtractionService::SharedState::DispatcherFailureMailbox::handleAsyncUpdate()
 {
-    std::deque<DispatcherFailure> failures;
+    std::deque<std::pair<CommitFn, std::shared_ptr<Result>>> failures;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         failures.swap(queue_);
     }
 
-    for (auto& failure : failures)
-    {
-        try
-        {
-            failure.callback(std::move(*failure.result));
-        }
-        catch (const std::exception& e)
-        {
+    for (auto& [callback, result] : failures) {
+        try {
+            callback(std::move(*result));
+        } catch (const std::exception& e) {
             AppLogger::error("[F0ExtractionService] dispatcher-failure completion threw: "
                 + juce::String(e.what()));
-        }
-        catch (...)
-        {
+        } catch (...) {
             AppLogger::error("[F0ExtractionService] dispatcher-failure completion threw: unknown exception");
         }
     }
 }
 
-F0ExtractionService::SubmitResult F0ExtractionService::submit(
-    F0RequestKey requestKey, ExecuteFn execute, CommitFn commit,
-    CommitFn dispatcherFailure, uint64_t* acceptedRequestToken)
+F0ExtractionService::SubmitResult F0ExtractionService::submit(F0RequestKey requestKey, ExecuteFn execute,
+                                                              CommitFn commit, CommitFn dispatcherFailure)
 {
-    if (acceptedRequestToken != nullptr)
-        *acceptedRequestToken = 0;
-    if (!requestKey.contentKey.isValid() || !execute || !commit)
+    if (!requestKey.contentKey.isValid() || !execute || !commit) {
         return SubmitResult::InvalidTask;
+    }
 
+    // 单一临界区：检查 shutdown、查重、容量检查、分配 token、插入 active、enqueue。
+    // 队列满直接 QueueFull，不创建 active 条目。与 shutdown 线性化。
     {
-        std::lock_guard<std::mutex> lock(state_->entriesMutex);
-        if (state_->shutdownStarted)
+        std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+        if (state_->shutdownStarted_)
             return SubmitResult::ShuttingDown;
-        if (state_->topology != WorkerTopology::General)
-            return SubmitResult::InvalidTask;
-        if (state_->processorTaskIds.find(requestKey.contentKey) != state_->processorTaskIds.end())
+
+        if (state_->processorEntries_.find(requestKey.contentKey) != state_->processorEntries_.end()) {
             return SubmitResult::AlreadyInProgress;
-        if (state_->queue.size() >= state_->maxQueueSize)
+        }
+
+        if (state_->queue_.size() >= state_->maxQueueSize_) {
             return SubmitResult::QueueFull;
+        }
 
-        const auto taskId = allocateTaskId();
-        const auto token = state_->tokenCounter++;
-        if (acceptedRequestToken != nullptr)
-            *acceptedRequestToken = token;
-        auto ownerState = std::make_shared<F0RunOwnerState>();
-        SharedState::ActiveEntry active;
-        active.token = token;
-        active.ownerState = ownerState;
-        state_->activeEntries.emplace(taskId, std::move(active));
-        state_->processorTaskIds.emplace(requestKey.contentKey, taskId);
-        SharedState::Task task;
-        task.taskId = taskId;
-        task.requestKey = requestKey;
-        task.token = token;
-        task.ownerState = std::move(ownerState);
-        task.execute = std::move(execute);
-        task.commit = std::move(commit);
-        task.dispatcherFailure = std::move(dispatcherFailure);
-        state_->queue.push_back(std::move(task));
+        const uint64_t token = state_->tokenCounter_++;
+        state_->processorEntries_.emplace(requestKey.contentKey,
+            ProcessorEntry{token, std::move(commit), std::move(dispatcherFailure), {}});
+        state_->queue_.emplace_back(Task{{requestKey, token}, std::move(execute)});
     }
 
-    state_->queueCv.notify_one();
+    // 解锁后唤醒单个 worker。
+    state_->queueCv_.notify_one();
     return SubmitResult::Accepted;
-}
-
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-AraF0Submission F0ExtractionService::submit(
-    AraF0DocumentFlights& flights, const AraF0LocalKey& localKey,
-    AraF0Pcm pcm, AraF0Receiver receiver)
-{
-    if (pcm.channel0.empty() || pcm.sourceSampleRate <= 0.0 || pcm.sourceChannelCount <= 0)
-        return {AraF0Admission::InvalidInput, {}};
-
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    if (state_->shutdownStarted)
-        return {AraF0Admission::Closing, {}};
-    jassert(state_->topology == WorkerTopology::AraPreparationExecution);
-
-    const auto addReceiver = [](std::vector<AraF0Receiver>& receivers,
-                                const AraF0Receiver& incoming) {
-        const auto sameTarget = std::find_if(receivers.begin(), receivers.end(),
-            [&incoming](const AraF0Receiver& current) {
-                return current.target.wrapperGeneration == incoming.target.wrapperGeneration
-                    && current.target.birthRevision == incoming.target.birthRevision;
-            });
-        if (sameTarget == receivers.end())
-            receivers.push_back(incoming);
-        else
-            *sameTarget = incoming;
-    };
-
-    const auto local = flights.localTasks.find(localKey);
-    if (local != flights.localTasks.end())
-    {
-        const auto active = state_->activeEntries.find(local->second);
-        if (active != state_->activeEntries.end())
-        {
-            receiver.task = local->second;
-            addReceiver(flights.receivers[local->second], receiver);
-            addReceiver(active->second.origin->receivers, receiver);
-            return {AraF0Admission::Attached, local->second};
-        }
-        const auto staleTask = local->second;
-        flights.localTasks.erase(local);
-        flights.receivers.erase(staleTask);
-    }
-
-    if (state_->pendingSlots >= state_->maxQueueSize)
-        return {AraF0Admission::QueueFull, {}};
-
-    const auto taskId = allocateTaskId();
-    const auto token = state_->tokenCounter++;
-    auto ownerState = std::make_shared<F0RunOwnerState>();
-    auto origin = std::make_shared<SharedState::AraOrigin>();
-    origin->taskId = taskId;
-    origin->token = token;
-    origin->submissionOrder = state_->submissionCounter++;
-    origin->pcm = std::move(pcm);
-    origin->ownerState = ownerState;
-    receiver.task = taskId;
-    origin->receivers.push_back(receiver);
-
-    std::weak_ptr<SharedState> weakState = state_;
-    std::weak_ptr<F0RunOwnerState> weakOwnerState = ownerState;
-    ownerState->registerInferenceService = [weakState, weakOwnerState, taskId](
-        const std::shared_ptr<F0InferenceService>& service) {
-        const auto state = weakState.lock();
-        const auto registeredOwner = weakOwnerState.lock();
-        if (!state || !registeredOwner || !service)
-            return false;
-        std::lock_guard<std::mutex> registrationLock(state->entriesMutex);
-        const auto entry = state->activeEntries.find(taskId);
-        if (entry == state->activeEntries.end()
-            || entry->second.ownerState != registeredOwner
-            || registeredOwner->closed.load(std::memory_order_acquire))
-            return false;
-        entry->second.runService = service;
-        return true;
-    };
-
-    SharedState::ActiveEntry active;
-    active.token = token;
-    active.ownerState = ownerState;
-    active.ownsQueueSlot = true;
-    active.origin = origin;
-    state_->activeEntries.emplace(taskId, std::move(active));
-    state_->pendingSlots++;
-    flights.localTasks.emplace(localKey, taskId);
-    flights.receivers[taskId].push_back(receiver);
-
-    SharedState::Task task;
-    task.taskId = taskId;
-    task.token = token;
-    task.phase = SharedState::Phase::Prepare;
-    task.ownerState = std::move(ownerState);
-    task.origin = std::move(origin);
-    state_->queue.push_back(std::move(task));
-    state_->queueCv.notify_all();
-    return {AraF0Admission::Accepted, taskId};
-}
-
-bool F0ExtractionService::isActive(F0TaskId taskId) const
-{
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    return state_->activeEntries.find(taskId) != state_->activeEntries.end();
-}
-
-void F0ExtractionService::abortTask(F0TaskId taskId, AraF0Abort reason)
-{
-    juce::ignoreUnused(reason);
-    std::shared_ptr<F0RunOwnerState> ownerState;
-    std::shared_ptr<F0InferenceService> runService;
-    std::shared_ptr<SharedState::AraGroup> retiredGroup;
-    std::unordered_map<F0TaskId, SharedState::ActiveEntry, F0TaskIdHash>::node_type retiredEntry;
-    F0TaskId handoffGroupId;
-    {
-        std::lock_guard<std::mutex> lock(state_->entriesMutex);
-        const auto active = state_->activeEntries.find(taskId);
-        if (active == state_->activeEntries.end())
-            return;
-
-        ownerState = active->second.ownerState;
-        ownerState->closed.store(true, std::memory_order_release);
-        runService = active->second.runService.lock();
-        const auto origin = active->second.origin;
-        const auto groupId = active->second.groupId;
-        if (active->second.ownsQueueSlot)
-            --state_->pendingSlots;
-        retiredEntry = state_->activeEntries.extract(active);
-        state_->queue.erase(std::remove_if(state_->queue.begin(), state_->queue.end(),
-            [taskId](const SharedState::Task& task) { return task.taskId == taskId; }),
-            state_->queue.end());
-
-        if (groupId)
-        {
-            const auto groupIt = state_->araGroups.find(groupId);
-            if (groupIt != state_->araGroups.end())
-            {
-                auto& group = *groupIt->second;
-                group.origins.erase(std::remove(group.origins.begin(), group.origins.end(), origin),
-                                    group.origins.end());
-                if (group.ownerTaskId == taskId && !group.publicationGranted && !group.outcome)
-                {
-                    if (group.origins.empty())
-                        retiredGroup = state_->takeAraGroupLocked(groupId);
-                    else
-                    {
-                        group.ownerTaskId = {};
-                        handoffGroupId = groupId;
-                    }
-                }
-                else if (group.origins.empty())
-                {
-                    retiredGroup = state_->takeAraGroupLocked(groupId);
-                }
-            }
-        }
-    }
-
-    if (runService)
-        runService->terminateActiveRun(ownerState);
-
-    if (handoffGroupId)
-    {
-        std::lock_guard<std::mutex> lock(state_->entriesMutex);
-        const auto groupIt = state_->araGroups.find(handoffGroupId);
-        if (!state_->shutdownStarted && groupIt != state_->araGroups.end())
-        {
-            auto& group = *groupIt->second;
-            std::shared_ptr<SharedState::AraOrigin> successor;
-            for (const auto& candidate : group.origins)
-            {
-                const auto candidateEntry = state_->activeEntries.find(candidate->taskId);
-                if (candidateEntry == state_->activeEntries.end()
-                    || candidate->ownerState->closed.load(std::memory_order_acquire))
-                    continue;
-                if (!successor || candidate->submissionOrder < successor->submissionOrder)
-                    successor = candidate;
-            }
-            if (successor)
-            {
-                group.ownerTaskId = successor->taskId;
-                SharedState::Task executeTask;
-                executeTask.taskId = successor->taskId;
-                executeTask.token = successor->token;
-                executeTask.phase = SharedState::Phase::Execute;
-                executeTask.ownerState = successor->ownerState;
-                executeTask.origin = successor;
-                executeTask.groupId = handoffGroupId;
-                state_->queue.push_back(std::move(executeTask));
-            }
-            else
-            {
-                retiredGroup = state_->takeAraGroupLocked(handoffGroupId);
-            }
-        }
-    }
-    state_->queueCv.notify_all();
-}
-
-void F0ExtractionService::revokeReceiver(
-    AraF0DocumentFlights& flights, uint64_t wrapperGeneration)
-{
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    const auto revoke = [wrapperGeneration](std::vector<AraF0Receiver>& receivers) {
-        receivers.erase(std::remove_if(receivers.begin(), receivers.end(),
-            [wrapperGeneration](const AraF0Receiver& receiver) {
-                return receiver.target.wrapperGeneration == wrapperGeneration;
-            }), receivers.end());
-    };
-    for (auto& [taskId, receivers] : flights.receivers)
-    {
-        revoke(receivers);
-        const auto active = state_->activeEntries.find(taskId);
-        if (active != state_->activeEntries.end() && active->second.origin)
-            revoke(active->second.origin->receivers);
-    }
-}
-
-void F0ExtractionService::revokeTaskReceivers(
-    AraF0DocumentFlights& flights, const std::vector<F0TaskId>& taskIds)
-{
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    for (const auto taskId : taskIds)
-    {
-        flights.receivers.erase(taskId);
-        const auto active = state_->activeEntries.find(taskId);
-        if (active != state_->activeEntries.end() && active->second.origin)
-            active->second.origin->receivers.clear();
-    }
-}
-
-void F0ExtractionService::detachDocument(AraF0DocumentFlights& flights)
-{
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    for (const auto& [taskId, receivers] : flights.receivers)
-    {
-        juce::ignoreUnused(receivers);
-        const auto active = state_->activeEntries.find(taskId);
-        if (active != state_->activeEntries.end() && active->second.origin)
-            active->second.origin->receivers.clear();
-    }
-    flights.receivers.clear();
-    flights.localTasks.clear();
-}
-#endif
-
-bool F0ExtractionService::isActive(F0RequestKey requestKey) const
-{
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    const auto task = state_->processorTaskIds.find(requestKey.contentKey);
-    return task != state_->processorTaskIds.end()
-        && state_->activeEntries.find(task->second) != state_->activeEntries.end();
 }
 
 void F0ExtractionService::cancel(F0RequestKey requestKey)
 {
-    std::lock_guard<std::mutex> lock(state_->entriesMutex);
-    const auto task = state_->processorTaskIds.find(requestKey.contentKey);
-    if (task == state_->processorTaskIds.end())
-        return;
-    state_->activeEntries.erase(task->second);
-    state_->processorTaskIds.erase(task);
-}
-
-void F0ExtractionService::workerLoop(std::shared_ptr<SharedState> state)
-{
-    while (true)
+    ProcessorEntries::node_type discarded;
     {
-        SharedState::Task task;
-        {
-            std::unique_lock<std::mutex> lock(state->entriesMutex);
-            state->queueCv.wait(lock, [&state]() {
-                return state->shutdownStarted
-                    || std::find_if(state->queue.begin(), state->queue.end(), [](const auto& queued) {
-                        return queued.phase == SharedState::Phase::General;
-                    }) != state->queue.end();
-            });
-            if (state->shutdownStarted)
-                return;
-
-            const auto queued = std::find_if(state->queue.begin(), state->queue.end(), [](const auto& item) {
-                return item.phase == SharedState::Phase::General;
-            });
-            task = std::move(*queued);
-            state->queue.erase(queued);
-            const auto active = state->activeEntries.find(task.taskId);
-            if (active == state->activeEntries.end() || active->second.token != task.token)
-                continue;
-        }
-
-        Result result;
-        try
-        {
-            result = task.execute(task.ownerState);
-        }
-        catch (const std::exception& e)
-        {
-            AppLogger::error("[F0ExtractionService] Task execution threw std::exception: "
-                + juce::String(e.what()));
-            result.success = false;
-            result.errorMessage = "F0 extraction task threw std::exception: " + std::string(e.what());
-        }
-        catch (...)
-        {
-            AppLogger::error("[F0ExtractionService] Task execution threw unknown exception");
-            result.success = false;
-            result.errorMessage = "F0 extraction task threw an unknown exception";
-        }
-
-        result.requestKey = task.requestKey;
-        result.requestToken = task.token;
-
-        CommitFn commit;
-        CommitFn dispatcherFailure;
-        bool shouldDispatch = false;
-        {
-            std::lock_guard<std::mutex> lock(state->entriesMutex);
-            const auto active = state->activeEntries.find(task.taskId);
-            if (!state->shutdownStarted && active != state->activeEntries.end()
-                && active->second.token == task.token)
-            {
-                shouldDispatch = true;
-                const auto keyed = state->processorTaskIds.find(task.requestKey.contentKey);
-                if (keyed != state->processorTaskIds.end() && keyed->second == task.taskId)
-                    state->processorTaskIds.erase(keyed);
-                state->activeEntries.erase(active);
-                commit = std::move(task.commit);
-                dispatcherFailure = std::move(task.dispatcherFailure);
-            }
-        }
-
-        if (!shouldDispatch)
-            continue;
-
-        auto resultForDispatch = std::make_shared<Result>(std::move(result));
-        const bool posted = juce::MessageManager::callAsync(
-            [commit = std::move(commit), resultForDispatch]() mutable {
-                try
-                {
-                    commit(std::move(*resultForDispatch));
-                }
-                catch (const std::exception& e)
-                {
-                    AppLogger::error("[F0ExtractionService] completion threw: "
-                        + juce::String(e.what()));
-                }
-                catch (...)
-                {
-                    AppLogger::error("[F0ExtractionService] completion threw: unknown exception");
-                }
-            });
-        if (!posted)
-        {
-            if (dispatcherFailure && state->dispatcherFailureMailbox)
-                state->dispatcherFailureMailbox->enqueue(
-                    std::move(dispatcherFailure), std::move(resultForDispatch));
-            else
-                AppLogger::error("[F0ExtractionService] completion dispatcher rejected; hard lifecycle failure");
-        }
+        std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+        discarded = state_->processorEntries_.extract(requestKey.contentKey);
     }
 }
 
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-void F0ExtractionService::araPreparationLoop(std::shared_ptr<SharedState> state)
+bool AraF0ConfigTag::operator==(const AraF0ConfigTag& rhs) const noexcept
 {
-    while (true)
-    {
-        SharedState::Task task;
-        {
-            std::unique_lock<std::mutex> lock(state->entriesMutex);
-            state->queueCv.wait(lock, [&state]() {
-                return state->shutdownStarted
-                    || std::find_if(state->queue.begin(), state->queue.end(), [](const auto& queued) {
-                        return queued.phase == SharedState::Phase::Prepare;
-                    }) != state->queue.end();
-            });
-            if (state->shutdownStarted)
-                return;
-            const auto queued = std::find_if(state->queue.begin(), state->queue.end(), [](const auto& item) {
-                return item.phase == SharedState::Phase::Prepare;
-            });
-            task = std::move(*queued);
-            state->queue.erase(queued);
-        }
-
-        auto origin = task.origin;
-        auto& runtime = ProcessF0Runtime::getInstance();
-        if (!runtime.isReady())
-            runtime.initialize(ModelPathResolver::getModelsDirectory(), &origin->initializationError);
-        auto inferenceService = state->f0ServiceResolver ? state->f0ServiceResolver() : nullptr;
-        if (!inferenceService)
-        {
-            if (origin->initializationError.empty())
-                origin->initializationError = "F0 runtime has no inference service after initialization";
-        }
-        else
-        {
-            origin->config = inferenceService->snapshotExtractionConfig(true);
-        }
-
-        if (origin->config && origin->config->modelWeightDigestAvailable)
-        {
-            auto& key = origin->keyConfig;
-            key.schemaVersion = F0AnalysisCache::kSchemaVersion;
-            key.algorithmVersion = origin->config->algorithmVersion;
-            key.resamplingAlgorithmVersion = origin->config->resamplingAlgorithmVersion;
-            key.f0AlgorithmVersion = origin->config->algorithmVersion;
-            key.energyAlgorithmVersion = kFrameEnergyAlgorithmVersion;
-            key.modelType = static_cast<int>(origin->config->modelType);
-            key.modelWeightDigest = origin->config->modelWeightDigest;
-            key.confidence = origin->config->confidence;
-            key.f0Min = origin->config->f0Min;
-            key.f0Max = origin->config->f0Max;
-            key.backend = origin->config->backend;
-            key.sourceSampleRate = origin->pcm.sourceSampleRate;
-            key.sourceChannelCount = origin->pcm.sourceChannelCount;
-            key.channelPolicyVersion = F0AnalysisCache::kChannelZeroPolicyVersion;
-            key.windowSampleCount = origin->pcm.channel0.size();
-            origin->pcmDigest = F0AnalysisCache::digestPcm(
-                origin->pcm.channel0.data(), origin->pcm.channel0.size());
-            origin->digest = F0AnalysisCache::buildKey(key, origin->pcmDigest);
-            origin->hasTrustedDigest = true;
-        }
-
-        bool joined = false;
-        {
-            std::lock_guard<std::mutex> lock(state->entriesMutex);
-            const auto active = state->activeEntries.find(task.taskId);
-            if (state->shutdownStarted || active == state->activeEntries.end()
-                || active->second.token != task.token
-                || origin->ownerState->closed.load(std::memory_order_acquire))
-                continue;
-
-            std::shared_ptr<SharedState::AraGroup> group;
-            if (origin->hasTrustedDigest)
-            {
-                const auto matching = state->digestGroups.find(origin->digest);
-                if (matching != state->digestGroups.end())
-                {
-                    const auto existing = state->araGroups.find(matching->second);
-                    if (existing != state->araGroups.end())
-                    {
-                        group = existing->second;
-                        group->origins.push_back(origin);
-                        active->second.groupId = group->groupId;
-                        active->second.ownsQueueSlot = false;
-                        --state->pendingSlots;
-                        joined = true;
-                    }
-                }
-            }
-
-            if (!group)
-            {
-                group = std::make_shared<SharedState::AraGroup>();
-                group->groupId = task.taskId;
-                group->ownerTaskId = task.taskId;
-                group->hasDigest = origin->hasTrustedDigest;
-                group->digest = origin->digest;
-                group->origins.push_back(origin);
-                active->second.groupId = group->groupId;
-                active->second.ownsQueueSlot = false;
-                state->araGroups.emplace(group->groupId, group);
-                if (group->hasDigest)
-                    state->digestGroups.emplace(group->digest, group->groupId);
-            }
-
-            if (!joined)
-            {
-                SharedState::Task executeTask;
-                executeTask.taskId = task.taskId;
-                executeTask.token = task.token;
-                executeTask.phase = SharedState::Phase::Execute;
-                executeTask.ownerState = task.ownerState;
-                executeTask.origin = std::move(origin);
-                executeTask.groupId = group->groupId;
-                state->queue.push_back(std::move(executeTask));
-            }
-        }
-        state->queueCv.notify_all();
-    }
+    const auto& a = extraction;
+    const auto& b = rhs.extraction;
+    // Initial automatic detection preserves its policy revision across cold startup.
+    return model == rhs.model && sourceSampleRate == rhs.sourceSampleRate
+        && a.selectionRevision == b.selectionRevision && a.modelType == b.modelType
+        && a.confidence == b.confidence && a.f0Min == b.f0Min && a.f0Max == b.f0Max
+        && a.backend.revision == b.backend.revision;
 }
 
-void F0ExtractionService::araExecutionLoop(std::shared_ptr<SharedState> state)
+F0TaskId AraF0DocumentFlights::taskForReceiver(uint64_t wrapperGeneration) const
 {
-    while (true)
-    {
-        SharedState::Task task;
-        {
-            std::unique_lock<std::mutex> lock(state->entriesMutex);
-            state->queueCv.wait(lock, [&state]() {
-                return state->shutdownStarted
-                    || std::find_if(state->queue.begin(), state->queue.end(), [](const auto& queued) {
-                        return queued.phase == SharedState::Phase::Execute;
-                    }) != state->queue.end();
-            });
-            if (state->shutdownStarted)
-                return;
-            const auto queued = std::find_if(state->queue.begin(), state->queue.end(), [](const auto& item) {
-                return item.phase == SharedState::Phase::Execute;
-            });
-            task = std::move(*queued);
-            state->queue.erase(queued);
-            const auto group = state->araGroups.find(task.groupId);
-            const auto active = state->activeEntries.find(task.taskId);
-            if (group == state->araGroups.end() || active == state->activeEntries.end()
-                || group->second->ownerTaskId != task.taskId
-                || active->second.token != task.token)
-                continue;
-        }
-
-        auto origin = task.origin;
-        Result result;
-        std::string actualBackend;
-        F0AnalysisCache::KeyConfig publishKey = origin->keyConfig;
-        bool cacheHit = false;
-        try
-        {
-            if (origin->ownerState->closed.load(std::memory_order_acquire))
-            {
-                result.errorMessage = "ARA F0 owner lease was closed before execution";
-            }
-            else if (!origin->config)
-            {
-                result.errorMessage = origin->initializationError.empty()
-                    ? "F0 extraction configuration is unavailable"
-                    : origin->initializationError;
-            }
-            else
-            {
-                auto inferenceService = state->f0ServiceResolver ? state->f0ServiceResolver() : nullptr;
-                if (!inferenceService)
-                {
-                    result.errorMessage = "F0 runtime has no inference service after preparation";
-                }
-                else
-                {
-                    const bool cacheEnabled = AppPreferences::readAraF0AnalysisCacheEnabledFromDisk();
-                    const auto keyHex = origin->hasTrustedDigest
-                        ? F0AnalysisCache::keyToHex(origin->digest)
-                        : std::string("unavailable");
-                    if (cacheEnabled && origin->hasTrustedDigest)
-                    {
-                        if (auto cached = F0AnalysisCache::tryLoad(
-                                F0AnalysisCache::cacheDirectory(), origin->digest))
-                        {
-                            F0AnalysisCache::touch(F0AnalysisCache::cacheDirectory(), origin->digest);
-                            result.success = true;
-                            result.hopSize = cached->hopSize;
-                            result.f0SampleRate = static_cast<int>(cached->f0SampleRate);
-                            result.f0 = std::move(cached->originalF0);
-                            result.energy = std::move(cached->energy);
-                            cacheHit = true;
-                            AppLogger::log("ARA-F0 cache_hit key="
-                                + juce::String(keyHex.substr(0, 16)));
-                        }
-                    }
-
-                    if (!result.success)
-                    {
-                        if (!origin->ownerState->registerInferenceService
-                            || !origin->ownerState->registerInferenceService(inferenceService))
-                        {
-                            result.errorMessage = "ARA F0 owner lease closed before inference admission";
-                        }
-                        else
-                        {
-                            const auto& config = *origin->config;
-                            const auto configurationSummary = "model="
-                                + std::to_string(static_cast<int>(config.modelType))
-                                + " backend=" + config.backend
-                                + " confidence=" + std::to_string(config.confidence)
-                                + " f0Min=" + std::to_string(config.f0Min)
-                                + " f0Max=" + std::to_string(config.f0Max);
-                            AppLogger::log("ARA-F0 inference_start key="
-                                + juce::String(origin->hasTrustedDigest
-                                    ? keyHex.substr(0, 16)
-                                    : cacheEnabled ? "unavailable" : "disabled")
-                                + " " + juce::String(configurationSummary));
-
-                            int hopSize = 0;
-                            int f0SampleRate = 0;
-                            auto extraction = inferenceService->extractF0ForAnalysis(
-                                origin->pcm.channel0.data(), origin->pcm.channel0.size(),
-                                static_cast<int>(origin->pcm.sourceSampleRate), origin->ownerState,
-                                &config, hopSize, f0SampleRate, actualBackend);
-                            if (!extraction.ok())
-                            {
-                                result.errorMessage = extraction.error().fullMessage();
-                            }
-                            else if (extraction.value().empty())
-                            {
-                                result.errorMessage = "F0 inference returned an empty result";
-                            }
-                            else
-                            {
-                                if (origin->hasTrustedDigest && publishKey.backend != actualBackend)
-                                {
-                                    publishKey.backend = actualBackend;
-                                }
-                                result.success = true;
-                                result.f0 = extraction.value();
-                                result.hopSize = hopSize;
-                                result.f0SampleRate = f0SampleRate;
-                                result.energy = computeFrameEnergy(
-                                    origin->pcm.channel0.data(),
-                                    static_cast<int>(origin->pcm.channel0.size()),
-                                    static_cast<int>(origin->pcm.sourceSampleRate),
-                                    result.f0, f0SampleRate, hopSize);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            result.success = false;
-            result.errorMessage = "ARA F0 execution threw std::exception: " + std::string(e.what());
-            AppLogger::error("[F0ExtractionService] ARA execution threw: " + juce::String(e.what()));
-        }
-        catch (...)
-        {
-            result.success = false;
-            result.errorMessage = "ARA F0 execution threw an unknown exception";
-            AppLogger::error("[F0ExtractionService] ARA execution threw an unknown exception");
-        }
-
-        bool publicationGranted = false;
-        {
-            std::lock_guard<std::mutex> lock(state->entriesMutex);
-            const auto group = state->araGroups.find(task.groupId);
-            const auto active = state->activeEntries.find(task.taskId);
-            if (!state->shutdownStarted && group != state->araGroups.end()
-                && group->second->ownerTaskId == task.taskId
-                && active != state->activeEntries.end()
-                && active->second.token == task.token
-                && !origin->ownerState->closed.load(std::memory_order_acquire))
-            {
-                group->second->publicationGranted = true;
-                group->second->publisherTaskId = task.taskId;
-                publicationGranted = true;
-            }
-        }
-        if (!publicationGranted)
-            continue;
-
-        F0AnalysisCache::Digest publishDigest = origin->digest;
-        if (origin->hasTrustedDigest && origin->config && result.success && !cacheHit
-            && AppPreferences::readAraF0AnalysisCacheEnabledFromDisk())
-        {
-            const auto currentModelDigest = ModelFactory::getModelWeightDigest(origin->config->modelPath);
-            if (currentModelDigest.has_value()
-                && *currentModelDigest == origin->config->modelWeightDigest)
-            {
-                if (publishKey.backend != origin->config->backend)
-                    publishDigest = F0AnalysisCache::buildKey(publishKey, origin->pcmDigest);
-                F0AnalysisCache::Record record;
-                record.hopSize = result.hopSize;
-                record.f0SampleRate = static_cast<double>(result.f0SampleRate);
-                record.originalF0 = result.f0;
-                record.energy = result.energy;
-                F0AnalysisCache::publish(F0AnalysisCache::cacheDirectory(), publishDigest, record);
-            }
-            else
-            {
-                AppLogger::log("ARA-F0 cache_publish_skipped key="
-                    + juce::String(F0AnalysisCache::keyToHex(origin->digest).substr(0, 16))
-                    + " reason=model_digest_changed");
-            }
-        }
-
-        auto outcome = std::make_shared<const Result>(std::move(result));
-        bool shouldDispatch = false;
-        std::shared_ptr<SharedState::AraGroup> retiredGroup;
-        {
-            std::lock_guard<std::mutex> lock(state->entriesMutex);
-            const auto group = state->araGroups.find(task.groupId);
-            if (group != state->araGroups.end()
-                && group->second->publisherTaskId == task.taskId
-                && group->second->publicationGranted)
-            {
-                group->second->outcome = std::move(outcome);
-                shouldDispatch = std::any_of(group->second->origins.begin(), group->second->origins.end(),
-                    [](const auto& candidate) { return !candidate->receivers.empty(); });
-                if (!shouldDispatch)
-                    retiredGroup = state->takeAraGroupLocked(task.groupId);
-            }
-        }
-        if (shouldDispatch)
-        {
-            const std::weak_ptr<SharedState> weakState = state;
-            const bool posted = juce::MessageManager::callAsync([weakState, groupId = task.groupId]() {
-                if (auto sharedState = weakState.lock())
-                    F0ExtractionService::deliverAraGroup(std::move(sharedState), groupId);
-            });
-            if (!posted)
-            {
-                AppLogger::log("ARA-F0 completion dispatcher rejected");
-                releaseAraGroup(state, task.groupId);
-            }
-        }
-    }
+    for (const auto& [id, receivers] : byTaskId)
+        if (receivers.find(wrapperGeneration) != receivers.end())
+            return id;
+    return {};
 }
 
-void F0ExtractionService::deliverAraGroup(
-    std::shared_ptr<SharedState> state, F0TaskId groupId)
+AraF0DocumentFlights::Receivers AraF0DocumentFlights::take(F0TaskId taskId)
+{
+    auto entry = byTaskId.extract(taskId);
+    if (entry.empty()) // A previously invoked document sink can revoke this flight during delivery.
+        return {};
+    const auto key = std::find_if(byLocalKey.begin(), byLocalKey.end(),
+        [taskId](const auto& item) { return item.second == taskId; });
+    jassert(key != byLocalKey.end());
+    byLocalKey.erase(key);
+    for (auto it = bySource.begin(); it != bySource.end(); ++it)
+    {
+        if (it->second.erase(taskId) > 0)
+        {
+            if (it->second.empty())
+                bySource.erase(it);
+            break;
+        }
+    }
+    return std::move(entry.mapped());
+}
+
+AraF0ConfigTag F0ExtractionService::snapshotAraConfig(double sourceSampleRate)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    for (;;)
-    {
-        std::weak_ptr<AraF0CompletionSink> sink;
-        F0TaskId taskId;
-        SharedAraF0Outcome outcome;
-        std::shared_ptr<SharedState::AraGroup> retiredGroup;
+    auto& runtime = ProcessF0Runtime::getInstance();
+    F0ExtractionConfigSnapshot config;
+    if (runtime.isReady())
+        config = runtime.getF0Service()->snapshotExtractionConfig();
+    else {
+        config.modelDirectory = ModelPathResolver::getModelsDirectory();
+        config.backend = AccelerationDetector::getInstance().getSelection();
+    }
+    auto model = ModelFactory::resolveF0ModelVersion(config.modelType, config.modelDirectory);
+    return {std::move(model), std::move(config), sourceSampleRate};
+}
+
+AraF0Submission F0ExtractionService::submit(AraF0DocumentFlights& flights,
+                                            const AraF0LocalKey& key,
+                                            AraF0Pcm pcm,
+                                            AraF0Receiver receiver)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    if (!flights.sink)
+        return {AraF0Admission::Closing, {}};
+    if (!receiver.key.isValid() || pcm.channel0.empty()
+        || pcm.channel0.size() > static_cast<size_t>(std::numeric_limits<int>::max())
+        || !(pcm.sourceSampleRate >= 1.0 && pcm.sourceSampleRate <= std::numeric_limits<int>::max())
+        || pcm.sourceChannelCount <= 0)
+        return {AraF0Admission::InvalidInput, {}};
+
+    const auto local = std::find_if(flights.byLocalKey.begin(), flights.byLocalKey.end(),
+        [&key](const auto& item) { return item.first == key; });
+    if (local != flights.byLocalKey.end()) {
+        const auto id = local->second;
         {
-            std::lock_guard<std::mutex> lock(state->entriesMutex);
-            const auto found = state->araGroups.find(groupId);
-            if (state->shutdownStarted || found == state->araGroups.end())
-                return;
-            auto& group = *found->second;
-            outcome = group.outcome;
-            for (const auto& origin : group.origins)
-            {
-                if (origin->deliveryClaimed || origin->receivers.empty())
-                    continue;
-                taskId = origin->taskId;
-                sink = origin->receivers.front().sink;
-                origin->deliveryClaimed = true;
-                break;
+            std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+            const auto entry = state_->araEntries_.find(id);
+            if (!state_->shutdownStarted_ && entry != state_->araEntries_.end()) {
+                flights.byTaskId.at(id).insert_or_assign(receiver.wrapperGeneration, std::move(receiver));
+                entry->second.hasReceivers = true;
+                return {AraF0Admission::Attached, id};
             }
-            if (!taskId)
-                retiredGroup = state->takeAraGroupLocked(groupId);
         }
-        if (retiredGroup)
-            return;
-        if (taskId)
-        {
-            if (auto completionSink = sink.lock())
-                completionSink->complete(taskId, std::move(outcome));
-            continue;
-        }
+        // A dispatcher rejection releases the service entry without touching the document.
+        flights.take(id);
+    }
+
+    F0TaskId id;
+    {
+        std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+        if (state_->shutdownStarted_)
+            return {AraF0Admission::Closing, {}};
+        if (state_->queue_.size() >= state_->maxQueueSize_)
+            return {AraF0Admission::QueueFull, {}};
+
+        id = {state_->tokenCounter_++};
+        jassert(id.value != 0);
+        auto task = std::make_shared<const AraTask>(AraTask{id, std::move(pcm), key.config,
+            std::make_shared<F0RunOwnerState>()});
+        state_->araEntries_.emplace(id, AraEntry{task, flights.sink, {}, nullptr});
+        state_->queue_.emplace_back(std::move(task));
+    }
+    flights.byLocalKey.emplace_back(key, id);
+    flights.byTaskId[id].emplace(receiver.wrapperGeneration, std::move(receiver));
+    state_->queueCv_.notify_all();
+    return {AraF0Admission::Accepted, id};
+}
+
+bool F0ExtractionService::isActive(F0TaskId taskId) const
+{
+    std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+    return !state_->shutdownStarted_ && state_->araEntries_.find(taskId) != state_->araEntries_.end();
+}
+
+void F0ExtractionService::abortTask(F0TaskId taskId, AraF0Abort reason)
+{
+    abortTasks({taskId}, reason);
+}
+
+void F0ExtractionService::abortTasks(const std::set<F0TaskId>& taskIds, AraF0Abort reason)
+{
+    if (taskIds.empty())
         return;
+
+    std::vector<AraEntry> revoked;
+    std::vector<AraGroups::node_type> discardedGroups;
+    std::vector<std::unique_ptr<const AraF0Result>> discardedResults;
+    bool promoted = false;
+    {
+        std::lock_guard<std::mutex> lock(state_->entriesMutex_);
+        auto& entries = state_->araEntries_;
+        auto& queue = state_->queue_;
+        const auto close = [&](F0TaskId id) {
+            auto& origin = revoked.emplace_back(std::move(entries.extract(id).mapped()));
+            origin.task->owner->closed.store(true, std::memory_order_release);
+        };
+        // Mark the complete revoked scope before looking for a successor.
+        for (auto id : taskIds)
+            if (const auto entry = entries.find(id); entry != entries.end())
+                entry->second.hasReceivers = false;
+
+        for (auto id : taskIds) {
+            const auto entry = entries.find(id);
+            if (entry == entries.end())
+                continue;
+            if (!entry->second.group) {
+                close(id);
+                continue;
+            }
+
+            const auto groupIt = *entry->second.group;
+            auto& group = groupIt->second;
+            if (group.phase == AraGroupPhase::Delivering) {
+                group.origins.erase(id);
+                close(id);
+                continue;
+            }
+
+            const auto next = std::find_if(group.origins.begin(), group.origins.end(), [&](F0TaskId candidate) {
+                return entries.at(candidate).hasReceivers;
+            });
+            if (next == group.origins.end()) {
+                for (auto origin : group.origins)
+                    close(origin);
+                discardedGroups.push_back(state_->araGroups_.extract(groupIt));
+                continue;
+            }
+
+            // Removing the owner's last local receiver leaves its PCM lease serving the other origins.
+            if (group.owner == id && reason == AraF0Abort::Orphaned && !state_->shutdownStarted_)
+                continue;
+
+            group.origins.erase(id);
+            close(id);
+            if (!(group.owner == id) || state_->shutdownStarted_)
+                continue;
+
+            group.owner = *next;
+            discardedResults.push_back(std::move(group.result));
+            if (group.phase == AraGroupPhase::Queued) {
+                const auto slot = std::find_if(queue.begin(), queue.end(), [id](const Job& job) {
+                    return std::get<AraJob>(job)->id == id;
+                });
+                *slot = entries.at(*next).task;
+            } else {
+                // Reuse the executing group's admission on handoff.
+                group.phase = AraGroupPhase::Resuming;
+            }
+            promoted = true;
+        }
+        queue.erase(std::remove_if(queue.begin(), queue.end(), [&entries](const Job& job) {
+            return entries.find(std::get<AraJob>(job)->id) == entries.end();
+        }), queue.end());
+    }
+
+    // The closed state rejects a late lease. A registered lease is terminated outside the queue lock.
+    static constexpr const char* reasons[] = {"SamplesDisabled", "SourceUndo", "SamplesChanged", "Orphaned"};
+    for (const auto& origin : revoked) {
+        if (auto* inference = origin.inference)
+            inference->terminateActiveRun(origin.task->owner);
+        AppLogger::logNoThrow("ARA-F0: task=" + juce::String(static_cast<juce::uint64>(origin.task->id.value))
+            + " abort_requested reason=" + reasons[static_cast<size_t>(reason)]);
+    }
+    if (promoted)
+        state_->queueCv_.notify_all();
+}
+
+void F0ExtractionService::revokeReceiver(AraF0DocumentFlights& flights, uint64_t wrapperGeneration)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto id = flights.taskForReceiver(wrapperGeneration);
+    if (id.value == 0)
+        return;
+    auto& receivers = flights.byTaskId.at(id);
+    receivers.erase(wrapperGeneration);
+    if (receivers.empty()) {
+        abortTask(id, AraF0Abort::Orphaned);
+        // Keep the source lookup until an orphaned owner finishes serving its peers.
+        if (!isActive(id))
+            flights.take(id);
     }
 }
 
-void F0ExtractionService::releaseAraGroup(
-    std::shared_ptr<SharedState> state, F0TaskId groupId)
+template <typename Id>
+void F0ExtractionService::postCompletion(const std::shared_ptr<SharedState>& state, Id id)
 {
-    std::shared_ptr<SharedState::AraGroup> retiredGroup;
-    {
-        std::lock_guard<std::mutex> lock(state->entriesMutex);
-        retiredGroup = state->takeAraGroupLocked(groupId);
+    ProcessRenderRuntime::postAsyncCallback([weak = std::weak_ptr<SharedState>(state), id](bool dispatched) {
+        const auto retained = weak.lock();
+        if (!retained)
+            return;
+        if (dispatched) {
+            auto* manager = juce::MessageManager::getInstanceWithoutCreating();
+            jassert(manager->isThisTheMessageThread());
+            dispatched = !manager->hasStopMessageBeenSent();
+        }
+        settleCompletion(*retained, id, dispatched);
+    });
+}
+
+F0ExtractionService::ProcessorEntries::iterator F0ExtractionService::findProcessorEntry(
+    SharedState& state, ProcessorTaskId id)
+{
+    const auto it = state.processorEntries_.find(id.requestKey.contentKey);
+    return it != state.processorEntries_.end() && it->second.token == id.token
+        ? it : state.processorEntries_.end();
+}
+
+void F0ExtractionService::processorWorkerLoop(const std::shared_ptr<SharedState>& state)
+{
+    for (;;) {
+        Task task;
+        {
+            std::unique_lock<std::mutex> lock(state->entriesMutex_);
+            state->queueCv_.wait(lock, [&] { return state->shutdownStarted_ || !state->queue_.empty(); });
+            if (state->shutdownStarted_)
+                return;
+            task = std::move(std::get<Task>(state->queue_.front()));
+            state->queue_.pop_front();
+            if (findProcessorEntry(*state, task.id) == state->processorEntries_.end())
+                continue;
+        }
+        runProcessorTask(state, std::move(task));
     }
 }
-#endif
+
+void F0ExtractionService::runProcessorTask(const std::shared_ptr<SharedState>& state, Task task)
+{
+    Result result;
+    try {
+        result = task.execute(state->processorRunOwner_);
+    } catch (const std::exception& e) {
+        AppLogger::error("[F0ExtractionService] Task execution threw std::exception: " + juce::String(e.what()));
+        result.errorMessage = "F0 extraction task threw std::exception: " + std::string(e.what());
+    } catch (...) {
+        AppLogger::error("[F0ExtractionService] Task execution threw unknown exception");
+        result.errorMessage = "F0 extraction task threw an unknown exception";
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->entriesMutex_);
+        const auto it = findProcessorEntry(*state, task.id);
+        if (it == state->processorEntries_.end())
+            return;
+        it->second.result.emplace(std::move(result));
+    }
+    postCompletion(state, task.id);
+}
+
+void F0ExtractionService::settleCompletion(SharedState& state, ProcessorTaskId id, bool dispatcherAvailable)
+{
+    ProcessorEntries::node_type batch;
+    {
+        std::lock_guard<std::mutex> lock(state.entriesMutex_);
+        const auto it = findProcessorEntry(state, id);
+        if (it == state.processorEntries_.end())
+            return;
+        batch = state.processorEntries_.extract(it);
+    }
+    if (!dispatcherAvailable) {
+        // The processor mailbox re-delivers the failed result on the message
+        // thread so waiting content settles as Failed with its reason.
+        if (state.dispatcherFailureMailbox_ && batch.mapped().dispatcherFailure) {
+            state.dispatcherFailureMailbox_->enqueue(std::move(batch.mapped().dispatcherFailure),
+                std::make_shared<Result>(std::move(*batch.mapped().result)));
+            return;
+        }
+        AppLogger::logNoThrow("[F0ExtractionService] completion released: dispatcher unavailable task="
+            + juce::String(static_cast<juce::uint64>(id.token)));
+        return;
+    }
+
+    auto& entry = batch.mapped();
+    try {
+        entry.commit(std::move(*entry.result));
+    } catch (const std::exception& e) {
+        AppLogger::error("[F0ExtractionService] completion threw: " + juce::String(e.what()));
+    } catch (...) {
+        AppLogger::error("[F0ExtractionService] completion threw: unknown exception");
+    }
+}
+
+void F0ExtractionService::prepareAraTasks(const std::shared_ptr<SharedState>& state)
+{
+    for (;;) {
+        AraJob task;
+        {
+            std::unique_lock<std::mutex> lock(state->entriesMutex_);
+            auto next = state->queue_.end();
+            state->queueCv_.wait(lock, [&] {
+                if (state->shutdownStarted_)
+                    return true;
+                // The ready owners form a prefix of the same admission queue.
+                next = std::find_if(state->queue_.begin(), state->queue_.end(), [&](const Job& job) {
+                    return !state->araEntries_.at(std::get<AraJob>(job)->id).group;
+                });
+                return next != state->queue_.end();
+            });
+            if (state->shutdownStarted_)
+                return;
+            task = std::get<AraJob>(*next);
+        }
+
+        auto& runtime = ProcessF0Runtime::getInstance();
+        auto frozen = task->config;
+        auto& config = frozen.extraction;
+        std::string initializationError;
+        const bool ready = runtime.isReady()
+            || runtime.initialize(config.modelDirectory, config.modelType, &initializationError);
+        const auto inference = ready ? runtime.getF0Service() : nullptr;
+        if (task->owner->closed.load(std::memory_order_acquire))
+            continue;
+        if (ready && !config.backend.detected)
+            config.backend = AccelerationDetector::getInstance().resolveAutomaticSelection();
+        const auto& data = task->pcm.channel0;
+        auto pcmHash = juce::SHA256(data.data(), data.size() * sizeof(float)).toHexString();
+
+        {
+            std::lock_guard<std::mutex> lock(state->entriesMutex_);
+            const auto entry = state->araEntries_.find(task->id);
+            if (state->shutdownStarted_ || entry == state->araEntries_.end())
+                continue;
+            auto [first, last] = state->araGroups_.equal_range(pcmHash);
+            auto group = std::find_if(first, last, [&frozen](const auto& item) {
+                return item.second.phase != AraGroupPhase::Delivering && item.second.config == frozen;
+            });
+            if (group != last) {
+                entry->second.group = group;
+                group->second.origins.insert(task->id);
+                // Only the owner takes an execution slot. Followers retain value PCM for handoff.
+                const auto queued = std::find_if(state->queue_.begin(), state->queue_.end(), [&task](const Job& job) {
+                    return std::get<AraJob>(job) == task;
+                });
+                state->queue_.erase(queued);
+                continue;
+            }
+            group = state->araGroups_.emplace(std::move(pcmHash), AraGroup{std::move(frozen), task->id,
+                {task->id}, inference.get(), std::move(initializationError), {}});
+            entry->second.group = group;
+        }
+        state->queueCv_.notify_all();
+    }
+}
+
+void F0ExtractionService::executeAraTasks(const std::shared_ptr<SharedState>& state)
+{
+    for (;;) {
+        AraJob task;
+        AraF0ConfigTag frozen;
+        F0InferenceService* inference;
+        std::string initializationError;
+        {
+            std::unique_lock<std::mutex> lock(state->entriesMutex_);
+            auto group = state->araGroups_.end();
+            state->queueCv_.wait(lock, [&] {
+                if (state->shutdownStarted_)
+                    return true;
+                group = std::find_if(state->araGroups_.begin(), state->araGroups_.end(), [](const auto& item) {
+                    return item.second.phase == AraGroupPhase::Resuming;
+                });
+                if (group != state->araGroups_.end())
+                    return true;
+                if (state->queue_.empty())
+                    return false;
+                const auto& front = state->araEntries_.at(std::get<AraJob>(state->queue_.front())->id);
+                if (!front.group)
+                    return false;
+                group = *front.group;
+                return true;
+            });
+            if (state->shutdownStarted_)
+                return;
+
+            auto& batch = group->second;
+            auto& origin = state->araEntries_.at(batch.owner);
+            task = origin.task;
+            if (batch.phase == AraGroupPhase::Queued) {
+                jassert(std::get<AraJob>(state->queue_.front()) == task);
+                state->queue_.pop_front();
+            }
+            batch.phase = AraGroupPhase::Running;
+            origin.inference = inference = batch.inference;
+            frozen = batch.config;
+            initializationError = batch.initializationError;
+        }
+        runAraTask(state, *task, frozen, inference, std::move(initializationError));
+    }
+}
+
+void F0ExtractionService::runAraTask(const std::shared_ptr<SharedState>& state, const AraTask& task,
+                                     const AraF0ConfigTag& frozen, F0InferenceService* inference,
+                                     std::string initializationError)
+{
+    auto result = std::make_unique<AraF0Result>();
+    result->errorMessage = std::move(initializationError);
+    if (inference != nullptr) {
+        try {
+            executeAraTask(*inference, task, frozen, *result);
+        } catch (const std::exception& e) {
+            result->errorMessage = e.what();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(state->entriesMutex_);
+        const auto entry = state->araEntries_.find(task.id);
+        if (state->shutdownStarted_ || entry == state->araEntries_.end())
+            return; // Revocation removes the old owner ID before a successor is queued.
+        entry->second.inference = nullptr;
+        auto& batch = (*entry->second.group)->second;
+        batch.result = std::move(result);
+        batch.phase = AraGroupPhase::ReadyToDeliver;
+    }
+
+    postCompletion(state, task.id);
+}
+
+F0ExtractionService::AraGroups::iterator F0ExtractionService::findAraBatch(SharedState& state, F0TaskId owner)
+{
+    const auto entry = state.araEntries_.find(owner);
+    if (state.shutdownStarted_ || entry == state.araEntries_.end())
+        return state.araGroups_.end();
+
+    const auto group = *entry->second.group;
+    jassert(group->second.owner == owner && group->second.phase == AraGroupPhase::ReadyToDeliver);
+    return group;
+}
+
+F0ExtractionService::AraGroups::node_type F0ExtractionService::releaseAraBatch(
+    SharedState& state, AraGroups::iterator group, std::vector<AraEntry>& released)
+{
+    released.reserve(group->second.origins.size());
+    for (auto id : group->second.origins)
+        released.push_back(std::move(state.araEntries_.extract(id).mapped()));
+    return state.araGroups_.extract(group);
+}
+
+void F0ExtractionService::settleCompletion(SharedState& state, F0TaskId owner, bool dispatcherAvailable)
+{
+    using Sink = std::weak_ptr<AraF0DocumentFlights::CompletionSink>;
+    std::map<Sink, std::vector<F0TaskId>, std::owner_less<Sink>> byDocument;
+    AraGroups::iterator group;
+    std::unique_ptr<const AraF0Result> result;
+    std::vector<AraEntry> released;
+    AraGroups::node_type releasedGroup;
+    {
+        std::lock_guard<std::mutex> lock(state.entriesMutex_);
+        group = findAraBatch(state, owner);
+        if (group == state.araGroups_.end())
+            return;
+        if (dispatcherAvailable) {
+            auto& batch = group->second;
+            for (auto id : batch.origins)
+                byDocument[state.araEntries_.at(id).sink].push_back(id);
+            // Close Digest admission at handoff. Local flights remain active until their sink takes them.
+            batch.phase = AraGroupPhase::Delivering;
+            result = std::move(batch.result);
+        } else {
+            releasedGroup = releaseAraBatch(state, group, released);
+        }
+    }
+
+    if (!dispatcherAvailable) {
+        AppLogger::logNoThrow("ARA-F0: completion released: dispatcher unavailable task="
+            + juce::String(static_cast<juce::uint64>(owner.value)));
+        return;
+    }
+
+    const juce::ScopeGuard finish{[&] {
+        std::lock_guard<std::mutex> lock(state.entriesMutex_);
+        releasedGroup = releaseAraBatch(state, group, released);
+    }};
+    for (const auto& [receiver, ids] : byDocument)
+        if (const auto sink = receiver.lock())
+            (*sink)(ids, *result);
+}
+
+void F0ExtractionService::executeAraTask(F0InferenceService& inference, const AraTask& task,
+                                        const AraF0ConfigTag& frozen, AraF0Result& result)
+{
+    const auto& config = frozen.extraction;
+    const auto& pcm = task.pcm;
+    const auto& data = pcm.channel0;
+    const auto logPrefix = "ARA-F0: task=" + juce::String(static_cast<juce::uint64>(task.id.value)) + " ";
+    AppLogger::log(logPrefix + "inference_start worker="
+        + juce::String::toHexString(reinterpret_cast<uintptr_t>(juce::Thread::getCurrentThreadId()))
+        + " model=" + juce::String(static_cast<int>(config.modelType))
+        + " backend=" + AccelerationDetector::backendName(config.backend.backend)
+        + " confidence=" + juce::String(config.confidence)
+        + " f0Min=" + juce::String(config.f0Min) + " f0Max=" + juce::String(config.f0Max));
+    const auto sampleRate = static_cast<int>(pcm.sourceSampleRate);
+    std::string actualBackend;
+    auto extraction = inference.extractF0ForAnalysis(
+        data.data(), data.size(), sampleRate, task.owner, config, frozen.model,
+        result.hopSize, result.f0SampleRate, actualBackend);
+    if (!extraction.ok()) {
+        result.errorMessage = extraction.error().fullMessage();
+        if (extraction.error().code == ErrorCode::OperationCancelled)
+            AppLogger::log(logPrefix + "analysis_aborted reason=" + juce::String(result.errorMessage));
+        return;
+    }
+    result.f0 = std::move(extraction).value();
+    if (result.f0.empty()) {
+        result.errorMessage = "F0 inference returned an empty result";
+        return;
+    }
+    result.energy = computeFrameEnergy(data.data(), static_cast<int>(data.size()), sampleRate,
+        result.f0, result.f0SampleRate, result.hopSize);
+    AppLogger::log(logPrefix + "inference_finish backend=" + juce::String(actualBackend));
+}
 
 } // namespace OpenTune
