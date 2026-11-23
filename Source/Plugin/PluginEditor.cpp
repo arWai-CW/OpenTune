@@ -1197,6 +1197,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     }
 
     juce::StringArray diagnostics;
+    bool hasSharedTargets = false;
     std::vector<Input> guides;
     std::vector<Target> targets;
     const auto targetRegions = dc->getPlaybackRegionProjectionsFor(selected);
@@ -1207,9 +1208,11 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         const auto position = "Target @ " + juce::String(region.startInPlaybackTime, 2) + " s: ";
         const auto* modification = region.playbackRegion->getAudioModification();
         // A shared modification would also change unselected host placements.
-        if (modification == nullptr || modification->getPlaybackRegions().size() != 1) {
+        const auto placements = modification != nullptr ? modification->getPlaybackRegions().size() : 0;
+        if (placements != 1) {
+            hasSharedTargets = hasSharedTargets || placements > 1;
             diagnostics.add(position + "expected 1 placement of the ARA audio modification, found "
-                + juce::String(modification != nullptr ? static_cast<int>(modification->getPlaybackRegions().size()) : 0));
+                + juce::String(static_cast<int>(placements)));
             continue;
         }
         juce::String rejection;
@@ -1260,10 +1263,24 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
         targets.push_back({input, guideIndex, std::move(name), {}, {}});
     }
+    juce::String sharedTargetHelp;
+    if (hasSharedTargets) {
+        if (juce::PluginHostType{}.isReaper())
+            sharedTargetHelp = Loc::format(
+                LOC_RAW("Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}"),
+                juce::String("Item: Remove active takes from ARA edit pool (unpool)"));
+        else
+            sharedTargetHelp = LOC_RAW("Some targets share ARA edits. Make those clips independent in the DAW, then retry.");
+    }
     const auto noAlignment = LOC_RAW("No reliable timing changes.");
-    const auto showFailure = [title, noAlignment](juce::Component& parent, const juce::StringArray& details) {
-        const auto summary = details.isEmpty() ? noAlignment : noAlignment + "\n" + details[0];
-        ConfirmDialogContent::showDiagnostic(&parent, title, summary, details.joinIntoString("\n"));
+    const auto showFailure = [title, noAlignment, sharedTargetHelp](juce::Component& parent, const juce::StringArray& details) {
+        auto summary = details.isEmpty() ? noAlignment : noAlignment + "\n" + details[0];
+        auto copied = details.joinIntoString("\n");
+        if (sharedTargetHelp.isNotEmpty()) {
+            summary += "\n\n" + sharedTargetHelp;
+            copied += "\n" + sharedTargetHelp;
+        }
+        ConfirmDialogContent::showDiagnostic(&parent, title, summary, copied);
     };
     if (targets.empty()) {
         showFailure(contentRoot_, diagnostics);
@@ -1277,7 +1294,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     a11y::announce(pianoRoll_, LOC_RAW("Analyzing timing"));
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
-        guides = std::move(guides), targets = std::move(targets), title, showFailure, diagnostics = std::move(diagnostics)]() mutable {
+        guides = std::move(guides), targets = std::move(targets), title, showFailure, sharedTargetHelp,
+        diagnostics = std::move(diagnostics)]() mutable {
         const auto detect = [](const Input& input, const Input& other) {
             return detectTimingOnsetsInOverlap(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate,
                 *input.snapshot->timeGrid, input.region.contentProjection, other.region.contentProjection);
@@ -1326,7 +1344,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             return !target.gentle.grid && !target.tight.grid;
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
-                targets = std::move(targets), title, showFailure, diagnostics = std::move(diagnostics), alreadyAligned]() mutable {
+                targets = std::move(targets), title, showFailure, sharedTargetHelp,
+                diagnostics = std::move(diagnostics), alreadyAligned]() mutable {
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
@@ -1348,6 +1367,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             if (count != targets.size())
                 detail += "\n" + Loc::format(LOC_RAW("{0} selected clips have no safe alignment and will be skipped."),
                                              juce::String(static_cast<int>(count - targets.size())));
+            if (sharedTargetHelp.isNotEmpty())
+                detail += "\n" + sharedTargetHelp;
             auto preview = std::make_unique<juce::AlertWindow>(title, detail,
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
             const auto label = [](const juce::String& mode, const TimingAlignment& plan) {
