@@ -34,6 +34,8 @@ public:
     static constexpr int kLookaheadSamples = 75; // 67 FIR support + 8 drift headroom.
     // At the ±75-cent rate limit, 64 samples drift by less than three samples.
     static constexpr int kCycleJumpFadeSamples = 64;
+    /// Smoothed-rate decay per detector tracking update when not in snap mode.
+    static constexpr double kDecayPerTrackingUpdate = 0.995;
 
     /// @return numSamples resampled samples, or an empty vector (with no
     ///         audio rendered) when any resample-rate update falls outside
@@ -123,7 +125,7 @@ private:
     /// away from the requested target. The render is then discarded.
     bool rateHoldExceeded_ = false;
 
-    static constexpr double kDecayPerTrackingUpdate = 0.995;
+    static constexpr double kIdentityRateEpsilon = 1.0e-4;
 
     bool isReadable(double addr) const;
     float readInterpolated(double addr) const;
@@ -132,9 +134,14 @@ private:
     /// (detector shadow hop-held samples between tracking update events).
     /// A tracking update whose target rate leaves the ±75 cent contract also
     /// keeps the held rate; the contract bounds every applied rate.
+    /// identityTarget marks a sample with no correction request. Once the
+    /// applied rate has returned to 1, the read address is realigned to the
+    /// input (one cycle-jump fade), so unedited audio after an edit in the
+    /// same chunk is the source again, sample for sample.
     float processSample(double cyclePeriod, double targetResampleRate,
                         bool updateResampleRate = true,
-                        bool snapMode = false);
+                        bool snapMode = false,
+                        bool identityTarget = false);
 };
 
 } // namespace OpenTune
