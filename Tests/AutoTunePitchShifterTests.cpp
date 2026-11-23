@@ -2759,6 +2759,29 @@ void testPlanLightRenderSplitsPerFrame()
     const auto shortRun = OpenTune::planLightRender(inContract, original.data(), kFrames,
         straddle.data(), kSamples, 44100.0, 100.0, 0.0, true);
     expectTrue(!shortRun.needsVocoder, "plan: short invalid run across four frames stays light");
+
+    // Snap mode along a gliding target: the held rate between two detector
+    // updates must not grow the region along the glide.
+    std::vector<float> ramp(static_cast<size_t>(kFrames), 0.0f);
+    for (int f = 2; f < 18; ++f)
+        ramp[static_cast<size_t>(f)] = static_cast<float>(220.0 * std::exp2((10.0 + 3.5 * f) / 1200.0));
+    ramp[4] = static_cast<float>(220.0 * std::exp2(200.0 / 1200.0));
+    const auto rampPlan = OpenTune::planLightRender(ramp, original.data(), kFrames,
+        sparse.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(rampPlan.vocoderFrames[4] == 1 && rampPlan.vocoderFrames[6] == 0
+                   && rampPlan.vocoderFrames[2] == 0,
+               "plan: held rate between updates does not grow the region along a glide");
+
+    // The shifter holds its rate when a detector-relative target leaves the
+    // contract; the plan must follow that instead of simulating a glide.
+    std::vector<OpenTune::AutoTunePeriodDetector::DetectedPeriod> sharp(sparse);
+    for (int i = 441 * 4; i < 441 * 5; ++i)
+        sharp[static_cast<size_t>(i)].periodSamples =
+            static_cast<float>(44100.0 / 220.0 * std::exp2(10.0 / 1200.0));
+    const auto heldPlan = OpenTune::planLightRender(corrected, original.data(), kFrames,
+        sharp.data(), kSamples, 44100.0, 100.0, 0.0, true);
+    expectTrue(heldPlan.vocoderFrames[6] == 0,
+               "plan: a held out-of-contract update does not invent a glide");
     expectTrue(shortRun.dspTarget[8] == 0.0f && shortRun.dspTarget[11] == 0.0f,
                "plan: frames touched by a short invalid run pass through");
 }

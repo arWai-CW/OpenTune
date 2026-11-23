@@ -57,6 +57,7 @@ constexpr double kMaxLightInvalidRunSeconds = 0.040;
 /// A vocoder region grows into neighbouring frames while the light render's
 /// smoothed pitch is this far from the requested pitch, so seams never jump.
 constexpr double kSeamPitchToleranceCents = 3.0;
+constexpr int kSeamMismatchMinSamples = 32;
 constexpr double kSpliceFadeSeconds = 0.020;
 constexpr double kSpliceSearchSeconds = 0.015;
 constexpr double kSpliceDilateSeconds = 0.005;
@@ -166,29 +167,44 @@ inline LightRenderPlan planLightRender(
             i = end;
         }
 
-        // Follow the light render's smoothed pitch (in cents from the source)
-        // and grow each vocoder region over neighbouring frames where it is
-        // still away from the requested pitch, e.g. while it glides back from
-        // the clamped target after a large correction.
-        const auto centsOf = [&](const std::vector<float>& track, int f) {
+        // Follow the light render's smoothed rate the way the shifter applies
+        // it (detector period, update events, contract hold) and grow each
+        // vocoder region over neighbouring frames where it stays away from
+        // the requested pitch, e.g. while it glides back from the clamped
+        // target after a large correction. Mismatches shorter than
+        // kSeamMismatchMinSamples (a held rate between two detector updates)
+        // do not count.
+        const auto requestedCents = [&](const std::vector<float>& track, int f, int i) {
             const float value = track[static_cast<size_t>(f)];
-            return value > 0.0f && originalF0[f] > 0.0f
-                ? 1200.0 * std::log2(static_cast<double>(value) / static_cast<double>(originalF0[f]))
-                : 0.0;
+            if (!(value > 0.0f))
+                return 0.0;
+            return 1200.0 * std::log2(static_cast<double>(value)
+                * static_cast<double>(detectorPeriods[i].periodSamples) / sampleRate);
         };
+        const double contractCents = static_cast<double>(kPitchShiftThresholdCents);
         const double keep = snapMode ? 0.0 : AutoTunePitchShifter::kDecayPerTrackingUpdate;
-        std::vector<uint8_t> seamMismatch(static_cast<size_t>(frames), 0);
+        std::vector<int> mismatchSamples(static_cast<size_t>(frames), 0);
         double lightCents = 0.0;
         for (int i = 0; i < numSamples; ++i) {
             const int f = frameAt(i);
-            const double target = centsOf(plan.dspTarget, f);
-            if (invalidAt(i))
+            if (invalidAt(i)) {
                 lightCents = 0.0;
-            else if (detectorPeriods[i].trackingUpdated)
+                if (std::fabs(active(f) ? 1200.0 * std::log2(static_cast<double>(
+                        correctedF0[static_cast<size_t>(f)]) / static_cast<double>(originalF0[f])) : 0.0)
+                    >= kSeamPitchToleranceCents)
+                    ++mismatchSamples[static_cast<size_t>(f)];
+                continue;
+            }
+            const double target = requestedCents(plan.dspTarget, f, i);
+            if (detectorPeriods[i].trackingUpdated && std::fabs(target) <= contractCents)
                 lightCents = target + (lightCents - target) * keep;
-            if (std::fabs(lightCents - centsOf(correctedF0, f)) >= kSeamPitchToleranceCents)
-                seamMismatch[static_cast<size_t>(f)] = 1;
+            if (std::fabs(lightCents - requestedCents(correctedF0, f, i)) >= kSeamPitchToleranceCents)
+                ++mismatchSamples[static_cast<size_t>(f)];
         }
+        std::vector<uint8_t> seamMismatch(static_cast<size_t>(frames), 0);
+        for (int f = 0; f < frames; ++f)
+            seamMismatch[static_cast<size_t>(f)] =
+                mismatchSamples[static_cast<size_t>(f)] >= kSeamMismatchMinSamples ? 1 : 0;
         const auto seed = plan.vocoderFrames;
         for (int f = 0; f < frames; ++f) {
             if (!seed[static_cast<size_t>(f)])
