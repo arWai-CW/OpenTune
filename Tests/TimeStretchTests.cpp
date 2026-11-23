@@ -133,7 +133,13 @@ bool testReferenceAlignment()
 
 bool testPooledSplitsCanAlignIndependently()
 {
-    const auto base = TimeGridSnapshot::makeIdentity(6.0);
+    const auto base = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 2.4, 2.4, HandleKind::InternalOnset},
+        {3, 2.95, 2.95, HandleKind::InternalOnset},
+        {4, 3.5, 3.5, HandleKind::InternalOnset},
+        {5, 6.0, 6.0, HandleKind::ClipEnd}
+    });
     const ContentTimelineProjection lead{10.0, 6.0, 0.0, 6.0};
     const ContentTimelineProjection first{10.0, 2.0, 0.0, 2.0};
     const ContentTimelineProjection second{13.0, 2.0, 2.0, 2.0};
