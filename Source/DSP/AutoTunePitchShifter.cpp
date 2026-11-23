@@ -131,7 +131,8 @@ void AutoTunePitchShifter::feedSample(float sample) {
 float AutoTunePitchShifter::processSample(double cyclePeriod,
                                           double targetResampleRate,
                                           bool updateResampleRate,
-                                          bool snapMode) {
+                                          bool snapMode,
+                                          bool identityTarget) {
     if (cyclePeriod > 0.0) {
         // A detector tracking update only replaces the applied rate when the
         // request stays inside the ±75 cent light contract. The held rate can
@@ -159,11 +160,21 @@ float AutoTunePitchShifter::processSample(double cyclePeriod,
         resampleRate_ = 1.0;
     }
 
+    if (identityTarget && std::fabs(resampleRate_ - 1.0) < kIdentityRateEpsilon)
+        resampleRate_ = 1.0;
+
     outputAddr_ += resampleRate_;
 
     bool cycleJumped = false;
     double jumpSourceAddr = 0.0;
-    if (cyclePeriod > 0.0 && cycleJumpFadePosition_ < 0) {
+    const double alignedOutputAddr = inputAddr_ - 1.0;
+    if (identityTarget && resampleRate_ == 1.0 && cycleJumpFadePosition_ < 0
+        && outputAddr_ != alignedOutputAddr) {
+        jumpSourceAddr = outputAddr_;
+        outputAddr_ = alignedOutputAddr;
+        cycleJumped = true;
+    }
+    else if (cyclePeriod > 0.0 && cycleJumpFadePosition_ < 0) {
         if (resampleRate_ > 1.0 && outputAddr_ > inputAddr_) {
             jumpSourceAddr = outputAddr_;
             outputAddr_ -= cyclePeriod;
@@ -360,8 +371,11 @@ std::vector<float> AutoTunePitchShifter::shiftChunkInternal(
         const bool updateResampleRate = detectorPeriods == nullptr
             ? true
             : detectorPeriods[i].trackingUpdated;
+        const bool identityTarget =
+            !(correctedF0[frameAt(i)] > 0.0f);
         output[static_cast<size_t>(i)] =
-            processSample(cyclePeriod, targetRate, updateResampleRate, snapMode);
+            processSample(cyclePeriod, targetRate, updateResampleRate, snapMode,
+                          identityTarget);
     }
 
     if (rateHoldExceeded_)
