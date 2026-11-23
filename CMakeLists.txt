@@ -47,6 +47,10 @@ endif()
 # ==============================================================================
 project(OpenTune VERSION 1.8.2 LANGUAGES CXX C)
 
+# 产品版本串：上面的数值核心供给版本码与资源（必须纯数字），产品串携带
+# 预发布限定符，用于 Control API 自报、启动日志、工程持久化与安装包标识。
+set(OPENTUNE_PRODUCT_VERSION "1.8.2-beta")
+
 # 为 clangd/LSP 导出编译数据库（compile_commands.json）
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -106,6 +110,21 @@ if(NOT OPENTUNE_IOS)
             "Clone it with: git clone --recursive --branch releases/${OPENTUNE_ARA_SDK_VERSION} https://github.com/Celemony/ARA_SDK")
     endif()
     juce_set_ara_sdk_path("${ARA_SDK_PATH}")
+    # The SDK lookup drops entries whose current ID is missing. Expose the host
+    # filter itself for complete diagnostics and explicit parent-map validation.
+    set(ara_plug_dir "${ARA_SDK_PATH}/ARA_Library/PlugIn")
+    set(ara_sdk_overlay "${CMAKE_CURRENT_BINARY_DIR}/Generated/OpenTune/ARA")
+    set(ara_plugin_source "${ara_sdk_overlay}/ARA_Library/PlugIn/ARAPlug.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ara_plug_dir}/ARAPlug.h")
+    file(READ "${ara_plug_dir}/ARAPlug.h" ara_plug_header)
+    string(REPLACE "    bool shouldRestoreDocumentData () const noexcept;"
+        "    bool shouldRestoreDocumentData () const noexcept;\n    const ARARestoreObjectsFilter* getHostFilter () const noexcept { return _filter; }"
+        ara_plug_header "${ara_plug_header}")
+    file(CONFIGURE OUTPUT "${ara_sdk_overlay}/ARA_Library/PlugIn/ARAPlug.h"
+        CONTENT "${ara_plug_header}" @ONLY)
+    file(CONFIGURE OUTPUT "${ara_plugin_source}"
+        CONTENT "#include \"ARAPlug.h\"\n#include \"${ara_plug_dir}/ARAPlug.cpp\"\n" @ONLY)
+    target_include_directories(juce_ara_sdk BEFORE INTERFACE "${ara_sdk_overlay}")
     message(STATUS "ARA SDK found at: ${ARA_SDK_PATH} (ARA2 plugin support enabled)")
 endif()
 
@@ -1049,25 +1068,20 @@ endif()
 set(OPENTUNE_ARA_SOURCES
     Source/ARA/AudioSource.cpp
     Source/ARA/AudioSource.h
-    Source/ARA/AraF0Types.h
     Source/ARA/AudioModification.cpp
     Source/ARA/AudioModification.h
     Source/ARA/PlaybackRegion.cpp
     Source/ARA/PlaybackRegion.h
     Source/ARA/OpenTuneDocumentController.cpp
     Source/ARA/OpenTuneDocumentController.h
-    Source/Services/F0AnalysisCache.cpp
-    Source/Services/F0AnalysisCache.h
     Source/ARA/OpenTunePlaybackRenderer.cpp
     Source/ARA/OpenTunePlaybackRenderer.h
 )
 if(NOT OPENTUNE_IOS)
     target_sources(OpenTune PRIVATE ${OPENTUNE_ARA_SOURCES})
-    target_compile_definitions(OpenTune PRIVATE OPENTUNE_HAS_ARA_F0_QUEUE=1)
 endif()
 if(OPENTUNE_MACOS)
     target_sources(OpenTuneAU PRIVATE ${OPENTUNE_ARA_SOURCES})
-    target_compile_definitions(OpenTuneAU PRIVATE OPENTUNE_HAS_ARA_F0_QUEUE=1)
 endif()
 
 # Runtime fallback for AU/VST3 hosts that do not bind the ARA2 extension.
@@ -1244,9 +1258,13 @@ foreach(_opentune_target IN LISTS OPENTUNE_SHARED_CODE_TARGETS)
             JUCE_STRICT_REFCOUNTEDPOINTER=1
             JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
 
+        PUBLIC
+            # 自报产品版本：Control API appVersion、工程持久化头、启动日志、
+            # Standalone 应用身份。PUBLIC 使链接共享代码的 exe 目标同样可见。
+            OPENTUNE_VERSION="${OPENTUNE_PRODUCT_VERSION}"
+
         PRIVATE
             # OpenTune specific
-            OPENTUNE_VERSION="${PROJECT_VERSION}"
             OPENTUNE_D3D12_AGILITY_SDK_VERSION=${OPENTUNE_D3D12_SDK_VERSION}
             ORT_API_MANUAL_INIT
             # Both products decode the embedded MP3 piano samples.
@@ -1732,35 +1750,11 @@ if(OPENTUNE_BUILD_TESTS)
         target_compile_definitions(OpenTuneAU PRIVATE OPENTUNE_LIFECYCLE_TEST_DATA_DIR=1)
     endif()
 
-    add_executable(OpenTuneOutputSpectrumAnalyzerTests Tests/OutputSpectrumAnalyzerTests.cpp)
-    target_include_directories(OpenTuneOutputSpectrumAnalyzerTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
-    target_link_libraries(OpenTuneOutputSpectrumAnalyzerTests PRIVATE juce::juce_dsp)
-    add_test(NAME OutputSpectrumAnalyzerTests COMMAND OpenTuneOutputSpectrumAnalyzerTests)
-
-    add_executable(OpenTunePlayHeadStateTests Tests/PlayHeadStateTests.cpp)
-    target_include_directories(OpenTunePlayHeadStateTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
-    target_link_libraries(OpenTunePlayHeadStateTests PRIVATE juce::juce_audio_processors)
-    add_test(NAME PlayHeadStateTests COMMAND OpenTunePlayHeadStateTests)
-
     add_executable(OpenTuneRealtimeSnapshotTests Tests/RealtimeSnapshotTests.cpp)
     target_include_directories(OpenTuneRealtimeSnapshotTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
     add_test(NAME RealtimeSnapshotTests COMMAND OpenTuneRealtimeSnapshotTests)
-
-    add_executable(OpenTuneAudioDeviceSettingsTests
-        Tests/AudioDeviceSettingsTests.cpp
-        Source/Utils/AudioDeviceSettings.cpp
-    )
-    target_include_directories(OpenTuneAudioDeviceSettingsTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
-    target_link_libraries(OpenTuneAudioDeviceSettingsTests PRIVATE
-        juce::juce_audio_devices)
-    add_test(NAME AudioDeviceSettingsTests COMMAND OpenTuneAudioDeviceSettingsTests)
-
     if(MSVC)
-        target_compile_options(OpenTuneOutputSpectrumAnalyzerTests PRIVATE /utf-8 /EHsc)
-        target_compile_options(OpenTunePlayHeadStateTests PRIVATE /utf-8 /EHsc)
         target_compile_options(OpenTuneRealtimeSnapshotTests PRIVATE /utf-8 /EHsc)
-        target_compile_options(OpenTuneAudioDeviceSettingsTests PRIVATE /utf-8 /EHsc)
     endif()
 
     add_executable(OpenTuneComponentListenerSubscriptionTests
@@ -1890,14 +1884,19 @@ if(OPENTUNE_BUILD_TESTS)
         Source/Content/ContentEditCommands.cpp
         Source/Utils/AppLogger.cpp
         Source/Utils/AutomationLane.cpp
+        Source/Utils/LegacyNoteGenerator.cpp
         Source/Utils/PianoRollEditAction.cpp
         Source/Utils/PitchCurve.cpp
+        Source/Utils/SimdAccelerator.cpp
         Source/Utils/TimeGrid.cpp
         Source/Utils/UndoManager.cpp
         Source/Utils/VolumeEnvelopeRegionEdit.cpp
     )
     target_include_directories(OpenTuneSelectedNoteResetTests PRIVATE Source)
     target_link_libraries(OpenTuneSelectedNoteResetTests PRIVATE juce::juce_audio_basics)
+    if(APPLE)
+        target_link_libraries(OpenTuneSelectedNoteResetTests PRIVATE "-framework Accelerate")
+    endif()
     if(MSVC)
         target_compile_options(OpenTuneSelectedNoteResetTests PRIVATE /utf-8 /EHsc)
     endif()
@@ -2004,19 +2003,27 @@ if(OPENTUNE_BUILD_TESTS)
 
     add_executable(OpenTuneTimeStretchTests
         Tests/TimeStretchTests.cpp
+        Source/DSP/ResamplingManager.cpp
         Source/DSP/TimingAlignment.cpp
+        Source/Inference/RenderCache.cpp
         Source/Inference/SoundTouchStretcher.cpp
+        Source/Inference/TimeStretchCache.cpp
         Source/Utils/AppLogger.cpp
         Source/Utils/TimeGrid.cpp
         ${OPENTUNE_SOUNDTOUCH_SOURCES}
     )
-    target_include_directories(OpenTuneTimeStretchTests PRIVATE Source ${SOUNDTOUCH_DIR}/include)
+    target_include_directories(OpenTuneTimeStretchTests PRIVATE
+        Source ${SOUNDTOUCH_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/r8brain-free-src-master)
     target_compile_definitions(OpenTuneTimeStretchTests PRIVATE SOUNDTOUCH_FLOAT_SAMPLES)
     target_link_libraries(OpenTuneTimeStretchTests PRIVATE juce::juce_audio_basics)
     if(MSVC)
         target_compile_options(OpenTuneTimeStretchTests PRIVATE /utf-8 /EHsc)
     endif()
     add_test(NAME TimeStretchTests COMMAND OpenTuneTimeStretchTests)
+
+    add_executable(OpenTunePlayHeadStateTests Tests/PlayHeadStateTests.cpp)
+    target_link_libraries(OpenTunePlayHeadStateTests PRIVATE juce::juce_audio_processors)
+    add_test(NAME PlayHeadStateTests COMMAND OpenTunePlayHeadStateTests)
 
     # Scissors topology planner + undo action tests — pure planner, no plugin runtime
     add_executable(OpenTuneScissorsTopologyEditTests
@@ -2125,12 +2132,13 @@ if(OPENTUNE_BUILD_TESTS)
     target_include_directories(OpenTuneMelSpectrogramTests
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/Source
+            ${ara_sdk_overlay}
             ${ARA_SDK_PATH})
     target_link_libraries(OpenTuneMelSpectrogramTests PRIVATE
         OpenTune)
     target_sources(OpenTuneMelSpectrogramTests PRIVATE
         "${ARA_SDK_PATH}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
-        "${ARA_SDK_PATH}/ARA_Library/PlugIn/ARAPlug.cpp"
+        "${ara_plugin_source}"
         "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
         "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAChannelFormat.cpp")
     if(MSVC)
@@ -2269,21 +2277,6 @@ if(OPENTUNE_BUILD_TESTS)
     endif()
     add_test(NAME CapturePersistenceTests COMMAND OpenTuneCapturePersistenceTests)
 
-    add_executable(OpenTuneF0AnalysisCacheTests
-        Tests/F0AnalysisCacheTests.cpp
-    )
-    target_include_directories(OpenTuneF0AnalysisCacheTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
-    target_link_libraries(OpenTuneF0AnalysisCacheTests PRIVATE
-        OpenTune
-        juce::juce_core
-        juce::juce_cryptography
-    )
-    if(MSVC)
-        target_compile_options(OpenTuneF0AnalysisCacheTests PRIVATE /utf-8 /EHsc)
-    endif()
-    add_test(NAME F0AnalysisCacheTests COMMAND OpenTuneF0AnalysisCacheTests)
-
     # CaptureSession span-budget exhaustion + scan-coverage lifecycle tests.
     add_executable(OpenTuneCaptureSessionSpanBudgetTests
         Tests/CaptureSessionSpanBudgetTests.cpp
@@ -2339,23 +2332,22 @@ if(OPENTUNE_BUILD_TESTS)
     endif()
     add_test(NAME StandaloneArrangementMoveTests COMMAND OpenTuneStandaloneArrangementMoveTests)
 
-    foreach(standalone_edit_test IN ITEMS
-            NoteDraftTransactionTests ManualCorrectionTransactionTests StandaloneSourceLifetimeTests)
-        add_executable(OpenTune${standalone_edit_test}
-            Tests/${standalone_edit_test}.cpp
-            Tests/HeadlessEditorFactory.cpp)
-        target_include_directories(OpenTune${standalone_edit_test} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/Source ${ONNXRUNTIME_INCLUDE_DIR})
-        target_link_libraries(OpenTune${standalone_edit_test} PRIVATE
-            OpenTuneStandalone OpenTuneResources juce::juce_audio_basics juce::juce_core)
-        target_compile_definitions(OpenTune${standalone_edit_test} PRIVATE JucePlugin_Build_Standalone=1)
-        if(MSVC)
-            target_compile_options(OpenTune${standalone_edit_test} PRIVATE /utf-8 /EHsc)
-        endif()
-        add_test(NAME ${standalone_edit_test} COMMAND OpenTune${standalone_edit_test})
-    endforeach()
-    target_include_directories(OpenTuneManualCorrectionTransactionTests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/Source/Standalone)
+    add_executable(OpenTuneNoteDraftTransactionTests
+        Tests/NoteDraftTransactionTests.cpp
+        Tests/HeadlessEditorFactory.cpp)
+    target_include_directories(OpenTuneNoteDraftTransactionTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source
+        ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(OpenTuneNoteDraftTransactionTests PRIVATE
+        OpenTuneStandalone
+        OpenTuneResources
+        juce::juce_audio_basics
+        juce::juce_core)
+    target_compile_definitions(OpenTuneNoteDraftTransactionTests PRIVATE JucePlugin_Build_Standalone=1)
+    if(MSVC)
+        target_compile_options(OpenTuneNoteDraftTransactionTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME NoteDraftTransactionTests COMMAND OpenTuneNoteDraftTransactionTests)
 
     # Render/ARA contract tests use the production objects and their real worker
     # threads.  They intentionally link the application target instead of
@@ -2369,6 +2361,7 @@ if(OPENTUNE_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/Source
             ${ONNXRUNTIME_INCLUDE_DIR}
             ${ONNXRUNTIME_DML_GENERATED_INCLUDE_DIR}
+            ${ara_sdk_overlay}
             ${ARA_SDK_PATH})
         target_link_libraries(${render_contract} PRIVATE
             OpenTune
@@ -2407,7 +2400,7 @@ if(OPENTUNE_BUILD_TESTS)
             RenderRuntimeDeferredRetryTests)
         target_sources(${_runtime_contract} PRIVATE
             "${ARA_SDK_PATH}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
-            "${ARA_SDK_PATH}/ARA_Library/PlugIn/ARAPlug.cpp"
+            "${ara_plugin_source}"
             "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
             "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAChannelFormat.cpp")
     endforeach()
@@ -2419,7 +2412,7 @@ if(OPENTUNE_BUILD_TESTS)
         Tests/HeadlessEditorFactory.cpp
         "${ARA_SDK_PATH}/ARA_Library/Dispatch/ARAHostDispatch.cpp"
         "${ARA_SDK_PATH}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
-        "${ARA_SDK_PATH}/ARA_Library/PlugIn/ARAPlug.cpp"
+        "${ara_plugin_source}"
         "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
         "${ARA_SDK_PATH}/ARA_Library/Utilities/ARAChannelFormat.cpp"
     )
@@ -2428,8 +2421,6 @@ if(OPENTUNE_BUILD_TESTS)
         "${ARA_SDK_PATH}/ARA_API"
     )
     target_link_libraries(ARALifecycleContractTests PRIVATE OpenTuneResources)
-
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenTuneRealtimeTests.cmake")
 endif()
 
 # Optional local Control API entry point for Standalone.

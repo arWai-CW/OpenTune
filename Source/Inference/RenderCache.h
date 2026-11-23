@@ -201,8 +201,8 @@ private:
     };
 
     // Everything a prepared chunk's PCM values depend on: the canonical input
-    // identity/origin, the native fallback identity used outside cropped
-    // canonical storage, and every intersecting edited chunk.
+    // identity/origin, the native halo outside cropped canonical storage, and
+    // every intersecting edited chunk.
     struct PreparedDependencies {
         std::shared_ptr<const juce::AudioBuffer<float>> canonicalBuffer;
         int64_t firstCanonicalSample{0};
@@ -252,11 +252,11 @@ private:
     void publishLocked();
     bool rebuildPrepared(double requestedSampleRate = -1.0);
     // Prepared range SRC helpers. Callable only while preparedBuildMutex_ is held.
-    void fillCanonicalContextFromNative(std::vector<float>& context,
-                                        int64_t globalBegin,
-                                        int64_t globalEnd,
-                                        int64_t contextGlobalBegin,
-                                        int channel);
+    bool appendCanonicalContextFromNative(std::vector<float>& context,
+                                          int64_t globalBegin,
+                                          int64_t globalEnd,
+                                           int channel);
+    // An empty result reports a failed prepared SRC build.
     std::vector<float> resampleCanonicalRange(
         const PublishedRenderSnapshot& canonicalSnapshot,
         const PlaybackSampleGeometry::SampleSpan& support,

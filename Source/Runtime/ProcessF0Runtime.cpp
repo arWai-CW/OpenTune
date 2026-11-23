@@ -1,8 +1,6 @@
 #include "ProcessF0Runtime.h"
 #include "../Inference/F0InferenceService.h"
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
 #include "../Services/F0ExtractionService.h"
-#endif
 #include "../Utils/ModelPathResolver.h"
 #include "../Utils/AccelerationDetector.h"
 #include "../Utils/AppPreferences.h"
@@ -22,6 +20,26 @@ ProcessF0Runtime& ProcessF0Runtime::getInstance()
     return *instance;
 }
 
+F0ExtractionService* ProcessF0Runtime::araAnalysisQueue()
+{
+    std::lock_guard<std::mutex> lock(araQueueMutex_);
+    if (!araQueue_ && !araQueueClosing_)
+        araQueue_.reset(new F0ExtractionService(100));
+    return araQueue_.get();
+}
+
+void ProcessF0Runtime::shutdownAraAnalysisAndJoin()
+{
+    F0ExtractionService* queue;
+    {
+        std::lock_guard<std::mutex> lock(araQueueMutex_);
+        araQueueClosing_ = true;
+        queue = araQueue_.get();
+    }
+    if (queue)
+        queue->shutdown();
+}
+
 std::shared_ptr<Ort::Env> ProcessF0Runtime::getOrtEnv() const
 {
     std::lock_guard<std::mutex> lock(initMutex_);
@@ -33,31 +51,6 @@ std::shared_ptr<F0InferenceService> ProcessF0Runtime::getF0Service() const
     std::lock_guard<std::mutex> lock(initMutex_);
     return f0Service_;
 }
-
-#if defined(OPENTUNE_HAS_ARA_F0_QUEUE)
-F0ExtractionService& ProcessF0Runtime::araAnalysisQueue()
-{
-    std::lock_guard<std::mutex> lock(araQueueMutex_);
-    if (!araAnalysisQueue_)
-    {
-        araAnalysisQueue_ = std::make_shared<F0ExtractionService>(
-            2, 100, [] { return ProcessF0Runtime::getInstance().getF0Service(); },
-            F0ExtractionService::WorkerTopology::AraPreparationExecution);
-    }
-    return *araAnalysisQueue_;
-}
-
-void ProcessF0Runtime::shutdownAraAnalysisAndJoin()
-{
-    std::shared_ptr<F0ExtractionService> queue;
-    {
-        std::lock_guard<std::mutex> lock(araQueueMutex_);
-        queue = araAnalysisQueue_;
-    }
-    if (queue)
-        queue->shutdown();
-}
-#endif
 
 bool ProcessF0Runtime::initialize(const std::string& modelsDir, std::string* errorMessage)
 {

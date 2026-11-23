@@ -18,13 +18,13 @@
 
 #include "AudioModification.h"
 #include "AudioSource.h"
-#include "AraF0Types.h"
 #include "../Render/ContentRenderService.h"
 #include "../Runtime/ProcessRenderRuntime.h"
 #include "../Services/F0ExtractionService.h"
 #include "../Content/ContentKey.h"
 #include "../Content/OriginalF0FailureEvent.h"
 #include "../Content/PitchReferenceSnapshot.h"
+#include "../Utils/AppPreferences.h"
 #include "../Utils/Note.h"
 #include "../Utils/PlaybackSampleGeometry.h"
 #include "../Utils/PlayHeadState.h"
@@ -39,6 +39,7 @@ class ResamplingManager;
 class NotePitchAudition;
 class NoteAudition;
 struct RenderJob;
+struct NoteGeneratorParams;
 
 /**
  * Document-shared audition routing published for the audio callbacks.
@@ -81,18 +82,20 @@ public:
     // Per ARA2 spec: ARA object persistence uses doStoreObjectsToStream/doRestoreObjectsFromStream,
     // NOT VST3 processor state. Legacy getContentSnapshot/restoreContentPayloadInto removed.
 
-    // Content archive version. Version 9 stores the source window's exclusive
-    // end directly; earlier versions stored duration and are decoded only
-    // through those earlier version numbers.
-    static constexpr int kContentArchiveVersion = 9;
+    static constexpr int kContentArchiveVersion = 10;
     static constexpr int kContentArchiveVersionExplicitSourceEnd = 9;
+    static constexpr int kContentArchiveVersionF0Continuation = 10;
 
-    // Source-window archive codec shared by store/restore and contract tests.
     static void writeSourceWindowToArchive(const SourceWindow& window, juce::XmlElement& element);
     static std::optional<SourceWindow> readSourceWindowFromArchive(
         const juce::XmlElement& element,
-        const juce::ARARestoreObjectsFilter* filter,
+        const juce::ARAAudioSource& parentSource,
+        const ARA::ARARestoreObjectsFilter* hostFilter,
         int archiveVersion);
+
+    AppPreferences& getAppPreferences() noexcept { return appPreferences_; }
+    juce::ChangeBroadcaster& presentationChanges() noexcept { return presentationChanges_; }
+    bool generateNotesOnly(ContentKey key, const NoteGeneratorParams& params);
 
     const ContentRenderService* getContentRenderService() const noexcept;
     std::shared_ptr<ContentRenderService> getContentRenderServiceShared() const noexcept;
@@ -118,7 +121,6 @@ public:
 
     /** 读取 OriginalF0 状态 */
     OriginalF0State readOriginalF0State(ContentKey key) const;
-    std::optional<std::pair<uint64_t, uint64_t>> getAnalysisGeneration(ContentKey key) const;
     std::string readOriginalF0FailureReason(ContentKey key) const;
     std::deque<OriginalF0FailureEvent> takeOriginalF0FailureEvents();
 
@@ -138,11 +140,6 @@ public:
     // 用户 Read 入口：只读取当前内容范围内的首个 PlaybackRegion。
     // archive 恢复且已有有效 F0 的内容由 readRestoredAudio 自动读取，无需此入口。
     int requestReadAudioForPlaybackRegion(juce::ARAPlaybackRegion* playbackRegion);
-    // ARA SDK requires DocumentController operations on main thread.
-    // This method executes synchronously to comply with ARA thread constraints.
-    // Callers should display a loading overlay before calling if UI responsiveness is needed.
-    void requestReadAudioForPlaybackRegionAsync(juce::ARAPlaybackRegion* playbackRegion,
-                                                std::function<void(int)> completionCallback);
     void registerPlaybackRenderer(OpenTunePlaybackRenderer& renderer);
     void unregisterPlaybackRenderer(OpenTunePlaybackRenderer& renderer);
     void collectPlaybackSnapshots();
@@ -154,6 +151,8 @@ public:
     void willDestroyDocument(juce::ARADocument* document) override;
 
     void didUpdateAudioModificationProperties(juce::ARAAudioModification* audioModification) override;
+    void willDeactivateAudioModificationForUndoHistory(juce::ARAAudioModification* audioModification,
+                                                       bool deactivate) override;
     void willDestroyAudioModification(juce::ARAAudioModification* audioModification) override;
 
     void didUpdatePlaybackRegionProperties(juce::ARAPlaybackRegion* playbackRegion) override;
@@ -171,8 +170,8 @@ public:
                                            bool enable) override;
     void willDeactivateAudioSourceForUndoHistory(juce::ARAAudioSource* audioSource,
                                                  bool deactivate) override;
-    void willDeactivateAudioModificationForUndoHistory(
-        juce::ARAAudioModification* audioModification, bool deactivate) override;
+    void didDeactivateAudioSourceForUndoHistory(juce::ARAAudioSource* audioSource,
+                                                bool deactivate) override;
     void willRemovePlaybackRegionFromAudioModification(juce::ARAAudioModification* audioModification,
                                                        juce::ARAPlaybackRegion* playbackRegion) override;
 
@@ -203,6 +202,8 @@ private:
         const std::vector<PlaybackSampleGeometry::SampleSpan>& requestRanges,
         std::shared_ptr<const EditableContentSnapshot> snapshot);
 
+    AppPreferences appPreferences_;
+    juce::ChangeBroadcaster presentationChanges_;
     std::vector<AudioSource> audioSources_;
     std::list<AudioModification> audioModifications_;
     std::vector<PlaybackRegion> playbackRegions_;
@@ -223,20 +224,7 @@ private:
     void performHostTransportBatch(const HostTransportBatch& batch);
     bool hostSeekAvailable();
 
-    // Completion 携带共享只读值结果回到消息线程；弱 sink 在文档撤权后不再交付。
-    struct F0CompletionRecord
-    {
-        std::shared_ptr<const F0ExtractionService::Result> result;
-        F0TaskId task;
-        AraF0Target target;
-    };
-    struct CompletionSink final : AraF0CompletionSink
-    {
-        OpenTuneDocumentController* controller{nullptr};
-        void complete(F0TaskId taskId, SharedAraF0Outcome outcome) override;
-    };
-    AraF0DocumentFlights araF0Flights_;
-    std::shared_ptr<CompletionSink> completionSink_{std::make_shared<CompletionSink>()};
+    AraF0DocumentFlights f0Flights_;
     std::deque<OriginalF0FailureEvent> pendingF0FailureEvents_;
     std::shared_ptr<ProcessRenderRuntime::CompletionGate> renderCompletionGate_{
         std::make_shared<ProcessRenderRuntime::CompletionGate>()};
@@ -249,13 +237,10 @@ private:
     PlayHeadState sharedPlayHeadState_;
 
     AudioSource* findAudioSource(juce::ARAAudioSource* audioSource);
-    AudioSource* findAudioSource(const juce::String& persistentId);
-    const AudioSource* findAudioSource(const juce::String& persistentId) const;
     AudioSource& ensureAudioSource(juce::ARAAudioSource* audioSource);
     AudioModification* findAudioModification(const juce::String& persistentId);
     const AudioModification* findAudioModification(const juce::String& persistentId) const;
     AudioModification* findAudioModification(juce::ARAAudioModification* audioModification);
-    AudioModification& ensureAudioModification(juce::ARAAudioModification* audioModification);
     ContentKey bindAudioModificationIdentity(AudioModification& modification);
     ContentKey makeAudioModificationContentKey(const juce::String& persistentId);
     const juce::String* findPersistentIdForAudioModificationKey(ContentKey key) const;
@@ -321,8 +306,13 @@ private:
         NativePcmSource nativeSource,
         std::shared_ptr<const juce::AudioBuffer<float>> canonicalBuffer,
         int64_t firstCanonicalSample);
+    void audioEditingSchemeChanged(AudioEditingScheme::Scheme scheme);
+    void initializePendingNoteTopologies();
+    bool initializePendingNoteTopology(AudioModification& modification);
+    bool generateNotesOnly(AudioModification& modification, const NoteGeneratorParams& params);
     void readRestoredAudio(const AudioSource* enabledSource);
-    bool birthContentForModification(AudioModification& modification);
+    bool birthContentForModification(AudioModification& modification, const AudioSource& source,
+                                      const OriginalF0InputStamp& currentStamp);
     // Reuses a full native PCM already published for the same source identity and
     // sample content generation. Returns null when a fresh read is required.
     std::shared_ptr<const juce::AudioBuffer<float>> findReusableNativePcm(
@@ -332,19 +322,13 @@ private:
         int sourceChannelCount,
         uint64_t sampleGeneration,
         int64_t sourceSampleCount) const;
-    void removeCRSArtifactsForModification(const AudioModification& modification);
+    void abortSourceF0(const AudioSource& source, AraF0Abort reason);
     void revokeDocumentF0();
-    void revokeSourceF0(const AudioSource& source);
-    void abortSourceF0(AudioSource& source, AraF0Abort reason);
-    void completeAraF0(F0TaskId taskId, SharedAraF0Outcome outcome);
-    bool scheduleAsyncF0Extraction(ContentKey contentKey,
-                                   std::vector<float> channel0Data,
-                                    double sourceSampleRate,
-                                    int sourceChannelCount,
-                                    uint64_t wrapperGeneration,
-                                   juce::String persistentId,
-                                   OriginalF0InputStamp stamp);
-    void commitF0Completion(F0CompletionRecord record);
+    void revokeF0Reception(AudioModification& modification);
+    void removeCRSArtifactsForModification(const AudioModification& modification);
+    void scheduleAsyncF0Extraction(AudioModification& modification, AraF0Pcm pcm,
+                                   const OriginalF0InputStamp& stamp);
+    void commitF0Completion(const AraF0Target& target, const AraF0Result& result);
     static OriginalF0InputStamp makeF0InputStamp(const AudioSource& source, const AudioModification& modification);
     std::shared_ptr<const EditableContentSnapshot> snapshotAudioModification(ContentKey key) const;
     void installDocumentRenderExecution();

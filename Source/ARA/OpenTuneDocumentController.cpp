@@ -5,11 +5,8 @@
 #include "../Audio/NotePitchAudition.h"
 #include "../Utils/NoteAudition.h"
 
-#include "../Inference/ModelFactory.h"
-#include "../Inference/F0InferenceService.h"
 #include "../Runtime/ProcessF0Runtime.h"
 #include "../Runtime/ProcessRenderRuntime.h"
-#include "../Services/F0ExtractionService.h"
 #include "../DSP/F0KeyDetector.h"
 #include "../DSP/ResamplingManager.h"
 #include "../Utils/TimeCoordinate.h"
@@ -20,15 +17,13 @@
 #include "../Render/Stage2TimeStretchRebuilder.h"
 #include "../Utils/SourceWindow.h"
 #include "../Utils/AppLogger.h"
-#include "../Utils/AppPreferences.h"
-#include "../Utils/ModelPathResolver.h"
+#include "../Content/ContentEditCommands.h"
 #include "../Content/ContentSnapshotProjection.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <functional>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -45,6 +40,18 @@ constexpr int kContentPayloadArchiveMagic = 0x4F544143;
 constexpr int kContentPayloadArchiveVersionMin = 3;
 constexpr int kMaxContentPayloadRecords = 4096;
 
+juce::String araDiagnostic(const OpenTuneDocumentController* controller)
+{
+    return "ARA-DIAG: dc=" + juce::String::toHexString(reinterpret_cast<uintptr_t>(controller)) + " ";
+}
+
+juce::String f0Diagnostic(const OpenTuneDocumentController* controller,
+                         const juce::String& modificationId, uint64_t birthRevision)
+{
+    return araDiagnostic(controller) + "modification=" + modificationId.quoted()
+        + " birth=" + juce::String(static_cast<juce::int64>(birthRevision)) + " ";
+}
+
 // clone hook 深拷贝项目 content：经 snapshot 投影复制值字段和可编辑真相，
 // 可变 PitchCurve 由 contentStateFromSnapshot 重建独立实例（不共享），
 // TimeGridSnapshot/分析标量按现有 const 快照语义共享。
@@ -58,37 +65,25 @@ ContentState cloneModificationContent(const ContentState& source)
         && source.analysis.pitchCurve->hasOriginalF0Data();
 
     if (!hasCompletedOriginalF0)
-    {
-        // 不复制没有对应异步任务的中间分析状态；可编辑内容仍完整保留。
-        copy.analysis = {};
-    }
+        copy.analysis.clearOriginalAnalysis();
 
     return copy;
-}
-
-AraF0ConfigTag makeCurrentAraF0ConfigTag()
-{
-    AppPreferences preferences;
-    const auto modelType = preferences.getF0ModelType();
-    const auto modelPath = ModelFactory::getModelPath(
-        modelType, ModelPathResolver::getModelsDirectory());
-    const juce::File modelFile(modelPath);
-    AraF0ConfigTag tag;
-    tag.selectionRevision = F0InferenceService::getConfigurationRevision();
-    tag.absoluteModelPath = modelFile.getFullPathName().toStdString();
-    tag.modelBytes = modelFile.getSize();
-    tag.modelWriteTime = modelFile.getLastModificationTime();
-    return tag;
 }
 
 } // namespace
 
 struct OpenTuneDocumentController::HostTransportRelayState
 {
+    explicit HostTransportRelayState(OpenTuneDocumentController& document) : owner(document) {}
+
+    OpenTuneDocumentController& owner;
     std::atomic<bool> alive { true };
     std::mutex mutex;
     HostTransportCoalescer coalescer;
     bool flushScheduled = false;
+#if JUCE_MAC
+    CFRunLoopTimerRef pendingFlush = nullptr;
+#endif
 };
 
 namespace {
@@ -96,21 +91,19 @@ namespace {
 #if JUCE_MAC
 void transportFlushTimerFired(CFRunLoopTimerRef, void* info)
 {
-    std::unique_ptr<std::function<void()>> owned(static_cast<std::function<void()>*>(info));
-    if (owned != nullptr && static_cast<bool>(*owned))
-        (*owned)();
+    auto flush = std::move(*static_cast<std::function<void()>*>(info));
+    flush();
 }
-#endif
 
-void deferTransportFlush(std::function<void()> fn)
+void deferTransportFlush(CFRunLoopTimerRef& pendingFlush, std::function<void()> fn)
 {
-   #if JUCE_MAC
     // Mouse tracking runs in kCFRunLoopCommonModes. Logic drops playback-controller
     // calls made from that mode, so the flush waits for the default mode.
     auto* holder = new std::function<void()>(std::move(fn));
     CFRunLoopTimerContext context {};
     context.info = holder;
-    CFRunLoopTimerRef timer = CFRunLoopTimerCreate(
+    context.release = [](const void* info) { delete static_cast<const std::function<void()>*>(info); };
+    pendingFlush = CFRunLoopTimerCreate(
         kCFAllocatorDefault,
         CFAbsoluteTimeGetCurrent(),
         0,
@@ -118,23 +111,16 @@ void deferTransportFlush(std::function<void()> fn)
         0,
         transportFlushTimerFired,
         &context);
-    if (timer == nullptr)
+    if (pendingFlush == nullptr)
     {
-        if (holder != nullptr && static_cast<bool>(*holder))
-            (*holder)();
-        delete holder;
+        std::unique_ptr<std::function<void()>> owned(holder);
+        (*owned)();
         return;
     }
 
-    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopDefaultMode);
-    CFRelease(timer);
-   #else
-    if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating())
-        messageManager->callAsync(std::move(fn));
-    else if (fn)
-        fn();
-   #endif
+    CFRunLoopAddTimer(CFRunLoopGetMain(), pendingFlush, kCFRunLoopDefaultMode);
 }
+#endif
 
 template <typename Member>
 bool playbackMemberCallable(const ARA::ARAPlaybackControllerInterface* iface,
@@ -172,66 +158,70 @@ bool editorRendererOwnsRegion(juce::ARAEditorRenderer* renderer,
 OpenTuneDocumentController::OpenTuneDocumentController(const ARA::PlugIn::PlugInEntry* entry,
                                                         const ARA::ARADocumentControllerHostInstance* instance)
     : ARADocumentControllerSpecialisation(entry, instance)
+    , appPreferences_({}, [this](auto scheme) { audioEditingSchemeChanged(scheme); })
     , contentRenderService_(std::make_shared<ContentRenderService>())
     , resamplingManager_(std::make_shared<ResamplingManager>())
-    , transportRelay_(std::make_shared<HostTransportRelayState>())
+    , transportRelay_(std::make_shared<HostTransportRelayState>(*this))
     , notePitchAudition_(std::make_unique<NotePitchAudition>())
     , renderTerminalRelay_(std::make_shared<RenderTerminalRelay>())
 {
     auditionRoute_.notePitchAudition.store(notePitchAudition_.get(), std::memory_order_release);
     ProcessRenderRuntime::getInstance().retainOwner();
     installDocumentRenderExecution();
-    completionSink_->controller = this;
-    AppLogger::logNoThrow("ARA-DIAG: DocumentController created dc="
-        + juce::String::toHexString(reinterpret_cast<uintptr_t>(this)));
-
-}
-
-void OpenTuneDocumentController::CompletionSink::complete(
-    F0TaskId taskId, SharedAraF0Outcome outcome)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    if (controller != nullptr)
-        controller->completeAraF0(taskId, std::move(outcome));
-}
-
-void OpenTuneDocumentController::willDestroyDocument(juce::ARADocument* document)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    juce::ignoreUnused(document);
-    revokeDocumentF0();
+    f0Flights_.sink = std::make_shared<AraF0DocumentFlights::CompletionSink>(
+        [this](const std::vector<F0TaskId>& ids, const AraF0Result& result) {
+            AraF0DocumentFlights::Receivers receivers;
+            for (auto id : ids)
+                receivers.merge(f0Flights_.take(id));
+            for (const auto& receiver : receivers)
+                commitF0Completion(receiver.second, result);
+        });
+    AppLogger::logNoThrow(araDiagnostic(this) + "DocumentController created");
 }
 
 OpenTuneDocumentController::~OpenTuneDocumentController()
 {
     // DC/ARA model ownership、F0 completion 和 DC destruction 均在消息线程串行执行。
-    // flights 与 sink 是消息线程单线程状态，违反契约即未定义行为，按一期契约显式终止。
     auto* messageManager = juce::MessageManager::getInstance();
     if (messageManager == nullptr || !messageManager->isThisTheMessageThread())
     {
         AppLogger::error("ARA-DIAG: DocumentController destroyed off message thread; ownership contract violated");
         std::terminate();
     }
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    AppLogger::logNoThrow(araDiagnostic(this) + "DocumentController destructor begin");
     revokeDocumentF0();
-    renderCompletionGate_->closeAndWait();
 
-    if (transportRelay_ != nullptr)
-        transportRelay_->alive.store(false, std::memory_order_release);
+    transportRelay_->alive.store(false, std::memory_order_release);
+#if JUCE_MAC
+    if (auto timer = std::exchange(transportRelay_->pendingFlush, nullptr))
+    {
+        CFRunLoopTimerInvalidate(timer);
+        CFRelease(timer);
+    }
+#endif
+
     if (renderTerminalRelay_ != nullptr)
         renderTerminalRelay_->clear();
     auditionRoute_.keyboardAudition.store(nullptr, std::memory_order_release);
     auditionRoute_.keyboardMixer.store(nullptr, std::memory_order_release);
     auditionRoute_.notePitchMixer.store(nullptr, std::memory_order_release);
 
+    renderCompletionGate_->closeAndWait();
+
+    // 停止渲染服务：detach execution lease（清 lease、失败收敛排队 job，
+    // 等待同步回调和异步 completion 全部归还）。
     if (contentRenderService_)
         contentRenderService_->detachExecutionLease(contentRenderService_.get());
     ProcessRenderRuntime::getInstance().detachDeferredJobs(
         contentRenderService_.get(), renderCompletionGate_);
 
+    // Owner-driven detach: before clearing playbackRenderers_, walk the list
+    // and call detachDocumentController(*this) on each renderer.
     for (auto* renderer : playbackRenderers_)
+    {
         if (renderer != nullptr)
             renderer->detachDocumentController(*this);
+    }
     collectPlaybackSnapshots();
     playbackRenderers_.clear();
 
@@ -242,6 +232,14 @@ OpenTuneDocumentController::~OpenTuneDocumentController()
     }
 
     ProcessRenderRuntime::getInstance().releaseOwner();
+    AppLogger::logNoThrow(araDiagnostic(this) + "DocumentController destructor end");
+}
+
+void OpenTuneDocumentController::willDestroyDocument(juce::ARADocument*)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    revokeDocumentF0();
+    AppLogger::logNoThrow(araDiagnostic(this) + "willDestroyDocument");
 }
 
 namespace {
@@ -250,10 +248,40 @@ juce::String archiveSeconds(double seconds)
     return juce::String(seconds, std::numeric_limits<double>::max_digits10 - 1, true);
 }
 
+juce::String encodeArchiveFloats(const std::vector<float>& values)
+{
+    return juce::MemoryBlock(values.data(), values.size() * sizeof(float)).toBase64Encoding();
+}
+
+bool decodeArchiveFloats(const juce::String& encoded, std::vector<float>& values)
+{
+    const int dot = encoded.indexOfChar('.');
+    if (dot <= 0)
+        return false;
+
+    const auto length = encoded.substring(0, dot);
+    const auto bytes = length.getLargeIntValue();
+    const auto data = encoded.substring(dot + 1);
+    // JUCE's decoder trusts the byte count and zero-fills a short payload.
+    if (bytes < 0 || bytes > std::numeric_limits<int>::max() / 8
+        || bytes % sizeof(float) != 0 || length != juce::String(bytes)
+        || data.length() != (bytes * 8 + 5) / 6
+        || !data.containsOnly(".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+"))
+        return false;
+
+    juce::MemoryBlock decoded;
+    if (!decoded.fromBase64Encoding(encoded))
+        return false;
+    if (bytes != 0)
+    {
+        values.resize(static_cast<size_t>(bytes) / sizeof(float));
+        std::memcpy(values.data(), decoded.getData(), decoded.getSize());
+    }
+    return std::all_of(values.begin(), values.end(), [](float value) { return std::isfinite(value); });
+}
+
 void serializeAudioModificationContent(const AudioModification& mod, juce::XmlElement& el)
 {
-    el.setAttribute("birthRevision", juce::String(static_cast<juce::int64>(mod.birthRevision)));
-
     OpenTuneDocumentController::writeSourceWindowToArchive(mod.content->sourceWindow, el);
 
     auto* editable = new juce::XmlElement("EditableContent");
@@ -323,8 +351,8 @@ void serializeAudioModificationContent(const AudioModification& mod, juce::XmlEl
             s->setAttribute("pitchDriftScale", seg.parameterSnapshot.pitchDriftScale);
             s->setAttribute("vibratoDepth", seg.parameterSnapshot.vibratoDepth);
             s->setAttribute("vibratoRate", seg.parameterSnapshot.vibratoRate);
-            const juce::MemoryBlock f0Data(seg.f0Data.data(), seg.f0Data.size() * sizeof(float));
-            s->setAttribute("f0Base64", f0Data.toBase64Encoding());
+            s->setAttribute("f0Base64", encodeArchiveFloats(seg.f0Data));
+            s->setAttribute("baseF0Base64", encodeArchiveFloats(seg.baseF0Data));
             editable->addChildElement(s);
         }
     }
@@ -354,7 +382,20 @@ void serializeAudioModificationContent(const AudioModification& mod, juce::XmlEl
 
     auto* analysis = new juce::XmlElement("AnalysisState");
     analysis->setAttribute("analysisRevision", juce::String(static_cast<juce::int64>(mod.content->analysis.analysisRevision)));
-    analysis->setAttribute("originalF0State", static_cast<int>(mod.content->analysis.originalF0State));
+    const auto originalF0State = mod.content->analysis.originalF0State;
+    const bool pending = mod.analysisContinuationPending || originalF0State == OriginalF0State::Extracting;
+    analysis->setAttribute("originalF0State", static_cast<int>(pending
+        ? OriginalF0State::NotRequested : originalF0State));
+    analysis->setAttribute("analysisContinuationPending", pending ? 1 : 0);
+    if (const auto& stamp = mod.originalF0InputStamp;
+        originalF0State == OriginalF0State::Ready && !pending && stamp)
+    {
+        analysis->setAttribute("sourcePersistentId", stamp->sourcePersistentId);
+        analysis->setAttribute("sourceSampleGeneration", juce::String(static_cast<juce::int64>(stamp->sourceSampleGeneration)));
+        analysis->setAttribute("sourceSampleRate", archiveSeconds(stamp->sourceSampleRate));
+        analysis->setAttribute("numSamples", juce::String(static_cast<juce::int64>(stamp->numSamples)));
+        analysis->setAttribute("numChannels", stamp->numChannels);
+    }
     
     // DetectedKey
     auto* dk = new juce::XmlElement("DetectedKey");
@@ -426,19 +467,10 @@ void serializeAudioModificationContent(const AudioModification& mod, juce::XmlEl
             auto* pc = new juce::XmlElement("PitchCurve");
             pc->setAttribute("hopSize", snap->getHopSize());
             pc->setAttribute("sampleRate", snap->getSampleRate());
-            {
-                const auto& f0 = snap->getOriginalF0();
-                juce::MemoryBlock mb(f0.data(), f0.size() * sizeof(float));
-                pc->setAttribute("f0Base64", mb.toBase64Encoding());
-            }
-            {
-                const auto& energy = snap->getOriginalEnergy();
-                if (!energy.empty())
-                {
-                    juce::MemoryBlock mb(energy.data(), energy.size() * sizeof(float));
-                    pc->setAttribute("energyBase64", mb.toBase64Encoding());
-                }
-            }
+            pc->setAttribute("f0Base64", encodeArchiveFloats(snap->getOriginalF0()));
+            const auto& energy = snap->getOriginalEnergy();
+            if (!energy.empty())
+                pc->setAttribute("energyBase64", encodeArchiveFloats(energy));
             for (const auto& range : snap->getErasedRanges())
             {
                 auto* erased = new juce::XmlElement("ErasedRange");
@@ -452,22 +484,21 @@ void serializeAudioModificationContent(const AudioModification& mod, juce::XmlEl
     el.addChildElement(analysis);
 }
 
-// Parse XML to new ContentState with complete replacement semantics.
-// Missing optional children naturally result in default/empty state.
-// Per ARA2 spec: Maps archived source persistentID to current source persistentID via filter.
-std::optional<ContentState> restoreAudioModificationContent(const juce::XmlElement& el,
-                                                                               const juce::ARARestoreObjectsFilter* filter,
-                                                                               int archiveVersion)
+struct RestoredModificationContent
 {
     ContentState content;
-    std::vector<PitchCorrectionSegment> restoredCorrectionSegments;
+    bool analysisContinuationPending{false};
+    std::optional<OriginalF0InputStamp> originalF0InputStamp;
+};
 
-    // source window 必须存在
-    auto sourceWindow = OpenTuneDocumentController::readSourceWindowFromArchive(
-        el, filter, archiveVersion);
-    if (!sourceWindow.has_value())
-        return std::nullopt;
-    content.sourceWindow = std::move(*sourceWindow);
+std::optional<RestoredModificationContent> restoreAudioModificationContent(
+    const juce::XmlElement& el, SourceWindow sourceWindow, int archiveVersion)
+{
+    RestoredModificationContent restored;
+    auto& analysisContinuationPending = restored.analysisContinuationPending;
+    auto& content = restored.content;
+    content.sourceWindow = std::move(sourceWindow);
+    std::vector<PitchCorrectionSegment> restoredCorrectionSegments;
 
     // EditableContent: 必须存在，缺失立即 nullopt
     auto* editable = el.getChildByName("EditableContent");
@@ -679,16 +710,13 @@ std::optional<ContentState> restoreAudioModificationContent(const juce::XmlEleme
             if (!std::isfinite(seg.parameterSnapshot.retuneSpeed) || !std::isfinite(seg.parameterSnapshot.vibratoDepth) || !std::isfinite(seg.parameterSnapshot.vibratoRate) || !std::isfinite(seg.parameterSnapshot.pitchDriftScale))
                 return std::nullopt;
 
-            juce::MemoryBlock f0Data;
-            const auto encodedF0 = s->getStringAttribute("f0Base64");
-            const auto expectedBytes = static_cast<size_t>(seg.endFrame - seg.startFrame) * sizeof(float);
-            if (!f0Data.fromBase64Encoding(encodedF0) || f0Data.getSize() != expectedBytes)
+            const auto frameCount = static_cast<size_t>(seg.endFrame - seg.startFrame);
+            if (!decodeArchiveFloats(s->getStringAttribute("f0Base64"), seg.f0Data)
+                || seg.f0Data.size() != frameCount)
                 return std::nullopt;
-            seg.f0Data.resize(expectedBytes / sizeof(float));
-            std::memcpy(seg.f0Data.data(), f0Data.getData(), expectedBytes);
-            for (const auto value : seg.f0Data)
-                if (!std::isfinite(value))
-                    return std::nullopt;
+            if (archiveVersion >= OpenTuneDocumentController::kContentArchiveVersionF0Continuation
+                && !decodeArchiveFloats(s->getStringAttribute("baseF0Base64"), seg.baseF0Data))
+                return std::nullopt;
 
             restoredCorrectionSegments.push_back(std::move(seg));
         }
@@ -760,6 +788,44 @@ std::optional<ContentState> restoreAudioModificationContent(const juce::XmlEleme
 
         content.analysis.analysisRevision = static_cast<uint64_t>(analysis->getStringAttribute("analysisRevision").getLargeIntValue());
         content.analysis.originalF0State = static_cast<OriginalF0State>(originalF0State);
+        if (archiveVersion < OpenTuneDocumentController::kContentArchiveVersionF0Continuation)
+        {
+            analysisContinuationPending = content.analysis.originalF0State == OriginalF0State::Extracting;
+            if (analysisContinuationPending)
+                content.analysis.originalF0State = OriginalF0State::NotRequested;
+        }
+        else
+        {
+            const auto continuation = analysis->getStringAttribute("analysisContinuationPending");
+            if ((continuation != "0" && continuation != "1")
+                || content.analysis.originalF0State == OriginalF0State::Extracting)
+                return std::nullopt;
+            analysisContinuationPending = continuation == "1";
+            if (analysisContinuationPending && content.analysis.originalF0State != OriginalF0State::NotRequested)
+                return std::nullopt;
+        }
+
+        // The stamp identifies the source state the archived analysis belongs to.
+        // Archives without the stamp attributes (older format) restore without
+        // one and count as mismatch in the restore apply loop.
+        if (archiveVersion >= OpenTuneDocumentController::kContentArchiveVersionF0Continuation
+            && content.analysis.originalF0State == OriginalF0State::Ready
+            && !analysisContinuationPending
+            && analysis->hasAttribute("sourcePersistentId"))
+        {
+            OriginalF0InputStamp stamp;
+            stamp.sourcePersistentId = analysis->getStringAttribute("sourcePersistentId");
+            stamp.sourceSampleGeneration = static_cast<uint64_t>(
+                analysis->getStringAttribute("sourceSampleGeneration").getLargeIntValue());
+            stamp.sourceSampleRate = analysis->getDoubleAttribute("sourceSampleRate");
+            stamp.numSamples = analysis->getStringAttribute("numSamples").getLargeIntValue();
+            stamp.numChannels = analysis->getIntAttribute("numChannels");
+            // The archived window endpoints are stored separately and belong to
+            // the same content; the live stamp projects them identically.
+            stamp.sourceStartSeconds = content.sourceWindow.sourceStartSeconds;
+            stamp.sourceEndSeconds = content.sourceWindow.sourceEndSeconds;
+            restored.originalF0InputStamp = std::move(stamp);
+        }
 
         // DetectedKey: 可选，absence 保持默认（未检测）
         if (auto* dk = analysis->getChildByName("DetectedKey"))
@@ -893,60 +959,35 @@ std::optional<ContentState> restoreAudioModificationContent(const juce::XmlEleme
                 return std::nullopt;
 
             std::vector<float> f0;
-            {
-                juce::MemoryBlock mb;
-                const auto encoded = pc->getStringAttribute("f0Base64");
-                if (encoded.isNotEmpty())
-                {
-                    if (!mb.fromBase64Encoding(encoded) || mb.getSize() % sizeof(float) != 0)
-                        return std::nullopt;
-                    f0.resize(mb.getSize() / sizeof(float));
-                    std::memcpy(f0.data(), mb.getData(), mb.getSize());
-                }
-            }
-
             std::vector<float> energy;
-            {
-                juce::MemoryBlock mb;
-                const auto encoded = pc->getStringAttribute("energyBase64");
-                if (encoded.isNotEmpty())
-                {
-                    if (!mb.fromBase64Encoding(encoded) || mb.getSize() % sizeof(float) != 0)
-                        return std::nullopt;
-                    energy.resize(mb.getSize() / sizeof(float));
-                    std::memcpy(energy.data(), mb.getData(), mb.getSize());
-                }
-            }
+            const auto encodedF0 = pc->getStringAttribute("f0Base64");
+            const auto encodedEnergy = pc->getStringAttribute("energyBase64");
+            if ((encodedF0.isNotEmpty() && !decodeArchiveFloats(encodedF0, f0))
+                || (encodedEnergy.isNotEmpty() && !decodeArchiveFloats(encodedEnergy, energy)))
+                return std::nullopt;
 
-            for (const auto value : f0)
-                if (!std::isfinite(value))
-                    return std::nullopt;
-            for (const auto value : energy)
-                if (!std::isfinite(value))
-                    return std::nullopt;
-
+            // In v10 a correction layer can outlive its raw analysis. Frame
+            // addresses remain in the stored curve coordinates while it waits.
             const int frameCount = static_cast<int>(f0.size());
+            const bool legacy = archiveVersion < OpenTuneDocumentController::kContentArchiveVersionF0Continuation;
+            int erasedEnd = 0;
             std::vector<F0FrameRange> erasedRanges;
             for (auto* erased : pc->getChildWithTagNameIterator("ErasedRange"))
             {
                 const int startFrame = erased->getIntAttribute("startFrame");
                 const int endFrameExclusive = erased->getIntAttribute("endFrameExclusive");
                 if (startFrame < 0 || endFrameExclusive <= startFrame
-                    || endFrameExclusive > frameCount)
+                    || (legacy && endFrameExclusive > frameCount))
                     return std::nullopt;
                 erasedRanges.push_back({startFrame, endFrameExclusive});
+                erasedEnd = std::max(erasedEnd, endFrameExclusive);
             }
 
             content.analysis.pitchCurve = std::make_shared<PitchCurve>();
-            content.analysis.pitchCurve->setHopSize(hopSize);
-            content.analysis.pitchCurve->setSampleRate(sampleRate);
-            if (!f0.empty())
-                content.analysis.pitchCurve->setOriginalF0(std::move(f0));
-            if (!energy.empty())
-                content.analysis.pitchCurve->setOriginalEnergy(std::move(energy));
+            content.analysis.pitchCurve->replaceOriginalAnalysis(
+                std::move(f0), std::move(energy), hopSize, sampleRate);
             if (!erasedRanges.empty())
-                content.analysis.pitchCurve->replaceErasedRangesInRange(
-                    0, frameCount, erasedRanges);
+                content.analysis.pitchCurve->replaceErasedRangesInRange(0, erasedEnd, erasedRanges);
         }
     }
 
@@ -955,15 +996,18 @@ std::optional<ContentState> restoreAudioModificationContent(const juce::XmlEleme
         if (content.analysis.pitchCurve == nullptr)
             return std::nullopt;
 
-        const int frameCount = static_cast<int>(content.analysis.pitchCurve->size());
-        for (const auto& segment : restoredCorrectionSegments)
-            if (segment.endFrame > frameCount)
-                return std::nullopt;
+        if (archiveVersion < OpenTuneDocumentController::kContentArchiveVersionF0Continuation)
+        {
+            const int frameCount = static_cast<int>(content.analysis.pitchCurve->size());
+            for (const auto& segment : restoredCorrectionSegments)
+                if (segment.endFrame > frameCount)
+                    return std::nullopt;
+        }
 
         content.analysis.pitchCurve->replaceCorrectionSegments(restoredCorrectionSegments);
     }
 
-    return content;
+    return restored;
 }
 } // namespace
 
@@ -982,7 +1026,8 @@ void OpenTuneDocumentController::writeSourceWindowToArchive(const SourceWindow& 
 
 std::optional<SourceWindow> OpenTuneDocumentController::readSourceWindowFromArchive(
     const juce::XmlElement& element,
-    const juce::ARARestoreObjectsFilter* filter,
+    const juce::ARAAudioSource& parentSource,
+    const ARA::ARARestoreObjectsFilter* hostFilter,
     int archiveVersion)
 {
     const auto* sourceWindow = element.getChildByName("SourceWindow");
@@ -1012,43 +1057,28 @@ std::optional<SourceWindow> OpenTuneDocumentController::readSourceWindowFromArch
         || endSeconds <= startSeconds)
         return std::nullopt;
 
-    const juce::String archivedSourcePersistentId =
-        sourceWindow->getStringAttribute("sourcePersistentId");
-
-    // Per ARA2 spec (ARAInterface.h:3092): "Any archived states that are either filtered
-    // explicitly, or for which there is no object with a matching persistent ID in the
-    // current graph are simply ignored."
-    // ARA domain uses sourcePersistentId only (not numeric sourceId from Capture/Standalone).
-    // Filter miss -> entire SourceWindow stays invalid (all fields zero/empty).
-    SourceWindow window;
-    window.sourceStartSeconds = startSeconds;
-    window.sourceEndSeconds = endSeconds;
-
-    if (filter == nullptr)
-    {
-        // Full restore: use archived source persistentID and window as-is
-        if (archivedSourcePersistentId.isEmpty())
-            return std::nullopt;
-        window.sourcePersistentId = archivedSourcePersistentId;
-    }
-    else if (archivedSourcePersistentId.isNotEmpty())
-    {
-        auto* audioSource = filter->getAudioSourceToRestoreStateWithID(
-            archivedSourcePersistentId.toRawUTF8());
-        if (audioSource == nullptr)
-            return std::nullopt;
-
-        const auto& remappedId = audioSource->getPersistentID();
-        if (remappedId.empty())
-            return std::nullopt;
-        window.sourcePersistentId = juce::String::fromUTF8(remappedId.c_str());
-    }
-    else
-    {
+    const auto archivedSourceId = sourceWindow->getStringAttribute("sourcePersistentId");
+    if (archivedSourceId.isEmpty())
         return std::nullopt;
+
+    auto parentId = juce::String(parentSource.getPersistentID());
+    if (hostFilter != nullptr)
+    {
+        for (ARA::ARASize i = 0; i < hostFilter->audioSourceIDsCount; ++i)
+        {
+            if (archivedSourceId != hostFilter->audioSourceArchiveIDs[i])
+                continue;
+
+            const auto currentId = juce::String::fromUTF8(hostFilter->audioSourceCurrentIDs != nullptr
+                ? hostFilter->audioSourceCurrentIDs[i] : hostFilter->audioSourceArchiveIDs[i]);
+            if (currentId != parentId)
+                return std::nullopt;
+            parentId = currentId;
+            break;
+        }
     }
 
-    return window;
+    return SourceWindow{0, std::move(parentId), startSeconds, endSeconds};
 }
 
 const ContentRenderService* OpenTuneDocumentController::getContentRenderService() const noexcept
@@ -1248,149 +1278,44 @@ int OpenTuneDocumentController::requestReadAudioForPlaybackRegion(
         return -1;
 
     auto* modification = findAudioModification(playbackRegion->getAudioModification());
-    if (modification == nullptr)
+    if (modification == nullptr || !modification->hasContentState())
         return -1;
 
-    // 构造当前输入 stamp，基于 FCPE 实际输入内容版本判定
-    auto* source = findAudioSource(modification->audioModification != nullptr
-                                       ? modification->audioModification->getAudioSource()
-                                       : nullptr);
+    auto* source = findAudioSource(modification->audioModification->getAudioSource());
     if (source == nullptr || !source->getShape().isValid())
     {
-        if (modification->hasContentState())
-        {
-            const auto reason = source == nullptr
-                ? std::string("ARA Read could not resolve its audio source")
-                : "ARA Read audio source shape is invalid (channels="
-                    + std::to_string(source->getShape().numChannels) + ", samples="
-                    + std::to_string(source->getShape().numSamples) + ", sampleRate="
-                    + std::to_string(source->getShape().sourceSampleRate) + ")";
-            modification->birthState = AudioModificationBirthState::Failed;
-            modification->applyOriginalF0State(OriginalF0State::Failed);
-            applyOriginalF0FailureReasonToModification(modification->contentKey(), reason);
-        }
+        const auto reason = source == nullptr
+            ? std::string("ARA Read could not resolve its audio source")
+            : "ARA Read audio source shape is invalid (channels="
+                + std::to_string(source->getShape().numChannels) + ", samples="
+                + std::to_string(source->getShape().numSamples) + ", sampleRate="
+                + std::to_string(source->getShape().sourceSampleRate) + ")";
+        modification->birthState = AudioModificationBirthState::Failed;
+        modification->applyOriginalF0State(OriginalF0State::Failed);
+        applyOriginalF0FailureReasonToModification(modification->contentKey(), reason);
         return -1;
     }
-    const auto currentStamp = makeF0InputStamp(
-        *source,
-        *modification);
+    if (source->getAraAudioSource()->isDeactivatedForUndoHistory()
+        || modification->audioModification->isDeactivatedForUndoHistory())
+        return -1;
 
-    const bool hasValidF0 = modification->hasContentState()
-        && modification->content->analysis.originalF0State == OriginalF0State::Ready
-        && modification->content->analysis.pitchCurve != nullptr
-        && modification->content->analysis.pitchCurve->hasOriginalF0Data();
+    const auto currentStamp = makeF0InputStamp(*source, *modification);
 
-    const bool sameStamp = modification->originalF0InputStamp.has_value()
-        && modification->originalF0InputStamp.value() == currentStamp;
-
-    // 同输入已 materialized：no-op
-    if (sameStamp && hasValidF0
-        && modification->birthState == AudioModificationBirthState::Ready)
+    const bool hasValidF0 = modification->hasReadyOriginalF0();
+    const bool sameStamp = modification->originalF0InputStamp == currentStamp;
+    const auto task = f0Flights_.taskForReceiver(modification->wrapperGeneration);
+    const bool hasLiveReceiver = task.value != 0
+        && ProcessF0Runtime::getInstance().araAnalysisQueue()->isActive(task);
+    if (sameStamp && (hasLiveReceiver || (hasValidF0 && modification->birthState == AudioModificationBirthState::Ready)))
     {
-        AppLogger::log("ReadAudio: same-input no-op, key="
-            + juce::String(static_cast<juce::int64>(modification->contentKey().objectId)));
+        AppLogger::log(f0Diagnostic(this, modification->persistentId, modification->birthRevision)
+            + "read_audio_same_input");
         return 0;
     }
 
-    // 同输入正在提取 F0：只有本 scope 仍有对应接收资格时才 no-op。
-    if (sameStamp
-        && modification->hasContentState()
-        && modification->content->analysis.originalF0State == OriginalF0State::Extracting)
-    {
-        const AraF0LocalKey localKey{currentStamp, makeCurrentAraF0ConfigTag()};
-        const auto flight = araF0Flights_.localTasks.find(localKey);
-        if (flight != araF0Flights_.localTasks.end())
-        {
-            const auto receivers = araF0Flights_.receivers.find(flight->second);
-            if (receivers != araF0Flights_.receivers.end()
-                && std::any_of(receivers->second.begin(), receivers->second.end(),
-                    [modification, &currentStamp](const AraF0Receiver& receiver) {
-                        return receiver.target.wrapperGeneration == modification->wrapperGeneration
-                            && receiver.target.birthRevision == modification->birthRevision
-                            && receiver.target.stamp == currentStamp;
-                    }))
-            {
-                AppLogger::log("ReadAudio: same-input extracting no-op, key="
-                    + juce::String(static_cast<juce::int64>(modification->contentKey().objectId)));
-                return 0;
-            }
-        }
-    }
-
-    // 同输入 + 有效旧 F0 + 未 materialize：调用 birthContentForModification
-    // 保留 archive F0、只重建 CRS，不重新提交 FCPE
-    if (sameStamp && hasValidF0
-        && (modification->birthState == AudioModificationBirthState::WaitingForSource
-            || modification->birthState == AudioModificationBirthState::Failed))
-    {
-        AppLogger::log("ReadAudio: same-input materialize, key="
-            + juce::String(static_cast<juce::int64>(modification->contentKey().objectId)));
-        if (!birthContentForModification(*modification))
-            return -1;
-        refreshRegisteredRenderers(publishModelChange());
-        return 1;
-    }
-
-    // stamp 不同或没有有效 F0：force-refresh
-    if (modification->originalF0InputStamp.has_value()
-        && modification->originalF0InputStamp.value() != currentStamp)
-    {
-        AppLogger::log("ReadAudio: force-refresh, key="
-            + juce::String(static_cast<juce::int64>(modification->contentKey().objectId))
-            + " oldGen=" + juce::String(static_cast<juce::int64>(modification->originalF0InputStamp->sourceSampleGeneration))
-            + " newGen=" + juce::String(static_cast<juce::int64>(currentStamp.sourceSampleGeneration)));
-    }
-    else if (!hasValidF0)
-    {
-        AppLogger::log("ReadAudio: analysis_requested key="
-            + juce::String(static_cast<juce::int64>(modification->contentKey().objectId)));
-    }
-    else
-    {
-        AppLogger::log("ReadAudio: untracked force-refresh, key="
-            + juce::String(static_cast<juce::int64>(modification->contentKey().objectId)));
-    }
-
-    // force-refresh 前确认 modification 有 content state 且 source 有效；
-    // 不在无效 source 情况下先清掉旧内容
-    if (!modification->hasContentState())
-        return -1;
-    if (source == nullptr || !source->getShape().isValid())
-        return -1;
-
-    // 取消旧 F0 任务、清除 CRS 派生物、invalidateDerivedContent 清除旧 pitchCurve
-    if (!araF0Flights_.receivers.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-            araF0Flights_, modification->wrapperGeneration);
-    removeCRSArtifactsForModification(*modification);
-    modification->invalidateDerivedContent();
-    // invalidateDerivedContent 已清除 analysis（含 pitchCurve）和 originalF0InputStamp
-
-    if (modification->birthState != AudioModificationBirthState::WaitingForSource
-        && modification->birthState != AudioModificationBirthState::Failed)
-        return -1;
-
-    // 设置当前 stamp
-    modification->originalF0InputStamp = currentStamp;
-
-    if (!birthContentForModification(*modification))
-        return -1;
-
+    const bool materialized = birthContentForModification(*modification, *source, currentStamp);
     refreshRegisteredRenderers(publishModelChange());
-    return 1;
-}
-
-void OpenTuneDocumentController::requestReadAudioForPlaybackRegionAsync(
-    juce::ARAPlaybackRegion* playbackRegion,
-    std::function<void(int)> completionCallback)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    // ARA SDK requires DocumentController operations on main thread.
-    // This method now executes synchronously to comply with ARA thread constraints.
-    // Callers should display a loading overlay before calling if UI responsiveness is needed.
-    const int count = requestReadAudioForPlaybackRegion(playbackRegion);
-    if (completionCallback)
-        completionCallback(count);
+    return materialized ? 1 : -1;
 }
 
 void OpenTuneDocumentController::registerPlaybackRenderer(OpenTunePlaybackRenderer& renderer)
@@ -1437,6 +1362,7 @@ void OpenTuneDocumentController::willBeginEditing(juce::ARADocument* document)
 void OpenTuneDocumentController::didEndEditing(juce::ARADocument* document)
 {
     juce::ignoreUnused(document);
+    initializePendingNoteTopologies();
     readRestoredAudio(nullptr);
     refreshRegisteredRenderers(publishModelChange());
 }
@@ -1445,43 +1371,46 @@ void OpenTuneDocumentController::didUpdateAudioModificationProperties(juce::ARAA
 {
     // 唯一 identity binding 点：doCreateAudioModification hook 只按 host pointer
     // 注册 DTO，persistentID 在其返回后由 SDK updateProperties 写入。
-    auto& modification = ensureAudioModification(audioModification);
+    auto& modification = *findAudioModification(audioModification);
+    const bool created = modification.persistentId.isEmpty();
     modification.updateIdentity(audioModification);
     bindAudioModificationIdentity(modification);
-    if (auto* source = findAudioSource(audioModification != nullptr ? audioModification->getAudioSource() : nullptr))
+    auto* parent = audioModification->getAudioSource();
+    if (created)
+        AppLogger::log(araDiagnostic(this) + "createAudioModification persistentID="
+            + modification.persistentId.quoted() + " source=" + juce::String(parent->getPersistentID()).quoted());
+    if (auto* source = findAudioSource(parent))
         modification.attachSource(*source);
+    if (created)
+        modification.registerNoteTopologyInitialization(
+            AudioEditingScheme::usesNotesPrimaryScheme(appPreferences_.getAudioEditingScheme()));
     // Note: birthContentForModification() called lazily on read request, not here
 
     refreshRegisteredRenderers(publishModelChange());
 }
 
-void OpenTuneDocumentController::willDestroyAudioModification(juce::ARAAudioModification* audioModification)
+void OpenTuneDocumentController::willDeactivateAudioModificationForUndoHistory(
+    juce::ARAAudioModification* audioModification, bool deactivate)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    auto* mod = findAudioModification(audioModification);
-    if (mod == nullptr)
-        return;
+    auto& modification = *findAudioModification(audioModification);
+    AppLogger::log(f0Diagnostic(this, modification.persistentId, modification.birthRevision)
+        + "deactivateAudioModificationForUndoHistory edge="
+        + (deactivate ? "active->inactive reason=ModificationUndo" : "inactive->active"));
+    if (deactivate)
+        revokeF0Reception(modification);
+}
 
-    if (!araF0Flights_.receivers.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-            araF0Flights_, mod->wrapperGeneration);
+void OpenTuneDocumentController::willDestroyAudioModification(juce::ARAAudioModification* audioModification)
+{
+    auto& modification = *findAudioModification(audioModification);
+    AppLogger::log(araDiagnostic(this) + "destroyAudioModification persistentID="
+        + modification.persistentId.quoted() + " reason=Orphaned");
+    revokeF0Reception(modification);
+    removeCRSArtifactsForModification(modification);
 
-    // 清理 CRS derived artifacts
-    removeCRSArtifactsForModification(*mod);
-
-    // 删除关联的 PlaybackRegions。Per ARA2 spec, host 必须先销毁 region 再销毁
-    // modification，此处可直接通过 host pointer 判断归属。
-    playbackRegions_.erase(std::remove_if(playbackRegions_.begin(), playbackRegions_.end(),
-                                          [audioModification](const PlaybackRegion& region)
-                                          {
-                                              return region.playbackRegion != nullptr
-                                                  && region.playbackRegion->getAudioModification() == audioModification;
-                                          }),
-                           playbackRegions_.end());
-
-    // 直接按 Host 指针 erase，不先把匹配字段置空
-    // persistent-id→ContentKey 映射保持稳定（araPersistentIdsByObjectId_ 不动）
-    // 新 Host modification 仍创建新 wrapper
+    // The host has already destroyed the associated playback regions.
+    // Keep the persistent ID to ContentKey mapping for a future wrapper.
     audioModifications_.remove_if([audioModification](const AudioModification& m)
                                   {
                                       return m.audioModification == audioModification;
@@ -1514,7 +1443,9 @@ void OpenTuneDocumentController::didAddPlaybackRegionToAudioModification(
 
 void OpenTuneDocumentController::didAddAudioSourceToDocument(juce::ARADocument* /*document*/, juce::ARAAudioSource* audioSource)
 {
-    ensureAudioSource(audioSource);
+    const auto& source = ensureAudioSource(audioSource);
+    AppLogger::log(araDiagnostic(this) + "createAudioSource persistentID="
+        + source.getIdentity().persistentId.quoted());
 }
 
 void OpenTuneDocumentController::didUpdateAudioSourceProperties(juce::ARAAudioSource* audioSource)
@@ -1533,36 +1464,20 @@ void OpenTuneDocumentController::doUpdateAudioSourceContent(juce::ARAAudioSource
                                                             juce::ARAContentUpdateScopes scopeFlags)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    if (auto* source = findAudioSource(audioSource))
+    if (scopeFlags.affectSamples())
     {
-        // Per ARA2 spec (ARAInterface.h:1145-1151):
-        // kARAContentUpdateSignalScopeRemainsUnchanged means actual signal is unaffected.
-        // When signal is unchanged (e.g. window reopen after archive restore):
-        //   - Preserve analysis (pitchCurve, originalF0) — these remain valid
-        //   - Skip removeCRSArtifactsForModification — preserve the published read source
-        //   - CRS playback cache 重建：新内容由用户 Read 触发；archive 恢复且
-        //     已有有效 F0 的内容在 endEditing/access 后自动重建 PCM
-        // When signal changed:
-        //   - Invalidate ALL derived artifacts (CRS + analysis)
-        const bool signalChanged = scopeFlags.affectSamples();
-
-        if (signalChanged)
-        {
-            abortSourceF0(*source, AraF0Abort::SamplesChanged);
-            source->incrementSampleContentGeneration();
-        }
-
+        auto& source = *findAudioSource(audioSource);
+        AppLogger::log(araDiagnostic(this) + "audio_source_samples_changed source="
+            + source.getIdentity().persistentId.quoted() + " reason=SamplesChanged");
+        abortSourceF0(source, AraF0Abort::SamplesChanged);
+        source.incrementSampleContentGeneration();
         for (auto& modification : audioModifications_)
         {
             if (modification.hasContentState()
-                && modification.content->sourceWindow.sourcePersistentId == source->getIdentity().persistentId)
+                && modification.audioModification->getAudioSource() == audioSource)
             {
-                if (signalChanged)
-                {
-                    removeCRSArtifactsForModification(modification);
-                    modification.invalidateDerivedContent();
-                }
-                // else: signal unchanged — preserve everything; PCM 由 readRestoredAudio / 用户 Read 重建
+                removeCRSArtifactsForModification(modification);
+                modification.clearOriginalAnalysis();
             }
         }
     }
@@ -1574,69 +1489,58 @@ void OpenTuneDocumentController::willEnableAudioSourceSamplesAccess(juce::ARAAud
                                                                     bool enable)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    auto& source = ensureAudioSource(audioSource);
-    if (!enable && source.hasSampleAccess())
-    {
-        abortSourceF0(source, AraF0Abort::SamplesDisabled);
-        source.incrementSampleContentGeneration();
-        const auto sourcePersistentId = source.getIdentity().persistentId;
-        for (auto& modification : audioModifications_)
-            if (modification.hasContentState()
-                && modification.content->sourceWindow.sourcePersistentId == sourcePersistentId)
-                modification.analysisContinuationPending = false;
-    }
-    source.setSampleAccessEnabled(enable);
+    auto& source = *findAudioSource(audioSource);
+    // ARA dispatches this hook only when the requested value differs from the current one.
+    AppLogger::log(araDiagnostic(this) + "enableAudioSourceSamplesAccess source="
+        + source.getIdentity().persistentId.quoted()
+        + (enable ? " edge=false->true" : " edge=true->false reason=SamplesDisabled"));
+    if (enable)
+        return;
+
+    abortSourceF0(source, AraF0Abort::SamplesDisabled);
+    source.incrementSampleContentGeneration();
+    source.clearReaderLease();
 }
 
 void OpenTuneDocumentController::didEnableAudioSourceSamplesAccess(juce::ARAAudioSource* audioSource,
                                                                      bool enable)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    auto& source = ensureAudioSource(audioSource);
-    source.setSampleAccessEnabled(enable);
-    // ARA Audio Source Management callback 内为 AudioSource 建立 reader 所有权；
-    // 实际 sample read 在用户 Read 或 restore 自动 materialization 的非实时路径进行。
-    if (enable)
+    if (enable && !audioSource->isDeactivatedForUndoHistory())
+    {
+        auto& source = *findAudioSource(audioSource);
         source.createReaderLease();
-
-    // 编辑会话结束后到达的 access：archive 恢复且已有有效 F0 的内容自动重建 PCM。
-    // 编辑会话内（isHostEditingDocument）不提前读，由 didEndEditing 统一处理。
-    if (enable && !getDocumentController()->isHostEditingDocument())
-        readRestoredAudio(&source);
+        // Inside an edit, didEndEditing reads the completed graph.
+        if (!getDocumentController()->isHostEditingDocument())
+            readRestoredAudio(&source);
+    }
 
     refreshRegisteredRenderers(publishModelChange());
 }
 
-void OpenTuneDocumentController::willDeactivateAudioSourceForUndoHistory(
-    juce::ARAAudioSource* audioSource, bool deactivate)
+void OpenTuneDocumentController::willDeactivateAudioSourceForUndoHistory(juce::ARAAudioSource* audioSource,
+                                                                        bool deactivate)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto& source = *findAudioSource(audioSource);
+    AppLogger::log(araDiagnostic(this) + "deactivateAudioSourceForUndoHistory source="
+        + source.getIdentity().persistentId.quoted()
+        + (deactivate ? " edge=active->inactive reason=SourceUndo" : " edge=inactive->active"));
     if (!deactivate)
         return;
-    auto* source = findAudioSource(audioSource);
-    if (source == nullptr)
-        return;
 
-    abortSourceF0(*source, AraF0Abort::SourceUndo);
-    source->incrementSampleContentGeneration();
-    source->clearReaderLease();
-    const auto sourcePersistentId = source->getIdentity().persistentId;
-    for (auto& modification : audioModifications_)
-        if (modification.hasContentState()
-            && modification.content->sourceWindow.sourcePersistentId == sourcePersistentId)
-            modification.analysisContinuationPending = false;
+    abortSourceF0(source, AraF0Abort::SourceUndo);
+    source.incrementSampleContentGeneration();
+    source.clearReaderLease();
 }
 
-void OpenTuneDocumentController::willDeactivateAudioModificationForUndoHistory(
-    juce::ARAAudioModification* audioModification, bool deactivate)
+void OpenTuneDocumentController::didDeactivateAudioSourceForUndoHistory(juce::ARAAudioSource* audioSource,
+                                                                       bool deactivate)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    if (!deactivate)
-        return;
-    auto* modification = findAudioModification(audioModification);
-    if (modification != nullptr && !araF0Flights_.receivers.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-            araF0Flights_, modification->wrapperGeneration);
+    // The host can retain its sample grant across undo/redo. Restore only the reader here.
+    if (!deactivate && audioSource->isSampleAccessEnabled())
+        findAudioSource(audioSource)->createReaderLease();
 }
 
 void OpenTuneDocumentController::willRemovePlaybackRegionFromAudioModification(
@@ -1650,199 +1554,221 @@ void OpenTuneDocumentController::willRemovePlaybackRegionFromAudioModification(
 
 void OpenTuneDocumentController::willDestroyAudioSource(juce::ARAAudioSource* audioSource)
 {
-    AudioSource* source = findAudioSource(audioSource);
-    const auto persistentId = source != nullptr ? source->getIdentity().persistentId : juce::String();
-    if (source != nullptr)
-        revokeSourceF0(*source);
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto& destroyedSource = *findAudioSource(audioSource);
+    AppLogger::log(araDiagnostic(this) + "destroyAudioSource persistentID="
+        + destroyedSource.getIdentity().persistentId.quoted() + " reason=Orphaned");
+    abortSourceF0(destroyedSource, AraF0Abort::Orphaned);
+    // All modifications have already been destroyed. Erasing the source destroys its reader.
     audioSources_.erase(std::remove_if(audioSources_.begin(), audioSources_.end(),
                                        [audioSource](const AudioSource& source)
                                        {
                                            return source.matches(audioSource);
                                        }),
                         audioSources_.end());
-    if (persistentId.isNotEmpty())
+
+    refreshRegisteredRenderers(publishModelChange());
+}
+
+bool OpenTuneDocumentController::doRestoreObjectsFromStream(juce::ARAInputStream& input,
+                                                             const juce::ARARestoreObjectsFilter* filter)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto logPrefix = araDiagnostic(this) + "doRestoreObjectsFromStream";
+    const auto* hostFilter = filter->getHostFilter();
+    AppLogger::log(logPrefix + " begin documentData="
+        + (filter->shouldRestoreDocumentData() ? "true" : "false")
+        + " filter=" + (hostFilter != nullptr ? "explicit" : "full"));
+    const auto logMapping = [&](const char* object, const juce::String& archiveId, const juce::String& currentId) {
+        AppLogger::log(logPrefix + " filter_object=" + object
+            + " archive=" + archiveId.quoted() + " current=" + currentId.quoted());
+    };
+    if (hostFilter != nullptr)
     {
-        for (auto& modification : audioModifications_)
+        const auto logMappings = [&](const char* object, ARA::ARASize count,
+                                     const ARA::ARAPersistentID* archiveIds,
+                                     const ARA::ARAPersistentID* currentIds) {
+            AppLogger::log(logPrefix + " filter_object=" + object
+                + " count=" + juce::String(static_cast<juce::uint64>(count)));
+            for (ARA::ARASize i = 0; i < count; ++i)
+                logMapping(object, juce::String::fromUTF8(archiveIds[i]),
+                    juce::String::fromUTF8(currentIds != nullptr ? currentIds[i] : archiveIds[i]));
+        };
+        logMappings("source", hostFilter->audioSourceIDsCount,
+                    hostFilter->audioSourceArchiveIDs, hostFilter->audioSourceCurrentIDs);
+        logMappings("modification", hostFilter->audioModificationIDsCount,
+                    hostFilter->audioModificationArchiveIDs, hostFilter->audioModificationCurrentIDs);
+    }
+    else
+    {
+        for (const auto* source : getDocument()->getAudioSources())
         {
-            if (modification.hasContentState()
-                && modification.content->sourceWindow.sourcePersistentId == persistentId)
+            const auto sourceId = juce::String(source->getPersistentID());
+            logMapping("source", sourceId, sourceId);
+            for (const auto* modification : source->getAudioModifications())
             {
-                removeCRSArtifactsForModification(modification);
-                modification.resetContent();
+                const auto id = juce::String(modification->getPersistentID());
+                logMapping("modification", id, id);
             }
         }
     }
 
-    refreshRegisteredRenderers(publishModelChange());
-}
+    const auto finish = [&](bool ok, size_t applied, const juce::String& detail) {
+        AppLogger::log(logPrefix + " end result=" + (ok ? "true" : "false")
+            + " applied=" + juce::String(static_cast<juce::uint64>(applied)) + detail);
+        if (ok && applied == 0)
+            AppLogger::log(logPrefix + " restore_true_zero_applied");
+        return ok;
+    };
 
-namespace {
-juce::String mapRestoredPersistentId(const juce::String& archivedPersistentId,
-                                     const juce::ARARestoreObjectsFilter* filter)
-{
-    if (archivedPersistentId.isEmpty())
-        return {};
-
-    if (filter == nullptr)
-        return archivedPersistentId;
-
-    auto* audioModification = filter->getAudioModificationToRestoreStateWithID(
-        archivedPersistentId.toRawUTF8());
-    if (audioModification == nullptr)
-        return {};
-
-    const auto& restoredPersistentId = audioModification->getPersistentID();
-    return restoredPersistentId.empty() ? juce::String() : juce::String::fromUTF8(restoredPersistentId.c_str());
-}
-} // namespace
-
-bool OpenTuneDocumentController::doRestoreObjectsFromStream(juce::ARAInputStream& input,
-                                                                const juce::ARARestoreObjectsFilter* filter)
-{
     const int magic = input.readInt();
-    if (magic != kContentPayloadArchiveMagic)
-        return false;
-
     const int version = input.readInt();
-    if (version < kContentPayloadArchiveVersionMin || version > kContentArchiveVersion)
-        return false;
-
     const int bindingCount = input.readInt();
+    if (input.failed() || input.getPosition() != 3 * sizeof(int32_t))
+        return finish(false, 0, " reason=archive_header_read");
+    if (magic != kContentPayloadArchiveMagic)
+        return finish(false, 0, " reason=archive_magic");
+    if (version < kContentPayloadArchiveVersionMin || version > kContentArchiveVersion)
+        return finish(false, 0, " reason=archive_version version=" + juce::String(version));
     if (bindingCount < 0 || bindingCount > kMaxContentPayloadRecords)
-        return false;
+        return finish(false, 0, " reason=archive_record_count records=" + juce::String(bindingCount));
+    AppLogger::log(logPrefix + " version=" + juce::String(version) + " records=" + juce::String(bindingCount));
 
-    // pending 元素直接存 {AudioModification* target, ContentState state}
-    std::vector<std::pair<AudioModification*, ContentState>> pending;
+    struct PendingRestore
+    {
+        AudioModification& target;
+        const AudioSource& source;
+        RestoredModificationContent restored;
+    };
+    std::vector<PendingRestore> pending;
     pending.reserve(bindingCount);
-
     for (int i = 0; i < bindingCount; ++i)
     {
-        const auto archivedPersistentId = input.readString();
-        const auto restoredPersistentId = mapRestoredPersistentId(archivedPersistentId, filter);
-        const juce::String xmlStr = input.readString();
-        if (restoredPersistentId.isEmpty())
+        const auto start = input.getPosition();
+        const auto archivedId = input.readString();
+        const auto xmlString = input.readString();
+        auto record = " record=" + juce::String(i) + " archive=" + archivedId.quoted();
+        const auto reject = [&](const char* reason) {
+            return finish(false, 0, record + " decode=failed reason=" + reason);
+        };
+        if (input.failed()
+            || input.getPosition() - start != static_cast<juce::int64>(archivedId.getNumBytesAsUTF8() + xmlString.getNumBytesAsUTF8() + 2))
+            return reject("archive_record_read");
+
+        auto* araTarget = filter->getAudioModificationToRestoreStateWithID<juce::ARAAudioModification>(archivedId.toRawUTF8());
+        auto* target = araTarget != nullptr ? findAudioModification(araTarget) : nullptr;
+        if (target == nullptr)
+        {
+            AppLogger::log(logPrefix + record + " decode=skipped_no_target");
             continue;
+        }
 
-        auto* targetMod = findAudioModification(restoredPersistentId);
-        // 映射成功但当前图无 target wrapper：ARA2 spec 允许忽略，不视为失败
-        if (targetMod == nullptr)
-            continue;
-
-        // target 存在但 Host pointer 为空或 XML 损坏：真正的数据损坏，必须失败
-        if (targetMod->audioModification == nullptr || xmlStr.isEmpty())
-            return false;
-
-        auto xml = juce::XmlDocument::parse(xmlStr);
-        if (xml == nullptr)
-            return false;
-
-        // Parse XML to new content state with ARA filter remapping, then validate.
-        // Fail early without changing any target.
-        auto newContent = restoreAudioModificationContent(*xml, filter, version);
-        if (!newContent.has_value())
-            return false;
-
-        const auto* source = findAudioSource(newContent->sourceWindow.sourcePersistentId);
+        auto* parent = target->audioModification->getAudioSource();
+        record += " current=" + target->persistentId.quoted()
+            + " parent=" + juce::String(parent->getPersistentID()).quoted();
+        const auto* source = findAudioSource(parent);
         if (source == nullptr)
-            return false;
+            return reject("missing_live_parent");
+        const auto xml = juce::XmlDocument::parse(xmlString);
+        if (xml == nullptr || !xml->hasTagName("AudioModificationContent"))
+            return reject("modification_xml");
+        auto sourceWindow = readSourceWindowFromArchive(*xml, *parent, hostFilter, version);
+        if (!sourceWindow.has_value())
+            return reject("source_window_or_parent_mapping");
 
-        const double sourceDuration = source->getShape().durationSeconds();
-        if (!std::isfinite(sourceDuration)
-            || newContent->sourceWindow.sourceStartSeconds < 0.0
-            || newContent->sourceWindow.sourceEndSeconds > sourceDuration + 1.0e-6)
-            return false;
+        const auto& shape = source->getShape();
+        const auto sourceDuration = shape.durationSeconds();
+        if (!std::isfinite(sourceDuration) || sourceWindow->sourceStartSeconds < 0.0
+            || sourceWindow->sourceEndSeconds > sourceDuration + 1.0e-6)
+            return reject("source_window_outside_parent");
 
-        // 秒区间是归档授权值；只验证其操作采样跨度可读，不回写窗口或 TimeGrid。
-        const double sourceSampleRate = source->getShape().sourceSampleRate;
-        const int64_t windowStartSample = TimeCoordinate::secondsToSamplesNearest(
-            newContent->sourceWindow.sourceStartSeconds, sourceSampleRate);
-        const int64_t windowEndSample = TimeCoordinate::secondsToSamplesNearest(
-            newContent->sourceWindow.sourceEndSeconds, sourceSampleRate);
-        if (windowStartSample < 0
-            || windowStartSample >= windowEndSample
-            || windowEndSample > source->getShape().numSamples)
-            return false;
+        // The archived seconds stay authoritative. These addresses only validate the readable span.
+        const auto windowStartSample = TimeCoordinate::secondsToSamplesNearest(
+            sourceWindow->sourceStartSeconds, shape.sourceSampleRate);
+        const auto windowEndSample = TimeCoordinate::secondsToSamplesNearest(
+            sourceWindow->sourceEndSeconds, shape.sourceSampleRate);
+        if (windowStartSample < 0 || windowStartSample >= windowEndSample || windowEndSample > shape.numSamples)
+            return reject("source_window_unreadable");
 
-        const auto* targetSource = findAudioSource(targetMod->audioModification->getAudioSource());
-        if (targetSource == nullptr || targetSource->getIdentity().persistentId != newContent->sourceWindow.sourcePersistentId)
-            return false;
-
-        if (targetMod->hasContentState()
-            && targetMod->content->sourceWindow.sourcePersistentId != newContent->sourceWindow.sourcePersistentId)
-            return false;
-
-        // 存储原子替换数据，避免第二次解析
-        pending.emplace_back(targetMod, std::move(*newContent));
+        auto restored = restoreAudioModificationContent(*xml, std::move(*sourceWindow), version);
+        if (!restored.has_value())
+            return reject("modification_content");
+        AppLogger::log(logPrefix + record + " decode=ok analysis_state="
+            + juce::String(static_cast<int>(restored->content.analysis.originalF0State))
+            + " continuation=" + (restored->analysisContinuationPending ? "true" : "false"));
+        pending.push_back({*target, *source, std::move(*restored)});
     }
 
-    // 全部成功后对 pending 进行原子替换
-    for (auto& [targetMod, state] : pending)
+    const bool notesPrimary = AudioEditingScheme::usesNotesPrimaryScheme(appPreferences_.getAudioEditingScheme());
+    for (auto& entry : pending)
     {
-        if (!araF0Flights_.receivers.empty())
-            ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-                araF0Flights_, targetMod->wrapperGeneration);
-        removeCRSArtifactsForModification(*targetMod);
-
-        // 原子替换 content（新恢复的 ContentState 携带默认运行时 revision 1）
-        targetMod->content = std::move(state);
-        targetMod->birthState = AudioModificationBirthState::WaitingForSource;
-        ++targetMod->birthRevision;
-        targetMod->originalF0InputStamp.reset();
-    }
-
-    for (const auto& pendingEntry : pending)
-    {
-        auto* targetMod = pendingEntry.first;
-        const auto& restoredAnalysis = targetMod->content->analysis;
-        if (restoredAnalysis.originalF0State == OriginalF0State::Ready
-            && restoredAnalysis.pitchCurve != nullptr
-            && restoredAnalysis.pitchCurve->hasOriginalF0Data()) {
-            if (auto* source = findAudioSource(targetMod->content->sourceWindow.sourcePersistentId))
-                targetMod->originalF0InputStamp = makeF0InputStamp(*source, *targetMod);
+        auto& target = entry.target;
+        AppLogger::log(f0Diagnostic(this, target.persistentId, target.birthRevision)
+            + "revoke_reception reason=RestoreReplacement");
+        revokeF0Reception(target);
+        removeCRSArtifactsForModification(target);
+        target.content = std::move(entry.restored.content);
+        target.birthState = AudioModificationBirthState::WaitingForSource;
+        target.analysisContinuationPending = entry.restored.analysisContinuationPending;
+        target.registerNoteTopologyInitialization(notesPrimary);
+        target.originalF0InputStamp.reset();
+        target.attachSource(entry.source);
+        // Archived F0 is adopted only when its recorded input stamp still
+        // matches the live parent source. A mismatch (or a stamp-less older
+        // archive) keeps the user's edits, clears the stale analysis and
+        // re-enters analysis once through the pending continuation.
+        const auto liveStamp = makeF0InputStamp(entry.source, target);
+        if (target.hasReadyOriginalF0())
+        {
+            if (entry.restored.originalF0InputStamp
+                && *entry.restored.originalF0InputStamp == liveStamp)
+            {
+                AppLogger::log(f0Diagnostic(this, target.persistentId, target.birthRevision)
+                    + "restore_adopted_archive_f0 stamp=" + liveStamp.sourcePersistentId.quoted());
+                target.originalF0InputStamp = liveStamp;
+            }
+            else
+            {
+                AppLogger::log(f0Diagnostic(this, target.persistentId, target.birthRevision)
+                    + "restore_stamp_mismatch clear_original_analysis reason=RestoreStampMismatch");
+                target.clearOriginalAnalysis();
+                target.analysisContinuationPending = true;
+            }
         }
     }
 
-    // 提交完成后再通知 Host，避免 Host 观察到半提交状态。
-    // Per ARA2 spec (ARAInterface.h:2223-2228): archive restore must not notify Host.
-    // Host is already aware of the restore that triggered this call.
-    // refreshRegisteredRenderers() is sufficient to update plugin-internal views.
-
-    refreshRegisteredRenderers(publishModelChange());
-    return true;
+    // The host initiated the restore. Publish the completed batch to internal views only.
+    if (!pending.empty())
+        refreshRegisteredRenderers(publishModelChange());
+    return finish(true, pending.size(), {});
 }
 
 bool OpenTuneDocumentController::doStoreObjectsToStream(juce::ARAOutputStream& output,
                                                           const juce::ARAStoreObjectsFilter* filter)
 {
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto logPrefix = araDiagnostic(this) + "doStoreObjectsToStream";
+    const auto& sources = filter->getAudioSourcesToStore();
+    const auto& modifications = filter->getAudioModificationsToStore();
+    juce::StringArray sourceIds, modificationIds;
+    for (const auto* source : sources)
+        sourceIds.add(juce::String(source->getPersistentID()).quoted());
+
     std::vector<const AudioModification*> bindings;
-    bindings.reserve(audioModifications_.size());
-
-    // Per ARA2 spec: AudioModification is persistent model object.
-    // Archive modification-scoped state based on ARA store filter and persistentId,
-    // not on CRS derived buffer renderability.
-    if (filter == nullptr)
+    bindings.reserve(modifications.size());
+    for (auto* araMod : modifications)
     {
-        for (const auto& modification : audioModifications_)
-            if (modification.persistentId.isNotEmpty() && modification.hasContentState())
-                bindings.push_back(&modification);
+        const auto id = juce::String(araMod->getPersistentID());
+        modificationIds.add(id.quoted());
+        const auto* modification = findAudioModification(id);
+        if (modification != nullptr && modification->hasContentState())
+            bindings.push_back(modification);
     }
-    else
-    {
-        const auto& modsToStore = filter->getAudioModificationsToStore();
-        for (const auto& modification : audioModifications_)
-        {
-            if (modification.persistentId.isEmpty() || !modification.hasContentState())
-                continue;
-
-            const auto* araMod = modification.audioModification;
-            if (araMod == nullptr)
-                continue;
-
-            const auto* basePtr = static_cast<const ARA::PlugIn::AudioModification*>(araMod);
-            if (std::find(modsToStore.begin(), modsToStore.end(), basePtr) != modsToStore.end())
-                bindings.push_back(&modification);
-        }
-    }
+    AppLogger::log(logPrefix + " documentData=" + (filter->shouldStoreDocumentData() ? "true" : "false")
+        + " source_count=" + juce::String(sourceIds.size()) + " sources=[" + sourceIds.joinIntoString(", ") + "]"
+        + " modification_count=" + juce::String(modificationIds.size()) + " modifications=["
+        + modificationIds.joinIntoString(", ") + "] records="
+        + juce::String(static_cast<juce::uint64>(bindings.size())));
 
     if (bindings.size() > static_cast<size_t>(kMaxContentPayloadRecords))
         return false;
@@ -1913,26 +1839,6 @@ AudioSource* OpenTuneDocumentController::findAudioSource(juce::ARAAudioSource* a
                                  [audioSource](const AudioSource& source)
                                  {
                                      return source.matches(audioSource);
-                                 });
-    return it != audioSources_.end() ? &*it : nullptr;
-}
-
-AudioSource* OpenTuneDocumentController::findAudioSource(const juce::String& persistentId)
-{
-    const auto it = std::find_if(audioSources_.begin(), audioSources_.end(),
-                                 [&persistentId](const AudioSource& source)
-                                 {
-                                     return source.getIdentity().persistentId == persistentId;
-                                 });
-    return it != audioSources_.end() ? &*it : nullptr;
-}
-
-const AudioSource* OpenTuneDocumentController::findAudioSource(const juce::String& persistentId) const
-{
-    const auto it = std::find_if(audioSources_.begin(), audioSources_.end(),
-                                 [&persistentId](const AudioSource& source)
-                                 {
-                                     return source.getIdentity().persistentId == persistentId;
                                  });
     return it != audioSources_.end() ? &*it : nullptr;
 }
@@ -2047,28 +1953,6 @@ const AudioModification* OpenTuneDocumentController::findAudioModificationByCont
     return nullptr;
 }
 
-AudioModification& OpenTuneDocumentController::ensureAudioModification(juce::ARAAudioModification* audioModification)
-{
-    // 1. 先按 pointer 查找活跃 modification
-    if (auto* existing = findAudioModification(audioModification))
-    {
-        existing->updateIdentity(audioModification);
-        bindAudioModificationIdentity(*existing);
-        return *existing;
-    }
-
-    // 2. Host 新 modification 必须直接创建新 wrapper，不再 rebind 已销毁的 wrapper
-    AudioModification modification;
-    modification.wrapperGeneration = nextWrapperGeneration_++;
-    modification.updateIdentity(audioModification);
-    bindAudioModificationIdentity(modification);
-    if (audioModification != nullptr)
-        if (auto* source = findAudioSource(audioModification->getAudioSource()))
-            modification.attachSource(*source);
-    audioModifications_.push_back(std::move(modification));
-    return audioModifications_.back();
-}
-
 PlaybackRegion* OpenTuneDocumentController::findPlaybackRegion(juce::ARAPlaybackRegion* playbackRegion)
 {
     const auto it = std::find_if(playbackRegions_.begin(), playbackRegions_.end(),
@@ -2152,6 +2036,7 @@ OpenTuneDocumentController::makeProjection(const PlaybackRegion& placement) cons
 
 std::vector<OpenTunePlaybackRenderer*> OpenTuneDocumentController::publishModelChange()
 {
+    presentationChanges_.sendChangeMessage();
     return playbackRenderers_;
 }
 
@@ -2200,74 +2085,86 @@ bool OpenTuneDocumentController::publishPlaybackReadSourceForModification(
     return true;
 }
 
+void OpenTuneDocumentController::audioEditingSchemeChanged(AudioEditingScheme::Scheme scheme)
+{
+    jassert(juce::MessageManager::existsAndIsCurrentThread());
+    const bool notesPrimary = AudioEditingScheme::usesNotesPrimaryScheme(scheme);
+    for (auto& modification : audioModifications_)
+        modification.registerNoteTopologyInitialization(notesPrimary);
+
+    if (notesPrimary && !getDocumentController()->isHostEditingDocument())
+        initializePendingNoteTopologies();
+    presentationChanges_.sendChangeMessage();
+}
+
+void OpenTuneDocumentController::initializePendingNoteTopologies()
+{
+    for (auto& modification : audioModifications_)
+        initializePendingNoteTopology(modification);
+}
+
+bool OpenTuneDocumentController::initializePendingNoteTopology(AudioModification& modification)
+{
+    if (!modification.noteTopologyInitPending
+        || !modification.hasReadyOriginalF0()
+        || modification.content->noteTopologyInitialized
+        || modification.audioModification->isDeactivatedForUndoHistory()
+        || modification.audioModification->getAudioSource()->isDeactivatedForUndoHistory())
+        return false;
+
+    return generateNotesOnly(modification, {});
+}
+
+bool OpenTuneDocumentController::generateNotesOnly(ContentKey key, const NoteGeneratorParams& params)
+{
+    jassert(juce::MessageManager::existsAndIsCurrentThread());
+    auto* modification = findAudioModificationByContentKey(key);
+    return modification != nullptr && modification->hasContentState() && generateNotesOnly(*modification, params);
+}
+
+bool OpenTuneDocumentController::generateNotesOnly(AudioModification& modification, const NoteGeneratorParams& params)
+{
+    const auto snapshot = modification.snapshotContent();
+    const auto patch = ContentEditCommands::planGenerateNotesOnly(*snapshot, params);
+    if (!patch)
+        return false;
+
+    applyNotesToModification(modification.contentKey(),
+                             mergeNotesRange(snapshot->notes, patch->affectedRange, patch->afterNotesInRange));
+    requestFullModificationRender(modification.contentKey());
+    return true;
+}
+
 void OpenTuneDocumentController::readRestoredAudio(const AudioSource* enabledSource)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    // Restore 归档 F0 自动重建 PCM；已失效但保留输入 stamp 的内容也在访问到达后续接分析。
-    // WaitingForSource 由现有生命周期保证 content 存在，直接读 *mod.content。
-    // 没有有效归档 F0 和输入 stamp 的新内容跳过自动扫描。
+    // Permission never creates intent. Only archived F0 or an explicit analysis
+    // request can enter this path after endEditing or a late sample-access grant.
     for (auto& mod : audioModifications_)
     {
-        if (mod.birthState != AudioModificationBirthState::WaitingForSource)
+        if (mod.birthState != AudioModificationBirthState::WaitingForSource
+            || (!mod.analysisContinuationPending && !mod.hasReadyOriginalF0()))
             continue;
 
-        auto& content = *mod.content;
-        const bool hasReadyF0 = content.analysis.originalF0State == OriginalF0State::Ready
-            && content.analysis.pitchCurve != nullptr
-            && content.analysis.pitchCurve->hasOriginalF0Data();
-        const bool hasInvalidatedAnalysis =
-            content.analysis.originalF0State == OriginalF0State::NotRequested
-            && mod.originalF0InputStamp.has_value()
-            && mod.analysisContinuationPending;
-        if (!hasReadyF0 && !hasInvalidatedAnalysis)
+        auto* parent = mod.audioModification->getAudioSource();
+        const auto* source = findAudioSource(parent);
+        if ((enabledSource != nullptr && source != enabledSource)
+            || !source->canReadSamples()
+            || parent->isDeactivatedForUndoHistory()
+            || mod.audioModification->isDeactivatedForUndoHistory())
             continue;
 
-        if (enabledSource != nullptr
-            && content.sourceWindow.sourcePersistentId != enabledSource->getIdentity().persistentId)
+        const auto currentStamp = makeF0InputStamp(*source, mod);
+        // Without analysis intent, only matching Ready content can materialize its PCM.
+        if (!mod.analysisContinuationPending
+            && (mod.originalF0InputStamp != currentStamp
+                || std::none_of(playbackRegions_.begin(), playbackRegions_.end(), [&](const PlaybackRegion& region) {
+                    return region.hasValidPlacement()
+                        && region.playbackRegion->getAudioModification() == mod.audioModification;
+                })))
             continue;
 
-        // 仅对有有效 PlaybackRegion 的 modification 触发读取（归属实时读 SDK object）
-        bool hasPlaybackRegion = false;
-        for (const auto& region : playbackRegions_)
-        {
-            if (!region.hasValidPlacement())
-                continue;
-
-            const auto* hostModification = region.playbackRegion->getAudioModification();
-            if (hostModification != nullptr
-                && juce::String(hostModification->getPersistentID()) == mod.persistentId)
-            {
-                hasPlaybackRegion = true;
-                break;
-            }
-        }
-        if (!hasPlaybackRegion)
-            continue;
-
-        bool continueAnalysisAfterBirth = hasInvalidatedAnalysis;
-        if (auto* source = findAudioSource(mod.content->sourceWindow.sourcePersistentId)) {
-            const auto currentStamp = makeF0InputStamp(*source, mod);
-            if (mod.originalF0InputStamp.has_value()) {
-                if (mod.originalF0InputStamp.value() != currentStamp) {
-                    if (!araF0Flights_.receivers.empty())
-                        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-                            araF0Flights_, mod.wrapperGeneration);
-                    removeCRSArtifactsForModification(mod);
-                    mod.invalidateDerivedContent();
-                    mod.originalF0InputStamp = currentStamp;
-                    mod.analysisContinuationPending = true;
-                    continueAnalysisAfterBirth = true;
-                }
-            } else {
-                mod.originalF0InputStamp = currentStamp;
-            }
-        }
-
-        birthContentForModification(mod);
-        if (continueAnalysisAfterBirth
-            && mod.birthState == AudioModificationBirthState::WaitingForSource
-            && mod.content->analysis.originalF0State == OriginalF0State::NotRequested)
-            mod.analysisContinuationPending = true;
+        birthContentForModification(mod, *source, currentStamp);
     }
 }
 
@@ -2288,21 +2185,29 @@ OriginalF0InputStamp OpenTuneDocumentController::makeF0InputStamp(const AudioSou
     return stamp;
 }
 
-bool OpenTuneDocumentController::birthContentForModification(AudioModification& modification)
+bool OpenTuneDocumentController::birthContentForModification(AudioModification& modification,
+                                                            const AudioSource& source,
+                                                             const OriginalF0InputStamp& currentStamp)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    modification.analysisContinuationPending = false;
-    if (!araF0Flights_.receivers.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeReceiver(
-            araF0Flights_, modification.wrapperGeneration);
-
-    // 前置条件：必须已拥有 content 和有效 sourceWindow。
-    // restore 路径负责建立 content；这里只读取 AudioSource 并构建 CRS 派生 PCM。
-    if (!modification.hasContentState())
-        return false;
-
     auto& content = *modification.content;
-    ++modification.birthRevision;
+    const bool alreadyHasF0 = modification.originalF0InputStamp == currentStamp
+        && modification.hasReadyOriginalF0();
+    const bool wasPending = modification.analysisContinuationPending;
+    modification.registerNoteTopologyInitialization(
+        AudioEditingScheme::usesNotesPrimaryScheme(appPreferences_.getAudioEditingScheme()));
+    AppLogger::log(f0Diagnostic(this, modification.persistentId, modification.birthRevision)
+        + "revoke_reception reason=Birth");
+    revokeF0Reception(modification);
+    if (!alreadyHasF0)
+    {
+        removeCRSArtifactsForModification(modification);
+        if (modification.originalF0InputStamp.has_value() && modification.originalF0InputStamp != currentStamp)
+            AppLogger::log(f0Diagnostic(this, modification.persistentId, modification.birthRevision)
+                + "clear_original_analysis reason=stamp_mismatch");
+        modification.clearOriginalAnalysis();
+    }
+
     const auto failBirth = [this, &modification](std::string reason) {
         modification.birthState = AudioModificationBirthState::Failed;
         modification.applyOriginalF0State(OriginalF0State::Failed);
@@ -2317,41 +2222,23 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
             + ", startSeconds=" + std::to_string(content.sourceWindow.sourceStartSeconds)
             + ", endSeconds=" + std::to_string(content.sourceWindow.sourceEndSeconds) + ")");
 
-    auto* source = findAudioSource(content.sourceWindow.sourcePersistentId);
-    if (source == nullptr)
-    {
-        modification.birthState = AudioModificationBirthState::WaitingForSource;
-        return false;
-    }
-
-    const auto& sourceShape = source->getShape();
+    const auto& sourceShape = source.getShape();
     if (!sourceShape.isValid())
-    {
         return failBirth("ARA audio source shape is invalid (channels="
             + std::to_string(sourceShape.numChannels) + ", samples="
             + std::to_string(sourceShape.numSamples) + ", sampleRate="
             + std::to_string(sourceShape.sourceSampleRate) + ")");
-    }
 
-    if (!source->hasSampleAccess())
+    if (!source.canReadSamples())
     {
         modification.birthState = AudioModificationBirthState::WaitingForSource;
+        modification.analysisContinuationPending = !alreadyHasF0;
+        if (modification.analysisContinuationPending && !wasPending)
+            modification.audioModification->notifyContentChanged(juce::ARAContentUpdateScopes::tuningIsAffected(), true);
         return false;
     }
 
-    if (!source->hasReaderLease())
-        return failBirth("ARA host audio reader is unavailable while sample access is enabled");
-
-    // 若已有 valid F0（恢复路径），跳过重复提取，避免新旧重叠。
-    // 验证 pitchCurve 实际包含 F0 数据，防止空 pitchCurve 误判为已提取。
-    // 同时要求 stamp 与当前 source stamp 相等，force refresh 后不得走 archive reuse。
-    const auto currentStamp = makeF0InputStamp(*source, modification);
-    const bool stampMatches = modification.originalF0InputStamp.has_value()
-        && modification.originalF0InputStamp.value() == currentStamp;
-    const bool alreadyHasF0 = stampMatches
-        && content.analysis.originalF0State == OriginalF0State::Ready
-        && content.analysis.pitchCurve != nullptr
-        && content.analysis.pitchCurve->hasOriginalF0Data();
+    modification.originalF0InputStamp = currentStamp;
 
     // 1. Authoritative source window. Seconds stay untouched; sample addresses
     //    below are derived operation coordinates.
@@ -2359,7 +2246,7 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
 
     const double sourceSampleRate = sourceShape.sourceSampleRate;
     const int numChannels = sourceShape.numChannels;
-    const uint64_t audioRevision = source->getSampleContentGeneration();
+    const uint64_t audioRevision = source.getSampleContentGeneration();
 
     // 2. Retain the actual native PCM. A full-source read is reused by every
     //    modification of the same source identity and sample content generation
@@ -2390,9 +2277,7 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
             for (int ch = 0; ch < numChannels; ++ch)
                 channelPointers[static_cast<size_t>(ch)] = nativePcm.getWritePointer(ch, chunkOffset);
 
-            if (!source->readAudioSamples(readOffset,
-                                          static_cast<int>(chunkSamples),
-                                          channelPointers.data()))
+            if (!source.readAudioSamples(readOffset, static_cast<int>(chunkSamples), channelPointers.data()))
             {
                 return failBirth("ARA host audio reader failed (startSample="
                     + std::to_string(readOffset) + ", samples="
@@ -2481,7 +2366,7 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
     content.audioRevision = audioRevision;
 
     // 4. Channel 0 for async F0 uses the window-local original native span.
-    std::vector<float> channel0Data;
+    AraF0Pcm pcm{{}, sourceSampleRate, numChannels};
     if (!alreadyHasF0)
     {
         const int64_t f0Start = TimeCoordinate::secondsToSamplesNearest(
@@ -2497,10 +2382,8 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
                 + std::to_string(f0Samples) + ")");
         }
 
-        channel0Data.resize(static_cast<size_t>(f0Samples));
-        const float* ch0Read = nativeSource.buffer->getReadPointer(0)
-            + static_cast<int>(f0Start);
-        std::copy(ch0Read, ch0Read + f0Samples, channel0Data.begin());
+        const float* ch0Read = nativeSource.buffer->getReadPointer(0) + static_cast<int>(f0Start);
+        pcm.channel0.assign(ch0Read, ch0Read + f0Samples);
     }
 
     // 5. Silent gaps are detected on the canonical editing input.
@@ -2521,15 +2404,8 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
             + std::to_string(modification.contentKey().objectId));
     }
 
-    // 8. Register async F0 receiver before the host can reenter the model graph.
+    // 8. Set modification state and notify ARA host
     modification.birthState = AudioModificationBirthState::Ready;
-    if (!alreadyHasF0)
-    {
-        scheduleAsyncF0Extraction(modification.contentKey(), std::move(channel0Data), sourceSampleRate,
-                                  numChannels, modification.wrapperGeneration,
-                                  modification.persistentId, currentStamp);
-    }
-
     // 有效 F0 表示 archive/runtime 恢复，不产生新模型变更；无有效 F0 表示用户 Read，保持通知
     if (modification.audioModification != nullptr)
         modification.audioModification->notifyContentChanged(
@@ -2541,6 +2417,9 @@ bool OpenTuneDocumentController::birthContentForModification(AudioModification& 
     // 用户手动 Read（无有效 F0）不提前 Stage1，F0 提取完成后由既有链继续。
     if (alreadyHasF0)
         requestFullModificationRender(modification.contentKey());
+
+    if (!alreadyHasF0)
+        scheduleAsyncF0Extraction(modification, std::move(pcm), currentStamp);
 
     return true;
 }
@@ -2582,6 +2461,49 @@ std::shared_ptr<const juce::AudioBuffer<float>> OpenTuneDocumentController::find
     return nullptr;
 }
 
+void OpenTuneDocumentController::abortSourceF0(const AudioSource& source, AraF0Abort reason)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    for (auto& modification : audioModifications_)
+        if (modification.audioModification->getAudioSource() == source.getAraAudioSource())
+            modification.revokeAnalysisReception();
+
+    // Look up tasks by source object identity; the host may have rebound the
+    // source's persistentId while its flights were in flight.
+    const auto sourceTasks = f0Flights_.bySource.find(source.getAraAudioSource());
+    if (sourceTasks == f0Flights_.bySource.end())
+        return;
+
+    const std::set<F0TaskId> tasks = sourceTasks->second;
+    for (auto id : tasks)
+        f0Flights_.take(id);
+    ProcessF0Runtime::getInstance().araAnalysisQueue()->abortTasks(tasks, reason);
+}
+
+void OpenTuneDocumentController::revokeDocumentF0()
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    f0Flights_.sink.reset();
+    if (f0Flights_.byTaskId.empty())
+        return;
+
+    std::set<F0TaskId> tasks;
+    for (const auto& entry : f0Flights_.byTaskId)
+        tasks.insert(entry.first);
+    f0Flights_.byTaskId.clear();
+    f0Flights_.byLocalKey.clear();
+    f0Flights_.bySource.clear();
+    ProcessF0Runtime::getInstance().araAnalysisQueue()->abortTasks(tasks, AraF0Abort::Orphaned);
+}
+
+void OpenTuneDocumentController::revokeF0Reception(AudioModification& modification)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    modification.revokeAnalysisReception();
+    if (!f0Flights_.byTaskId.empty())
+        ProcessF0Runtime::getInstance().araAnalysisQueue()->revokeReceiver(f0Flights_, modification.wrapperGeneration);
+}
+
 void OpenTuneDocumentController::removeCRSArtifactsForModification(const AudioModification& modification)
 {
     if (contentRenderService_ == nullptr)
@@ -2599,221 +2521,114 @@ void OpenTuneDocumentController::removeCRSArtifactsForModification(const AudioMo
 // not user intent. 新内容仅由用户 Read（requestReadAudioForPlaybackRegion）读取；
 // archive 恢复且已有有效 F0 的内容在 endEditing/access 后自动重建 PCM。
 
-void OpenTuneDocumentController::revokeDocumentF0()
+void OpenTuneDocumentController::scheduleAsyncF0Extraction(
+    AudioModification& modification, AraF0Pcm pcm, const OriginalF0InputStamp& stamp)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    completionSink_->controller = nullptr;
-    if (!araF0Flights_.receivers.empty() || !araF0Flights_.localTasks.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().detachDocument(araF0Flights_);
-}
-
-void OpenTuneDocumentController::revokeSourceF0(const AudioSource& source)
-{
-    const auto& persistentId = source.getIdentity().persistentId;
-    std::vector<F0TaskId> tasks;
-    for (auto local = araF0Flights_.localTasks.begin(); local != araF0Flights_.localTasks.end();)
-    {
-        if (local->first.input.sourcePersistentId == persistentId)
-        {
-            tasks.push_back(local->second);
-            local = araF0Flights_.localTasks.erase(local);
-        }
-        else
-        {
-            ++local;
-        }
-    }
-    if (!tasks.empty())
-        ProcessF0Runtime::getInstance().araAnalysisQueue().revokeTaskReceivers(
-            araF0Flights_, tasks);
-}
-
-void OpenTuneDocumentController::abortSourceF0(AudioSource& source, AraF0Abort reason)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    const auto& persistentId = source.getIdentity().persistentId;
-    std::vector<F0TaskId> tasks;
-    for (const auto& [localKey, taskId] : araF0Flights_.localTasks)
-        if (localKey.input.sourcePersistentId == persistentId)
-            tasks.push_back(taskId);
-    if (tasks.empty())
+    if (!f0Flights_.sink)
         return;
 
-    const char* reasonName = reason == AraF0Abort::SamplesDisabled ? "SamplesDisabled"
-        : reason == AraF0Abort::SourceUndo ? "SourceUndo" : "SamplesChanged";
-    auto& queue = ProcessF0Runtime::getInstance().araAnalysisQueue();
-    for (const auto taskId : tasks)
+    const auto logPrefix = f0Diagnostic(this, modification.persistentId, modification.birthRevision);
+    AppLogger::log(logPrefix + "submit source=" + stamp.sourcePersistentId.quoted());
+    AraF0Submission submission{AraF0Admission::Closing, {}};
+    if (auto* queue = ProcessF0Runtime::getInstance().araAnalysisQueue())
     {
-        queue.abortTask(taskId, reason);
-        araF0Flights_.receivers.erase(taskId);
-        for (auto local = araF0Flights_.localTasks.begin(); local != araF0Flights_.localTasks.end();)
-            local = local->second == taskId ? araF0Flights_.localTasks.erase(local) : std::next(local);
-        AppLogger::logNoThrow("ARA-F0 analysis_aborted taskId="
-            + juce::String(static_cast<juce::int64>(taskId.value))
-            + " reason=" + reasonName
-            + " sourceGeneration="
-            + juce::String(static_cast<juce::int64>(source.getSampleContentGeneration())));
-    }
-}
-
-void OpenTuneDocumentController::completeAraF0(
-    F0TaskId taskId, SharedAraF0Outcome sharedResult)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    for (;;)
-    {
-        auto task = araF0Flights_.receivers.find(taskId);
-        if (task == araF0Flights_.receivers.end() || task->second.empty())
+        const AraF0LocalKey key{stamp, F0ExtractionService::snapshotAraConfig(pcm.sourceSampleRate)};
+        submission = queue->submit(f0Flights_, key, std::move(pcm),
+            {modification.contentKey(), modification.wrapperGeneration,
+             modification.birthRevision, modification.persistentId, stamp});
+        switch (submission.admission)
         {
-            if (task != araF0Flights_.receivers.end())
-                araF0Flights_.receivers.erase(task);
-            for (auto local = araF0Flights_.localTasks.begin(); local != araF0Flights_.localTasks.end();)
-                local = local->second == taskId ? araF0Flights_.localTasks.erase(local) : std::next(local);
+            case AraF0Admission::Accepted:
+            case AraF0Admission::Attached:
+                f0Flights_.bySource[modification.audioModification->getAudioSource()]
+                    .insert(submission.taskId);
+                break;
+            case AraF0Admission::QueueFull:
+            case AraF0Admission::InvalidInput:
+            case AraF0Admission::Closing:
+                break;
+        }
+    }
+    AppLogger::log(logPrefix + "submit_result=" + juce::String(static_cast<int>(submission.admission))
+        + " task=" + juce::String(static_cast<juce::uint64>(submission.taskId.value)));
+
+    const char* reason;
+    switch (submission.admission)
+    {
+        case AraF0Admission::Accepted:
+        case AraF0Admission::Attached:
             return;
-        }
-
-        auto receiver = std::move(task->second.front());
-        task->second.erase(task->second.begin());
-        const auto sink = receiver.sink.lock();
-        if (sink == nullptr || sink.get() != completionSink_.get()
-            || completionSink_->controller != this)
-            continue;
-
-        commitF0Completion(F0CompletionRecord{sharedResult, taskId, std::move(receiver.target)});
+        case AraF0Admission::QueueFull:
+            reason = "F0 extraction queue is full";
+            break;
+        case AraF0Admission::InvalidInput:
+            reason = "F0 extraction submission was rejected: invalid input";
+            break;
+        case AraF0Admission::Closing:
+            reason = "F0 extraction queue is closing";
+            break;
     }
+    modification.applyOriginalF0State(OriginalF0State::Failed);
+    applyOriginalF0FailureReasonToModification(modification.contentKey(), reason);
 }
 
-bool OpenTuneDocumentController::scheduleAsyncF0Extraction(
-    ContentKey key,
-    std::vector<float> channel0Data,
-    double sourceSampleRate,
-    int sourceChannelCount,
-    uint64_t wrapperGeneration,
-    juce::String persistentId,
-    OriginalF0InputStamp stamp)
+void OpenTuneDocumentController::commitF0Completion(const AraF0Target& target, const AraF0Result& result)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    if (!f0Flights_.sink)
+        return;
 
-    auto* modification = findAudioModificationByContentKey(key);
-    if (modification == nullptr)
-        return false;
-    const auto birthRevision = modification->birthRevision;
-    auto markFailedIfCurrentBirth = [this, key, wrapperGeneration, persistentId, birthRevision](
-        const std::string& reason) {
-        if (auto* current = findAudioModificationByContentKey(key))
-        {
-            if (current->birthRevision == birthRevision
-                && current->wrapperGeneration == wrapperGeneration
-                && current->persistentId == persistentId)
-            {
-                current->applyOriginalF0State(OriginalF0State::Failed);
-                applyOriginalF0FailureReasonToModification(key, reason);
-            }
-        }
-    };
-
-    if (contentRenderService_ == nullptr)
+    const auto logPrefix = f0Diagnostic(this, target.modificationPersistentId, target.birthRevision);
+    auto* mod = findAudioModificationByContentKey(target.key);
+    if (mod == nullptr
+        || mod->wrapperGeneration != target.wrapperGeneration
+        || mod->birthRevision != target.birthRevision
+        || !mod->hasContentState()
+        || mod->persistentId != target.modificationPersistentId
+        || mod->originalF0InputStamp != target.stamp)
     {
-        markFailedIfCurrentBirth("ARA content render service is unavailable for F0 extraction");
-        return false;
+        AppLogger::log(logPrefix + "commit_discarded reason=reception_revoked");
+        return;
     }
 
-    const AraF0LocalKey localKey{stamp, makeCurrentAraF0ConfigTag()};
-    AraF0Target target;
-    target.key = key;
-    target.wrapperGeneration = wrapperGeneration;
-    target.birthRevision = birthRevision;
-    target.modificationPersistentId = persistentId;
-    target.stamp = stamp;
-    AraF0Receiver receiver{std::move(target), {}, completionSink_};
-    AraF0Pcm pcm{std::move(channel0Data), sourceSampleRate, sourceChannelCount};
-    auto& queue = ProcessF0Runtime::getInstance().araAnalysisQueue();
-    const auto submission = queue.submit(araF0Flights_, localKey, std::move(pcm), std::move(receiver));
-    if (submission.admission == AraF0Admission::Accepted
-        || submission.admission == AraF0Admission::Attached)
-        return true;
-
-    // Closing 在触碰 flights 之前返回，无可撤销项；QueueFull/InvalidInput/Closing
-    // 都使当前合法 birth 进入既有 Failed 语义。
-    const auto reason = submission.admission == AraF0Admission::QueueFull
-        ? "F0 extraction queue is full"
-        : submission.admission == AraF0Admission::Closing
-            ? "F0 extraction service is closing"
-            : "F0 extraction input audio is invalid";
-    markFailedIfCurrentBirth(reason);
-    return false;
-}
-
-void OpenTuneDocumentController::commitF0Completion(F0CompletionRecord record)
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-
-    if (completionSink_->controller != this
-        || !ProcessF0Runtime::getInstance().araAnalysisQueue().isActive(record.task))
+    auto* hostModification = mod->audioModification;
+    auto* parent = hostModification->getAudioSource();
+    const auto* source = findAudioSource(parent);
+    if (source == nullptr || !source->canReadSamples()
+        || parent->isDeactivatedForUndoHistory() || hostModification->isDeactivatedForUndoHistory()
+        || makeF0InputStamp(*source, *mod) != target.stamp)
+    {
+        AppLogger::log(logPrefix + "commit_discarded reason=input_unavailable_or_changed");
         return;
-    auto* modification = findAudioModificationByContentKey(record.target.key);
-    if (modification == nullptr
-        || modification->wrapperGeneration != record.target.wrapperGeneration
-        || modification->birthRevision != record.target.birthRevision
-        || !modification->hasContentState()
-        || modification->persistentId != record.target.modificationPersistentId
-        || !modification->originalF0InputStamp.has_value()
-        || modification->originalF0InputStamp.value() != record.target.stamp)
-        return;
+    }
 
-    auto* currentSource = findAudioSource(modification->content->sourceWindow.sourcePersistentId);
-    if (currentSource == nullptr
-        || makeF0InputStamp(*currentSource, *modification) != record.target.stamp)
-        return;
-
+    AppLogger::log(logPrefix + "commit success=" + (result.errorMessage.empty() ? "true" : "false")
+        + " frames=" + juce::String(static_cast<juce::uint64>(result.f0.size())));
     collectPlaybackSnapshots();
-    const auto& result = *record.result;
-    auto* hostModificationToNotify = modification->audioModification;
-    if (!result.success || result.f0.empty())
+    if (!result.errorMessage.empty())
     {
-        const std::string reason = !result.errorMessage.empty()
-            ? result.errorMessage
-            : result.f0.empty()
-                ? "F0 extraction completed without any frames"
-                : "F0 extraction failed without an error detail";
-        modification->applyOriginalF0State(OriginalF0State::Failed);
-        applyOriginalF0FailureReasonToModification(record.target.key, reason);
-        AppLogger::error("ARA-F0: extraction failed reason=" + juce::String(reason));
+        mod->applyOriginalF0State(OriginalF0State::Failed);
+        applyOriginalF0FailureReasonToModification(target.key, result.errorMessage);
+        AppLogger::error("ARA-F0: extraction failed reason=" + juce::String(result.errorMessage));
         return;
     }
 
-    const auto previousPitchCurve = modification->content->analysis.pitchCurve;
-    auto pitchCurve = std::make_shared<PitchCurve>();
-    pitchCurve->setOriginalF0(result.f0);
-    pitchCurve->setSampleRate(static_cast<double>(result.f0SampleRate));
-    pitchCurve->setHopSize(result.hopSize);
-    if (!result.energy.empty())
-        pitchCurve->setOriginalEnergy(result.energy);
-    if (previousPitchCurve != nullptr
-        && !previousPitchCurve->getSnapshot()->getErasedRanges().empty())
-    {
-        pitchCurve->replaceErasedRangesInRange(
-            0, static_cast<int>(result.f0.size()),
-            previousPitchCurve->getSnapshot()->getErasedRanges());
-    }
-
-    if (modification->content->analysis.detectedKey.origin != Origin::Manual)
+    if (mod->content->analysis.detectedKey.origin != Origin::Manual)
     {
         F0KeyDetector detector;
         const auto detectedKey = detector.detect(result.f0, result.energy);
         if (detectedKey.origin != Origin::Unset)
-            modification->applyDetectedKey(detectedKey);
+            mod->applyDetectedKey(detectedKey);
     }
 
-    modification->applyOriginalF0(std::move(pitchCurve));
-    modification->originalF0InputStamp = record.target.stamp;
-    requestFullModificationRender(record.target.key);
-
-    if (hostModificationToNotify != nullptr)
-        hostModificationToNotify->notifyContentChanged(
-            juce::ARAContentUpdateScopes::tuningIsAffected(), true);
+    auto pitchCurve = mod->content->analysis.pitchCurve;
+    if (pitchCurve == nullptr)
+        pitchCurve = std::make_shared<PitchCurve>();
+    pitchCurve->replaceOriginalAnalysis(result.f0, result.energy, result.hopSize, result.f0SampleRate);
+    applyOriginalF0ToModification(target.key, std::move(pitchCurve));
+    AppLogger::log(logPrefix + "commit_applied");
 }
-
 
 // Per architecture: DC owns CRS and installs render execution lease.
 // The lease is detached in destructor to prevent dangling callback.
@@ -2862,7 +2677,7 @@ void OpenTuneDocumentController::installDocumentRenderExecution()
         if (renderTerminalRelay != nullptr)
         {
             const auto key = job.contentKey;
-            juce::MessageManager::callAsync([this, renderGate, renderTerminalRelay, key] {
+            ProcessRenderRuntime::postAsyncCallback([this, renderGate, renderTerminalRelay, key] {
                 const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*renderGate);
                 if (callbackLease)
                 {
@@ -2896,7 +2711,7 @@ void OpenTuneDocumentController::processDocumentRenderJob(
         if (renderTerminalRelay != nullptr)
         {
             const auto key = job.contentKey;
-            juce::MessageManager::callAsync([completionGate, renderTerminalRelay, key] {
+            ProcessRenderRuntime::postAsyncCallback([completionGate, renderTerminalRelay, key] {
                 const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*completionGate);
                 if (callbackLease)
                     renderTerminalRelay->invoke(key, false);
@@ -2916,7 +2731,7 @@ void OpenTuneDocumentController::processDocumentRenderJob(
         if (renderTerminalRelay != nullptr)
         {
             const auto key = job.contentKey;
-            juce::MessageManager::callAsync([completionGate, renderTerminalRelay, key] {
+            ProcessRenderRuntime::postAsyncCallback([completionGate, renderTerminalRelay, key] {
                 const ProcessRenderRuntime::CompletionCallbackLease callbackLease(*completionGate);
                 if (callbackLease)
                     renderTerminalRelay->invoke(key, false);
@@ -3166,12 +2981,16 @@ void OpenTuneDocumentController::enqueueHostTransport(const std::function<void(H
 
 void OpenTuneDocumentController::scheduleHostTransportFlush()
 {
-    auto relay = transportRelay_;
-    if (relay == nullptr)
-        return;
-
-    deferTransportFlush([this, relay]()
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto flush = [weak = std::weak_ptr<HostTransportRelayState>(transportRelay_)]()
     {
+        const auto relay = weak.lock();
+        if (!relay)
+            return;
+       #if JUCE_MAC
+        if (auto timer = std::exchange(relay->pendingFlush, nullptr))
+            CFRelease(timer);
+       #endif
         if (!relay->alive.load(std::memory_order_acquire))
             return;
 
@@ -3185,8 +3004,13 @@ void OpenTuneDocumentController::scheduleHostTransportFlush()
         if (!relay->alive.load(std::memory_order_acquire))
             return;
 
-        performHostTransportBatch(batch);
-    });
+        relay->owner.performHostTransportBatch(batch);
+    };
+   #if JUCE_MAC
+    deferTransportFlush(transportRelay_->pendingFlush, std::move(flush));
+   #else
+    ProcessRenderRuntime::postAsyncCallback(std::move(flush));
+   #endif
 }
 
 void OpenTuneDocumentController::performHostTransportBatch(const HostTransportBatch& batch)
@@ -3296,15 +3120,6 @@ OriginalF0State OpenTuneDocumentController::readOriginalF0State(ContentKey key) 
     return mod->content->analysis.originalF0State;
 }
 
-std::optional<std::pair<uint64_t, uint64_t>>
-OpenTuneDocumentController::getAnalysisGeneration(ContentKey key) const
-{
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    const auto* mod = findAudioModificationByContentKey(key);
-    if (mod == nullptr || !mod->hasContentState())
-        return std::nullopt;
-    return std::make_pair(mod->wrapperGeneration, mod->birthRevision);
-}
 
 DetectedKey OpenTuneDocumentController::readDetectedKey(ContentKey key) const
 {
@@ -3448,12 +3263,10 @@ bool OpenTuneDocumentController::applyOriginalF0ToModification(const ContentKey&
     if (mod == nullptr || !mod->hasContentState()) return false;
     mod->applyOriginalF0(std::move(curve));
 
-    // Notify ARA host of content change for cache/save state invalidation
-    if (mod->audioModification != nullptr)
-        mod->audioModification->notifyContentChanged(
-            juce::ARAContentUpdateScopes::tuningIsAffected(), true);
-
-    // OriginalF0 只更新分析数据，不触发音频渲染，所以不调用 refreshRegisteredRenderers
+    if (getDocumentController()->isHostEditingDocument() || !initializePendingNoteTopology(*mod))
+        requestFullModificationRender(key);
+    mod->audioModification->notifyContentChanged(juce::ARAContentUpdateScopes::tuningIsAffected(), true);
+    presentationChanges_.sendChangeMessage();
     return true;
 }
 

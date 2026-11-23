@@ -17,12 +17,12 @@ void AudioModification::updateIdentity(juce::ARAAudioModification* modification)
 
 bool AudioModification::attachSource(const AudioSource& source)
 {
+    juce::ignoreUnused(source);
     if (content.has_value())
     {
         if (content->sourceWindow.sourcePersistentId != source.getIdentity().persistentId)
             return false;
 
-        cachedSourceShape_ = source.getShape();
         return true;
     }
 
@@ -45,29 +45,41 @@ bool AudioModification::attachSource(const AudioSource& source)
     state.timeGridRevision = 1;
     content.emplace(std::move(state));
     birthState = AudioModificationBirthState::WaitingForSource;
-    cachedSourceShape_ = source.getShape();
     return true;
 }
 
-void AudioModification::resetContent() noexcept
+void AudioModification::revokeAnalysisReception() noexcept
 {
     ++birthRevision;
-    content.reset();
-    originalF0InputStamp.reset();
     analysisContinuationPending = false;
-    birthState = AudioModificationBirthState::Empty;
+    // Extracting is stored as a continuation in the archive.
+    if (content && content->analysis.originalF0State == OriginalF0State::Extracting)
+        content->analysis.setOriginalF0State(OriginalF0State::NotRequested);
 }
 
-void AudioModification::invalidateDerivedContent() noexcept
+void AudioModification::clearOriginalAnalysis()
 {
-    if (!content.has_value())
-        return;
-
-    ++birthRevision;
-    content->analysis = AnalysisState{};
+    auto& analysis = content->analysis;
+    analysis.clearOriginalAnalysis();
+    ++analysis.analysisRevision;
+    ++content->pitchRevision;
+    ++content->contentRevision;
     originalF0InputStamp.reset();
     analysisContinuationPending = false;
     birthState = AudioModificationBirthState::WaitingForSource;
+}
+
+void AudioModification::registerNoteTopologyInitialization(bool notesPrimary) noexcept
+{
+    noteTopologyInitPending = notesPrimary && content.has_value() && !content->noteTopologyInitialized;
+}
+
+bool AudioModification::hasReadyOriginalF0() const
+{
+    return content.has_value()
+        && content->analysis.originalF0State == OriginalF0State::Ready
+        && content->analysis.pitchCurve != nullptr
+        && content->analysis.pitchCurve->hasUsableOriginalF0();
 }
 
 bool AudioModification::isRenderable() const noexcept
@@ -89,13 +101,7 @@ std::shared_ptr<const EditableContentSnapshot> AudioModification::snapshotConten
     if (!content.has_value())
         return nullptr;
 
-    auto snap = std::make_shared<EditableContentSnapshot>(makeContentSnapshot(*content));
-
-    // ARA2: 从缓存的 AudioSource shape 提供只读元数据
-    snap->sourceSampleRate = cachedSourceShape_.sourceSampleRate;
-    snap->sourceChannelCount = cachedSourceShape_.numChannels;
-    snap->sourceSampleCount = cachedSourceShape_.numSamples;
-    return snap;
+    return std::make_shared<EditableContentSnapshot>(makeContentSnapshot(*content));
 }
 
 void AudioModification::applyNotes(const std::vector<Note>& notes)
@@ -104,6 +110,7 @@ void AudioModification::applyNotes(const std::vector<Note>& notes)
     for (auto& note : content->notes)
         note.outputGainDb = content->volumeEnvelope.evalAt(note.startTime);
     content->noteTopologyInitialized = true;
+    noteTopologyInitPending = false;
     ++content->notesRevision;
     ++content->contentRevision;
 }

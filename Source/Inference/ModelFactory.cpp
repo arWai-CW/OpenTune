@@ -7,11 +7,7 @@
 #include "../Utils/AppLogger.h"
 #include "../Utils/Error.h"
 #include <functional>
-#include <cstring>
-#include <map>
-#include <mutex>
-#include <juce_core/juce_core.h>
-#include <juce_cryptography/juce_cryptography.h>
+#include "F0InferenceService.h"
 #ifdef _WIN32
 #include <dml_provider_factory.h>
 #endif
@@ -52,21 +48,32 @@ void logOnnxSessionCpuConfig(const CpuBudgetManager::BudgetConfig& budget)
 
 ModelFactory::F0ExtractorResult ModelFactory::createF0Extractor(
     F0ModelType type,
-    const std::string& modelDir,
+    const F0ModelVersion& model,
     Ort::Env& env,
     std::shared_ptr<ResamplingManager> resampler,
-    bool forceCpu)
+    AccelerationDetector::BackendSelection backend)
 {
-    std::string modelPath = getModelPath(type, modelDir);
-
-    if (!isModelAvailable(type, modelDir)) {
+    const auto modelPath = model.file.getFullPathName().toStdString();
+    if (!model.file.existsAsFile()) {
         return F0ExtractorResult::failure(ErrorCode::ModelNotFound,
             "F0 model file: " + modelPath);
     }
 
     try {
+        // Every session for this extraction, including the CPU retry, uses these same weights.
+        juce::MemoryBlock weights;
+        if (!model.file.loadFileAsData(weights)) {
+            return F0ExtractorResult::failure(ErrorCode::ModelLoadFailed,
+                "Could not read F0 model: " + modelPath);
+        }
+        if (weights.getSize() != static_cast<size_t>(model.bytes)
+            || model.file.getSize() != model.bytes || model.file.getLastModificationTime() != model.writeTime) {
+            return F0ExtractorResult::failure(ErrorCode::ModelLoadFailed,
+                "F0 model version changed: " + modelPath);
+        }
+
         bool gpuMode = false;
-        auto session = loadF0Session(modelPath, env, type, gpuMode, forceCpu);
+        auto session = loadF0Session(model, weights, env, type, gpuMode, backend);
         if (!session) {
             return F0ExtractorResult::failure(ErrorCode::SessionCreationFailed,
                 "Failed to create ONNX session for: " + modelPath);
@@ -91,17 +98,11 @@ ModelFactory::F0ExtractorResult ModelFactory::createF0Extractor(
                 std::function<std::unique_ptr<Ort::Session>()> cpuSessionFactory;
 #if defined(_WIN32)
                 if (gpuMode) {
-                    cpuSessionFactory = [modelPath, &env, type]() {
+                    cpuSessionFactory = [weights = std::move(weights), &env, type]() {
                         bool cpuGpuMode = false;
                         try {
-                            auto cpuOptions = createF0SessionOptions(type, cpuGpuMode, /*forceCpu=*/true);
-#ifdef _WIN32
-                            juce::File f(modelPath);
-                            std::wstring wPath = f.getFullPathName().toWideCharPointer();
-                            return std::make_unique<Ort::Session>(env, wPath.c_str(), cpuOptions);
-#else
-                            return std::make_unique<Ort::Session>(env, modelPath.c_str(), cpuOptions);
-#endif
+                            auto cpuOptions = createF0SessionOptions(type, cpuGpuMode, {});
+                            return std::make_unique<Ort::Session>(env, weights.getData(), weights.getSize(), cpuOptions);
                         } catch (const std::exception& e) {
                             AppLogger::error("[ModelFactory] CPU session factory failed: "
                                 + juce::String(e.what()));
@@ -140,47 +141,10 @@ std::string ModelFactory::getModelPath(F0ModelType type, const std::string& mode
     return "";
 }
 
-std::optional<std::array<uint8_t, 32>> ModelFactory::getModelWeightDigest(const std::string& modelPath)
+F0ModelVersion ModelFactory::resolveF0ModelVersion(F0ModelType type, const std::string& modelDir)
 {
-    struct CachedDigest
-    {
-        int64_t size{0};
-        juce::Time modified;
-        std::array<uint8_t, 32> digest{};
-    };
-    static std::mutex mutex;
-    static std::map<std::string, CachedDigest> cachedByPath;
-
-    const juce::File file(modelPath);
-    if (!file.existsAsFile())
-        return std::nullopt;
-
-    const auto fullPath = file.getFullPathName().toStdString();
-    const auto size = file.getSize();
-    const auto modified = file.getLastModificationTime();
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        const auto found = cachedByPath.find(fullPath);
-        if (found != cachedByPath.end() && found->second.size == size && found->second.modified == modified)
-            return found->second.digest;
-    }
-
-    auto input = file.createInputStream();
-    if (input == nullptr || !input->openedOk())
-        return std::nullopt;
-    const juce::SHA256 hash(*input);
-    const auto rawDigest = hash.getRawData();
-    std::array<uint8_t, 32> digest{};
-    std::memcpy(digest.data(), rawDigest.getData(), digest.size());
-
-    if (file.getSize() != size || file.getLastModificationTime() != modified)
-        return std::nullopt;
-
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        cachedByPath[fullPath] = CachedDigest{size, modified, digest};
-    }
-    return digest;
+    const auto file = juce::File::getCurrentWorkingDirectory().getChildFile(getModelPath(type, modelDir));
+    return {file, file.getSize(), file.getLastModificationTime()};
 }
 
 // ==============================================================================
@@ -218,7 +182,7 @@ std::vector<F0ModelInfo> ModelFactory::getAvailableF0Models(const std::string& m
 Ort::SessionOptions ModelFactory::createF0SessionOptions(
     F0ModelType type,
     bool& outGpuMode,
-    bool forceCpu) {
+    AccelerationDetector::BackendSelection backendSelection) {
     Ort::SessionOptions sessionOptions;
 
     sessionOptions.DisableMemPattern();
@@ -227,8 +191,7 @@ Ort::SessionOptions ModelFactory::createF0SessionOptions(
     bool gpuMode = false;
 
 #if defined(__APPLE__)
-    const auto backendSelection = AccelerationDetector::getInstance().getSelection();
-    if (!forceCpu && backendSelection.backend == AccelerationDetector::AccelBackend::CoreML) {
+    if (backendSelection.backend == AccelerationDetector::AccelBackend::CoreML) {
         try {
         appendCoreMlExecutionProvider(sessionOptions);
         gpuMode = true;
@@ -243,9 +206,7 @@ Ort::SessionOptions ModelFactory::createF0SessionOptions(
 #endif
 
 #if defined(_WIN32)
-    const auto backendSelection = AccelerationDetector::getInstance().getSelection();
-    if (!forceCpu
-        && type == F0ModelType::FCPE
+    if (type == F0ModelType::FCPE
         && backendSelection.backend == AccelerationDetector::AccelBackend::DirectML) {
         const auto& api = Ort::GetApi();
         const OrtDmlApi* dmlApi = nullptr;
@@ -296,14 +257,16 @@ Ort::SessionOptions ModelFactory::createF0SessionOptions(
 // ==============================================================================
 
 std::unique_ptr<Ort::Session> ModelFactory::loadF0Session(
-    const std::string& modelPath,
+    const F0ModelVersion& model,
+    const juce::MemoryBlock& weights,
     Ort::Env& env,
     F0ModelType type,
     bool& outGpuMode,
-    bool forceCpu)
+    AccelerationDetector::BackendSelection backend)
 {
+    const auto& modelPath = model.file.getFullPathName();
     try {
-        auto sessionOptions = createF0SessionOptions(type, outGpuMode, forceCpu);
+        auto sessionOptions = createF0SessionOptions(type, outGpuMode, backend);
 
         if (shouldEnableOrtProfilingInDebug()) {
 #ifdef _WIN32
@@ -314,67 +277,25 @@ std::unique_ptr<Ort::Session> ModelFactory::loadF0Session(
             AppLogger::info("[ModelFactory] ORT profiling enabled for F0");
         }
 
-#ifdef _WIN32
-        juce::File modelFile(modelPath);
-        std::wstring wModelPath = modelFile.getFullPathName().toWideCharPointer();
-        return std::make_unique<Ort::Session>(env, wModelPath.c_str(), sessionOptions);
-#else
-        return std::make_unique<Ort::Session>(env, modelPath.c_str(), sessionOptions);
-#endif
-
+        return std::make_unique<Ort::Session>(env, weights.getData(), weights.getSize(), sessionOptions);
     } catch (const std::exception& e) {
-        // 仅在「本来要建 GPU session 且非 forceCpu」时允许一次性 CPU 回退。
-        // forceCpu 或纯 CPU 首次建会话失败时直接报错，避免：
-        //  - 纯 CPU 路径触发第二次完全相同的建会话调用；
-        //  - 回退路径改写 AccelerationDetector 全局 backend 状态。
-        const bool gpuFirstAttempt = outGpuMode && !forceCpu;
-        if (!gpuFirstAttempt) {
-            AppLogger::error("[ModelFactory] F0 session creation failed (no CPU fallback): "
-                + juce::String(e.what()) + "; model: " + juce::String(modelPath));
-            outGpuMode = false;
-            return nullptr;
-        }
-        AppLogger::warn("[ModelFactory] F0 GPU session creation failed: "
-            + juce::String(e.what()) + "; retrying CPU once");
-        AccelerationDetector::getInstance().overrideBackend(AccelerationDetector::AccelBackend::CPU);
-        outGpuMode = false;
-        try {
-            auto cpuOptions = createF0SessionOptions(type, outGpuMode, true);
-#ifdef _WIN32
-            juce::File modelFile(modelPath);
-            std::wstring wModelPath = modelFile.getFullPathName().toWideCharPointer();
-            return std::make_unique<Ort::Session>(env, wModelPath.c_str(), cpuOptions);
-#else
-            return std::make_unique<Ort::Session>(env, modelPath.c_str(), cpuOptions);
-#endif
-        } catch (...) {
-            AppLogger::error("[ModelFactory] Failed to load F0 session (CPU fallback): " + juce::String(modelPath));
-            return nullptr;
-        }
+        AppLogger::error("[ModelFactory] F0 session creation failed: " + juce::String(e.what())
+            + "; model: " + modelPath);
     } catch (...) {
-        const bool gpuFirstAttempt = outGpuMode && !forceCpu;
-        if (!gpuFirstAttempt) {
-            AppLogger::error("[ModelFactory] F0 session creation failed (no CPU fallback): "
-                + juce::String(modelPath));
-            outGpuMode = false;
-            return nullptr;
-        }
-        AppLogger::warn("[ModelFactory] F0 GPU session creation failed with an unknown exception; retrying CPU once");
-        AccelerationDetector::getInstance().overrideBackend(AccelerationDetector::AccelBackend::CPU);
-        outGpuMode = false;
-        try {
-            auto cpuOptions = createF0SessionOptions(type, outGpuMode, true);
-#ifdef _WIN32
-            juce::File modelFile(modelPath);
-            std::wstring wModelPath = modelFile.getFullPathName().toWideCharPointer();
-            return std::make_unique<Ort::Session>(env, wModelPath.c_str(), cpuOptions);
-#else
-            return std::make_unique<Ort::Session>(env, modelPath.c_str(), cpuOptions);
-#endif
-        } catch (...) {
-            AppLogger::error("[ModelFactory] Failed to load F0 session (CPU fallback): " + juce::String(modelPath));
-            return nullptr;
-        }
+        AppLogger::error("[ModelFactory] F0 session creation failed with an unknown exception; model: " + modelPath);
+    }
+
+    if (!outGpuMode)
+        return nullptr;
+
+    AppLogger::warn("[ModelFactory] F0 GPU session creation failed; retrying CPU once");
+    AccelerationDetector::getInstance().overrideBackend(AccelerationDetector::AccelBackend::CPU);
+    try {
+        auto cpuOptions = createF0SessionOptions(type, outGpuMode, {});
+        return std::make_unique<Ort::Session>(env, weights.getData(), weights.getSize(), cpuOptions);
+    } catch (...) {
+        AppLogger::error("[ModelFactory] Failed to load F0 session (CPU fallback): " + modelPath);
+        return nullptr;
     }
 }
 

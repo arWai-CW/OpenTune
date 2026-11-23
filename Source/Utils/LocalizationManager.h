@@ -199,6 +199,7 @@ constexpr const char* kExternalEditCurveCorrupt = "The returned curve file is co
 constexpr const char* kUndo = "Undo";
 constexpr const char* kRedo = "Redo";
 constexpr const char* kRestoreSelectedNotes = "Restore Selected Notes";
+constexpr const char* kRegenerateNotes = "Regenerate Notes";
 
 constexpr const char* kShowWaveform = "Show Waveform";
 constexpr const char* kPianoKeyboard = "Piano Keyboard";
@@ -300,7 +301,6 @@ constexpr const char* kRendering = "Rendering";
 constexpr const char* kGpuFirst = "GPU First";
 constexpr const char* kCpuFirst = "CPU First";
 constexpr const char* kHybridMode = "Hybrid Mode";
-constexpr const char* kAraF0AnalysisCache = "Cache ARA original pitch analysis";
 constexpr const char* kModelsFolder = "Choose Models Folder…";
 constexpr const char* kModelsFolderRestart = "Restart OpenTune or the DAW to apply the models folder.";
 constexpr const char* kModelsFolderSaveFailed = "Could not save the models folder.";
@@ -580,6 +580,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kUndo, "Undo", "撤销", "元に戻す", "Отменить", "Deshacer" },
         { Keys::kRedo, "Redo", "重做", "やり直す", "Повтор", "Rehacer" },
         { Keys::kRestoreSelectedNotes, "Restore Selected Notes", "还原所选音符", "選択したノートを元に戻す", "Восстановить выбранные ноты", "Restaurar notas seleccionadas" },
+        { Keys::kRegenerateNotes, "Regenerate Notes", "重新生成音符", "ノートを再生成", "Создать ноты заново", "Regenerar notas" },
         
         { Keys::kShowWaveform, "Show Waveform", "显示波形", "波形を表示", "Волновая форма", "Ver forma de onda" },
         { Keys::kPianoKeyboard, "Piano Keyboard", "钢琴键盘", "ピアノキーボード", "Клавиатура пианино", "Teclado de piano" },
@@ -681,7 +682,6 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kGpuFirst, "GPU First", "GPU 优先", "GPU 優先", "GPU приоритет", "GPU primero" },
         { Keys::kCpuFirst, "CPU First", "CPU 优先", "CPU 優先", "CPU приоритет", "CPU primero" },
         { Keys::kHybridMode, "Hybrid Mode: Small corrections use DSP, large corrections use vocoder", "混合模式:小修用dsp，大修用声码器", "ハイブリッドモード：小さな修正はDSP、大きな修正はボコーダー", "Гибридный режим: небольшие коррекции через DSP, большие через вокодер", "Modo híbrido: correcciones pequeñas con DSP, grandes con vocoder" },
-        { Keys::kAraF0AnalysisCache, "Cache ARA original pitch analysis", "缓存 ARA 原始音高分析", "ARA の元ピッチ解析をキャッシュ", "Кэшировать анализ исходной высоты ARA", "Guardar análisis de tono original ARA en caché" },
         { Keys::kModelsFolder, "Choose Models Folder…", "选择模型文件夹…", "モデルフォルダーを選択…", "Выбрать папку моделей…", "Elegir carpeta de modelos…" },
         { Keys::kModelsFolderRestart, "Restart OpenTune or the DAW to apply the models folder.", "重启 OpenTune 或 DAW 以应用模型文件夹。", "モデルフォルダーを適用するには OpenTune または DAW を再起動してください。", "Перезапустите OpenTune или DAW, чтобы сменить папку моделей.", "Reinicia OpenTune o el DAW para aplicar la carpeta de modelos." },
         { Keys::kModelsFolderSaveFailed, "Could not save the models folder.", "无法保存模型文件夹。", "モデルフォルダーを保存できませんでした。", "Не удалось сохранить папку моделей.", "No se pudo guardar la carpeta de modelos." },

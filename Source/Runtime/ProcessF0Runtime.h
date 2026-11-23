@@ -1,14 +1,9 @@
 #pragma once
 
-#include <memory>
-#include <string>
 #include <atomic>
-#include <condition_variable>
-#include <deque>
-#include <functional>
+#include <memory>
 #include <mutex>
-#include <thread>
-#include <vector>
+#include <string>
 
 #include "../Inference/IF0Extractor.h"
 
@@ -16,8 +11,8 @@ namespace Ort { struct Env; }
 
 namespace OpenTune {
 
-class F0InferenceService;
 class F0ExtractionService;
+class F0InferenceService;
 
 /**
  * Process-level inference runtime singleton.
@@ -44,9 +39,10 @@ public:
 
     std::shared_ptr<Ort::Env> getOrtEnv() const;
     std::shared_ptr<F0InferenceService> getF0Service() const;
-    F0ExtractionService& araAnalysisQueue();
-    void shutdownAraAnalysisAndJoin();
     bool isReady() const { return ready_.load(std::memory_order_acquire); }
+
+    F0ExtractionService* araAnalysisQueue();
+    void shutdownAraAnalysisAndJoin();
 
 private:
     ProcessF0Runtime() = default;
@@ -54,10 +50,12 @@ private:
 
     std::shared_ptr<Ort::Env> ortEnv_;
     std::shared_ptr<F0InferenceService> f0Service_;
-    std::shared_ptr<F0ExtractionService> araAnalysisQueue_;
     std::atomic<bool> ready_{false};
     mutable std::mutex initMutex_;
+
     std::mutex araQueueMutex_;
+    std::unique_ptr<F0ExtractionService> araQueue_;
+    bool araQueueClosing_{false};
 
     ProcessF0Runtime(const ProcessF0Runtime&) = delete;
     ProcessF0Runtime& operator=(const ProcessF0Runtime&) = delete;

@@ -6,6 +6,8 @@
 #include "../Source/ARA/OpenTunePlaybackRenderer.h"
 #include "../Source/DSP/TimingAlignment.h"
 #include "../Source/Utils/TimeGridEditAction.h"
+#include "../Source/Runtime/ProcessF0Runtime.h"
+#include "../Source/Runtime/ProcessRenderRuntime.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -23,6 +25,22 @@ extern const ARA::ARAFactory* JUCE_CALLTYPE createARAFactory();
 
 namespace OpenTune
 {
+struct ProcessRenderRuntimeTestAccess
+{
+    static bool isControlWorkerJoinable(ProcessRenderRuntime& runtime)
+    {
+        return runtime.isControlWorkerJoinable();
+    }
+};
+
+struct F0ExtractionServiceTestAccess
+{
+    static std::unique_ptr<F0ExtractionService> createAraFace(size_t maxQueueSize)
+    {
+        return std::unique_ptr<F0ExtractionService>(new F0ExtractionService(maxQueueSize));
+    }
+};
+
 struct OpenTunePlaybackRendererTestAccess
 {
     using Renderer = OpenTunePlaybackRenderer;
@@ -176,16 +194,28 @@ struct HostAudioAccess final : ARA::Host::AudioAccessControllerInterface
 
 struct HostArchiving final : ARA::Host::ArchivingControllerInterface
 {
-    ARA::ARASize getArchiveSize(ARA::ARAArchiveReaderHostRef) noexcept override { return 0; }
-    bool readBytesFromArchive(ARA::ARAArchiveReaderHostRef, ARA::ARASize,
-                              ARA::ARASize, ARA::ARAByte[]) noexcept override { return false; }
-    bool writeBytesToArchive(ARA::ARAArchiveWriterHostRef, ARA::ARASize,
-                             ARA::ARASize, const ARA::ARAByte[]) noexcept override { return false; }
+    juce::MemoryBlock bytes;
+    ARA::ARAPersistentID archiveId{};
+
+    ARA::ARASize getArchiveSize(ARA::ARAArchiveReaderHostRef) noexcept override { return bytes.getSize(); }
+    bool readBytesFromArchive(ARA::ARAArchiveReaderHostRef, ARA::ARASize offset,
+                              ARA::ARASize count, ARA::ARAByte destination[]) noexcept override
+    {
+        bytes.copyTo(destination, static_cast<int>(offset), count);
+        return true;
+    }
+    bool writeBytesToArchive(ARA::ARAArchiveWriterHostRef, ARA::ARASize offset,
+                             ARA::ARASize count, const ARA::ARAByte source[]) noexcept override
+    {
+        bytes.ensureSize(offset + count);
+        bytes.copyFrom(source, static_cast<int>(offset), count);
+        return true;
+    }
     void notifyDocumentArchivingProgress(float) noexcept override {}
     void notifyDocumentUnarchivingProgress(float) noexcept override {}
     ARA::ARAPersistentID getDocumentArchiveID(ARA::ARAArchiveReaderHostRef) noexcept override
     {
-        return "ARALifecycleContractTests";
+        return archiveId;
     }
 };
 
@@ -659,6 +689,319 @@ bool runPlaybackRendererLifecycleRegression(ARA::ARADocumentControllerRef docume
         secondInstance->playbackRendererRef, playbackRegionRef);
     return passed;
 }
+
+bool runUndispatchedCompletionRegression()
+{
+    int dispatched = 0;
+    int discarded = 0;
+    {
+        juce::ScopedJuceInitialiser_GUI juceInitialiser;
+        if (!check(OpenTune::ProcessRenderRuntime::postAsyncCallback([&](bool ran) {
+                if (ran)
+                    ++dispatched;
+                else
+                    ++discarded;
+            }), "undispatched_completion_post_failed"))
+            return false;
+    }
+    return check(dispatched == 0 && discarded == 1,
+                 "undispatched_completion_not_released_once");
+}
+
+bool runNoteTopologyRegression(OpenTune::OpenTuneDocumentController& controller,
+                               ARA::Host::DocumentController& host,
+                               HostArchiving& archive,
+                               const std::vector<juce::ARAPlaybackRegion*>& regions)
+{
+    using OpenTune::AudioEditingScheme::Scheme;
+    const auto projections = controller.getPlaybackRegionProjectionsFor(regions);
+    if (!check(projections.size() == 4, "note_topology_region_projections_missing"))
+        return false;
+    const auto restoredKey = projections[0].contentKey;
+    const auto deletedKey = projections[1].contentKey;
+    const auto unvoicedKey = projections[2].contentKey;
+    const auto freshKey = projections[3].contentKey;
+    const auto makeF0 = [](float hz) {
+        auto curve = std::make_shared<OpenTune::PitchCurve>();
+        curve->replaceOriginalAnalysis(std::vector<float>(64, hz), {}, 160, 16000.0);
+        return curve;
+    };
+
+    auto& preferences = controller.getAppPreferences();
+    preferences.setAudioEditingScheme(Scheme::CorrectedF0Primary);
+    controller.applyOriginalF0ToModification(restoredKey, makeF0(220.0f));
+    controller.applyOriginalF0ToModification(deletedKey, makeF0(220.0f));
+    controller.applyNotesToModification(deletedKey, {});
+    bool passed = check(!controller.readContentSnapshot(restoredKey)->noteTopologyInitialized,
+                        "corrected_f0_mode_initialized_topology");
+    if (!check(host.storeObjectsToArchive(reinterpret_cast<ARA::ARAArchiveWriterHostRef>(&archive), nullptr),
+               "note_topology_archive_write_failed"))
+        return false;
+
+    preferences.setAudioEditingScheme(Scheme::NotesPrimary);
+    const auto onSwitch = controller.readContentSnapshot(restoredKey);
+    passed = check(onSwitch->noteTopologyInitialized && !onSwitch->notes.empty(),
+                   "scheme_change_did_not_initialize_ready_topology") && passed;
+
+    host.beginEditing();
+    const bool restored = host.restoreObjectsFromArchive(
+        reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&archive), nullptr);
+    const bool wasDeferred = !controller.readContentSnapshot(restoredKey)->noteTopologyInitialized;
+    host.endEditing();
+    if (!check(restored && wasDeferred, "note_topology_archive_batch_not_deferred"))
+        return false;
+
+    // The archive's Ready F0 carries no input stamp (the modifications were
+    // filled through the API without a birth), so the restore clears the
+    // stale analysis and arms the pending continuation instead of adopting.
+    // User state survives: topology flags and archived notes stay untouched
+    // and no PCM materializes without sample access.
+    const auto onRestore = controller.readContentSnapshot(restoredKey);
+    passed = check(onRestore->originalF0State == OpenTune::OriginalF0State::NotRequested
+                       && onRestore->notes.empty()
+                       && controller.readAudioBuffer(restoredKey) == nullptr,
+                   "stampless_ready_archive_cleared_pending_reanalysis") && passed;
+    const auto deleted = controller.readContentSnapshot(deletedKey);
+    passed = check(deleted->noteTopologyInitialized && deleted->notes.empty(),
+                   "restored_deleted_topology_regenerated") && passed;
+
+    controller.applyOriginalF0ToModification(unvoicedKey, makeF0(0.0f));
+    controller.applyOriginalF0ToModification(freshKey, makeF0(220.0f));
+    const auto unvoiced = controller.readContentSnapshot(unvoicedKey);
+    const auto fresh = controller.readContentSnapshot(freshKey);
+    passed = check(unvoiced->noteTopologyInitialized && unvoiced->notes.empty()
+                       && fresh->noteTopologyInitialized && !fresh->notes.empty(),
+                   "ready_deliveries_did_not_initialize_each_modification") && passed;
+
+    controller.applyOriginalF0ToModification(unvoicedKey, makeF0(220.0f));
+    controller.applyOriginalF0ToModification(freshKey, makeF0(220.0f));
+    preferences.setAudioEditingScheme(Scheme::CorrectedF0Primary);
+    preferences.setAudioEditingScheme(Scheme::NotesPrimary);
+    passed = check(controller.readContentSnapshot(unvoicedKey)->notesRevision == unvoiced->notesRevision
+                       && controller.readContentSnapshot(freshKey)->notesRevision == fresh->notesRevision
+                       && controller.readContentSnapshot(deletedKey)->notesRevision == deleted->notesRevision,
+                   "initialized_topology_committed_twice") && passed;
+
+    // The cleared analysis (pending continuation) has no original F0, so an
+    // explicit note generation is rejected and the notes stay empty until the
+    // re-analysis completes.
+    const bool generated = controller.generateNotesOnly(deletedKey, {});
+    passed = check(!generated
+                       && controller.readContentSnapshot(deletedKey)->notes.empty(),
+                   "explicit_generation_rejected_without_ready_f0") && passed;
+    return passed;
+}
+
+bool runArchiveRestoreStampRegression(ARA::Host::DocumentController& documentController,
+                                      HostArchiving& archive,
+                                      OpenTune::OpenTuneDocumentController& controller,
+                                      ARA::ARARegionSequenceRef regionSequence)
+{
+    using OpenTune::OriginalF0State;
+    bool passed = true;
+    const auto expect = [&passed](bool condition, const char* name)
+    {
+        passed = check(condition, name) && passed;
+        return condition;
+    };
+
+    ARA::ARAAudioSourceProperties sourceProperties {};
+    sourceProperties.structSize = sizeof (sourceProperties);
+    sourceProperties.sampleCount = 9600;
+    sourceProperties.sampleRate = 48000.0;
+    sourceProperties.channelCount = 1;
+
+    ARA::ARAAudioModificationProperties modificationProperties {};
+    modificationProperties.structSize = sizeof (modificationProperties);
+
+    ARA::ARAPlaybackRegionProperties regionProperties {};
+    regionProperties.structSize = sizeof (regionProperties);
+    regionProperties.regionSequenceRef = regionSequence;
+    regionProperties.startInModificationTime = 0.0;
+    regionProperties.durationInModificationTime = 0.2;
+    regionProperties.startInPlaybackTime = 0.0;
+    regionProperties.durationInPlaybackTime = 0.2;
+
+    ARA::ARAPersistentID archiveSourceId = "restore-source-1";
+    ARA::ARAPersistentID archiveModificationId = "restore-mod-1";
+    ARA::ARAPersistentID pasteSourceId = "restore-source-2";
+    ARA::ARAPersistentID pasteModificationId = "restore-mod-2";
+
+    auto archiveSourceProps = sourceProperties;
+    archiveSourceProps.persistentID = archiveSourceId;
+    auto pasteSourceProps = sourceProperties;
+    pasteSourceProps.persistentID = pasteSourceId;
+    auto archiveModProps = modificationProperties;
+    archiveModProps.persistentID = archiveModificationId;
+    auto pasteModProps = modificationProperties;
+    pasteModProps.persistentID = pasteModificationId;
+
+    documentController.beginEditing();
+    const auto archiveSource = documentController.createAudioSource(nullptr, &archiveSourceProps);
+    const auto pasteSource = documentController.createAudioSource(nullptr, &pasteSourceProps);
+    const auto archiveModification = documentController.createAudioModification(archiveSource, nullptr, &archiveModProps);
+    const auto pasteModification = documentController.createAudioModification(pasteSource, nullptr, &pasteModProps);
+    const auto archiveRegion = documentController.createPlaybackRegion(archiveModification, nullptr, &regionProperties);
+    const auto pasteRegion = documentController.createPlaybackRegion(pasteModification, nullptr, &regionProperties);
+    documentController.endEditing();
+    if (!expect(archiveSource != nullptr && pasteSource != nullptr
+                    && archiveModification != nullptr && pasteModification != nullptr
+                    && archiveRegion != nullptr && pasteRegion != nullptr,
+                "restore_stamp_graph_creation_failed"))
+        return false;
+
+    documentController.enableAudioSourceSamplesAccess(archiveSource, true);
+    documentController.enableAudioSourceSamplesAccess(pasteSource, true);
+
+    const std::vector<juce::ARAPlaybackRegion*> archiveRegionProjections{
+        ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(archiveRegion)};
+    const std::vector<juce::ARAPlaybackRegion*> pasteRegionProjections{
+        ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(pasteRegion)};
+    const auto archiveKey = controller.getPlaybackRegionProjectionsFor(archiveRegionProjections)[0].contentKey;
+    const auto pasteKey = controller.getPlaybackRegionProjectionsFor(pasteRegionProjections)[0].contentKey;
+
+    // User Read births the archive modification and records its input stamp.
+    // The queued F0 completion stays undispatched and never reaches the state
+    // under test; a restore-time revocation releases it without a commit.
+    if (!expect(controller.requestReadAudioForPlaybackRegion(archiveRegionProjections[0]) == 1,
+                "restore_stamp_read_birth_failed"))
+        return false;
+
+    // Ready F0 plus user edits: a manual correction segment and an erased range.
+    auto curve = std::make_shared<OpenTune::PitchCurve>();
+    curve->replaceOriginalAnalysis(std::vector<float>(64, 220.0f), {}, 160, 16000.0);
+    OpenTune::PitchCorrectionSegment segment;
+    segment.startFrame = 8;
+    segment.endFrame = 16;
+    segment.f0Data.assign(8, 440.0f);
+    segment.baseF0Data.assign(8, 220.0f);
+    segment.source = OpenTune::PitchCorrectionSegment::Source::HandDraw;
+    curve->replaceCorrectionSegments({segment});
+    curve->replaceErasedRangesInRange(0, 64, {{32, 40}});
+    if (!expect(controller.applyOriginalF0ToModification(archiveKey, curve),
+                "restore_stamp_f0_apply_failed"))
+        return false;
+
+    const auto setupCurve = controller.readPitchCurve(archiveKey);
+    expect(setupCurve != nullptr
+               && setupCurve->getErasedRanges().size() == 1
+               && setupCurve->getErasedRanges().front().startFrame == 32
+               && setupCurve->getErasedRanges().front().endFrameExclusive == 40,
+           "restore_stamp_setup_edits_missing");
+
+    if (!expect(documentController.storeObjectsToArchive(
+                    reinterpret_cast<ARA::ARAArchiveWriterHostRef>(&archive), nullptr),
+                "restore_stamp_archive_write_failed"))
+        return false;
+
+    // Same-source restore: the archived stamp matches the live parent, so the
+    // Ready F0 is adopted without a new F0 run (the state never leaves Ready).
+    ARA::ARARestoreObjectsFilter sameSourceFilter {};
+    sameSourceFilter.structSize = sizeof (sameSourceFilter);
+    sameSourceFilter.audioSourceIDsCount = 1;
+    sameSourceFilter.audioSourceArchiveIDs = &archiveSourceId;
+    sameSourceFilter.audioModificationIDsCount = 1;
+    sameSourceFilter.audioModificationArchiveIDs = &archiveModificationId;
+
+    documentController.beginEditing();
+    const bool sameSourceRestored = documentController.restoreObjectsFromArchive(
+        reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&archive), &sameSourceFilter);
+    documentController.endEditing();
+
+    const auto sameSourceState = controller.readOriginalF0State(archiveKey);
+    const auto sameSourceCurve = controller.readPitchCurve(archiveKey);
+    expect(sameSourceRestored && sameSourceState == OriginalF0State::Ready,
+           "same_source_restore_lost_ready_f0");
+    expect(controller.readAudioBuffer(archiveKey) != nullptr,
+           "same_source_restore_did_not_materialize_pcm");
+    expect(sameSourceCurve != nullptr
+               && sameSourceCurve->getOriginalF0().size() == 64
+               && sameSourceCurve->getOriginalF0()[0] == 220.0f
+               && sameSourceCurve->getCorrectionSegments().size() == 1
+               && sameSourceCurve->getCorrectionSegments().front().f0Data.size() == 8
+               && sameSourceCurve->getErasedRanges().size() == 1
+               && sameSourceCurve->getErasedRanges().front().startFrame == 32,
+           "same_source_restore_edits_damaged");
+
+    // Cross-source paste restore: the archived stamp carries the archive source
+    // id, so it mismatches the paste target. The stale analysis clears, the
+    // user's edits survive and exactly one re-analysis is requested.
+    ARA::ARARestoreObjectsFilter crossSourceFilter {};
+    crossSourceFilter.structSize = sizeof (crossSourceFilter);
+    crossSourceFilter.audioSourceIDsCount = 1;
+    crossSourceFilter.audioSourceArchiveIDs = &archiveSourceId;
+    crossSourceFilter.audioSourceCurrentIDs = &pasteSourceId;
+    crossSourceFilter.audioModificationIDsCount = 1;
+    crossSourceFilter.audioModificationArchiveIDs = &archiveModificationId;
+    crossSourceFilter.audioModificationCurrentIDs = &pasteModificationId;
+
+    documentController.beginEditing();
+    const bool crossSourceRestored = documentController.restoreObjectsFromArchive(
+        reinterpret_cast<ARA::ARAArchiveReaderHostRef>(&archive), &crossSourceFilter);
+    documentController.endEditing();
+
+    const auto pasteState = controller.readOriginalF0State(pasteKey);
+    const auto pasteCurve = controller.readPitchCurve(pasteKey);
+    expect(crossSourceRestored && pasteState == OriginalF0State::Extracting,
+           "stamp_mismatch_restore_did_not_request_one_reanalysis");
+    expect(pasteCurve != nullptr
+               && pasteCurve->getOriginalF0().empty()
+               && pasteCurve->getCorrectionSegments().size() == 1
+               && pasteCurve->getCorrectionSegments().front().f0Data.size() == 8
+               && pasteCurve->getErasedRanges().size() == 1
+               && pasteCurve->getErasedRanges().front().startFrame == 32,
+           "stamp_mismatch_restore_user_edits_damaged");
+
+    // The one re-analysis commit re-derives the original F0 while erased frames
+    // stay zero (mirror of commitF0Completion's replaceOriginalAnalysis).
+    auto completionCurve = OpenTune::PitchCurve::fromSnapshot(pasteCurve);
+    completionCurve->replaceOriginalAnalysis(std::vector<float>(64, 180.0f), {}, 160, 16000.0);
+    const auto completed = completionCurve->getSnapshot();
+    expect(completed->getOriginalF0()[34] == 0.0f && completed->getOriginalF0()[0] == 180.0f,
+           "reanalysis_erase_frames_not_zeroed");
+
+    // Clone of a non-Ready modification keeps the correction layer and the
+    // erased ranges without resurrecting the cleared original analysis.
+    ARA::ARAAudioModificationProperties cloneModProps {};
+    cloneModProps.structSize = sizeof (cloneModProps);
+    cloneModProps.persistentID = "restore-mod-clone";
+    documentController.beginEditing();
+    const auto cloneModification = documentController.cloneAudioModification(
+        pasteModification, nullptr, &cloneModProps);
+    const auto cloneRegion = cloneModification != nullptr
+        ? documentController.createPlaybackRegion(cloneModification, nullptr, &regionProperties)
+        : nullptr;
+    documentController.endEditing();
+    if (!expect(cloneModification != nullptr && cloneRegion != nullptr,
+                "restore_stamp_clone_creation_failed"))
+        return false;
+
+    const std::vector<juce::ARAPlaybackRegion*> cloneRegionProjections{
+        ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(cloneRegion)};
+    const auto cloneKey = controller.getPlaybackRegionProjectionsFor(cloneRegionProjections)[0].contentKey;
+    const auto cloneCurve = controller.readPitchCurve(cloneKey);
+    expect(cloneCurve != nullptr
+               && cloneCurve->getOriginalF0().empty()
+               && cloneCurve->getCorrectionSegments().size() == 1
+               && cloneCurve->getCorrectionSegments().front().f0Data.size() == 8
+               && cloneCurve->getErasedRanges().size() == 1
+               && cloneCurve->getErasedRanges().front().startFrame == 32,
+           "clone_non_ready_lost_user_edits");
+
+    documentController.enableAudioSourceSamplesAccess(archiveSource, false);
+    documentController.enableAudioSourceSamplesAccess(pasteSource, false);
+    documentController.beginEditing();
+    documentController.destroyPlaybackRegion(archiveRegion);
+    documentController.destroyPlaybackRegion(pasteRegion);
+    documentController.destroyPlaybackRegion(cloneRegion);
+    documentController.destroyAudioModification(archiveModification);
+    documentController.destroyAudioModification(pasteModification);
+    documentController.destroyAudioModification(cloneModification);
+    documentController.destroyAudioSource(archiveSource);
+    documentController.destroyAudioSource(pasteSource);
+    documentController.endEditing();
+    return passed;
+}
 }
 
 int runChild(int argc, char** argv)
@@ -667,6 +1010,9 @@ int runChild(int argc, char** argv)
     OpenTuneTest::trace("ARALifecycleContractTests", "process_begin", {
         {"watchdogMs", OpenTuneTest::jsonNumber(OpenTuneTest::lifecycleWatchdogApprovalTimeoutMs)}
     });
+    if (!runUndispatchedCompletionRegression())
+        return 1;
+
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     const auto* factory = createARAFactory();
     if (! check (factory != nullptr, "sdk_link_contract_unavailable"))
@@ -680,6 +1026,7 @@ int runChild(int argc, char** argv)
 
     HostAudioAccess audioAccess;
     HostArchiving archiving;
+    archiving.archiveId = factory->documentArchiveID;
     ARA::Host::DocumentControllerHostInstance host(&audioAccess, &archiving);
     ARA::ARADocumentProperties documentProperties {};
     documentProperties.structSize = sizeof (documentProperties);
@@ -767,6 +1114,27 @@ int runChild(int argc, char** argv)
         secondTarget, extraModifications.front());
     documentController.enableAudioSourceSamplesAccess(source, false);
 
+    auto* controller = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<
+        OpenTune::OpenTuneDocumentController>(
+            ARA::PlugIn::fromRef<ARA::PlugIn::DocumentController>(instance->documentControllerRef));
+    std::vector<ARA::ARAPlaybackRegionRef> topologyRegions;
+    std::vector<juce::ARAPlaybackRegion*> topologyProjections{
+        ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(region)};
+    documentController.beginEditing();
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        const auto extraRegion = documentController.createPlaybackRegion(extraModifications[i], nullptr, &regionProperties);
+        topologyRegions.push_back(extraRegion);
+        topologyProjections.push_back(ARA::PlugIn::fromRef<juce::ARAPlaybackRegion>(extraRegion));
+    }
+    documentController.endEditing();
+    const bool noteTopologyPassed = runNoteTopologyRegression(*controller, documentController, archiving, topologyProjections);
+    const bool restoreStampPassed = runArchiveRestoreStampRegression(
+        documentController, archiving, *controller, regionSequence);
+
+    documentController.beginEditing();
+    for (auto extraRegion : topologyRegions)
+        documentController.destroyPlaybackRegion(extraRegion);
     documentController.destroyPlaybackRegion (region);
     if (secondTarget != nullptr)
         documentController.destroyPlaybackRegion (secondTarget);
@@ -791,30 +1159,136 @@ int runChild(int argc, char** argv)
                  "audio_model_rebuild_failed"))
         return 1;
 
-    std::atomic<bool> dispatcherRan{false};
-    if (! check (juce::MessageManager::callAsync ([&dispatcherRan]
+    documentController.endEditing();
+
+    auto& f0Runtime = OpenTune::ProcessF0Runtime::getInstance();
+    auto& renderRuntime = OpenTune::ProcessRenderRuntime::getInstance();
+    f0Runtime.shutdownAraAnalysisAndJoin();
+
+    // Pump-shutdown convergence: a delivery queued without a running dispatch
+    // loop is released on the value side exactly once by the non-message-thread
+    // drain branch instead of waiting for a dispatcher forever. This phase runs
+    // before the dispatch session below because stopDispatchLoop makes every
+    // later post fail.
+    int pendingReleased = 0;
+    const bool pendingPosted = OpenTune::ProcessRenderRuntime::postAsyncCallback(
+        [&pendingReleased](bool dispatched) {
+            if (!dispatched)
+                ++pendingReleased;
+        });
+    if (!check(pendingPosted, "pump_shutdown_pending_post_failed"))
+        return 1;
+    std::thread shutdownJoin([&renderRuntime] { renderRuntime.shutdownAndJoin(); });
+    shutdownJoin.join();
+    if (!check(pendingReleased == 1, "pump_shutdown_pending_delivery_not_released_once"))
+        return 1;
+
+    int rejected = 0;
+    const bool postedAfterShutdown = OpenTune::ProcessRenderRuntime::postAsyncCallback([&](bool dispatched) {
+        if (!dispatched)
+            ++rejected;
+    });
+    const bool shutdownPassed = check(
+        !OpenTune::ProcessRenderRuntimeTestAccess::isControlWorkerJoinable(renderRuntime)
+            && !postedAfterShutdown && rejected == 1,
+        "final_delivery_fence_not_closed");
+
+    // ARA face: a dispatcher rejection releases the batch as a value without
+    // ever invoking the document sink.
+    bool araFacePassed = true;
+    {
+        OpenTune::AraF0DocumentFlights flights;
+        std::atomic<int> sinkCalls{0};
+        flights.sink = std::make_shared<OpenTune::AraF0DocumentFlights::CompletionSink>(
+            [&sinkCalls](const std::vector<OpenTune::F0TaskId>&, const OpenTune::AraF0Result&) {
+                ++sinkCalls;
+            });
+
+        auto araFace = OpenTune::F0ExtractionServiceTestAccess::createAraFace(4);
+        OpenTune::OriginalF0InputStamp stamp;
+        stamp.sourcePersistentId = "ara-rejection-source";
+        stamp.sourceStartSeconds = 0.0;
+        stamp.sourceEndSeconds = 0.2;
+        stamp.sourceSampleRate = 48000.0;
+        stamp.numSamples = 9600;
+        stamp.numChannels = 1;
+        const OpenTune::AraF0LocalKey local{stamp,
+            OpenTune::F0ExtractionService::snapshotAraConfig(48000.0)};
+        const OpenTune::AraF0Receiver receiver{
+            OpenTune::ContentKey{OpenTune::DomainKind::ARAAudioModification, 7002, 0},
+            1, 1, "ara-rejection-modification", stamp};
+        const auto submission = araFace->submit(flights, local,
+            OpenTune::AraF0Pcm{std::vector<float>(9600, 0.25f), 48000.0, 1}, receiver);
+        if (check(submission.admission == OpenTune::AraF0Admission::Accepted,
+                  "ara_face_regression_submit_rejected"))
         {
-            dispatcherRan.store(true, std::memory_order_release);
-            juce::MessageManager::getInstance()->stopDispatchLoop();
-        }), "message_dispatch_post_failed"))
-        return 1;
-    juce::MessageManager::getInstance()->runDispatchLoop();
-    if (! check (dispatcherRan.load(std::memory_order_acquire), "message_dispatch_not_run"))
-        return 1;
+            while (araFace->isActive(submission.taskId))
+                std::this_thread::yield();
+            araFacePassed = check(sinkCalls == 0, "ara_face_rejection_invoked_document_sink");
+        }
+        else
+            araFacePassed = false;
+    }
+
+    // Processor face: a dispatcher rejection re-delivers the failed result
+    // through the processor-private mailbox, settling waiting content as
+    // Failed with its reason. The mailbox commit posts the loop-stop message,
+    // so the message-dispatch assertion below rides the same dispatch session
+    // and every queued message runs before the loop exits.
+    bool mailboxPassed = true;
+    std::atomic<bool> dispatcherRan{false};
+    {
+        OpenTune::F0ExtractionService processorFace(1, 4, {});
+        std::atomic<int> committed{0};
+        std::atomic<int> mailboxDelivered{0};
+        std::string mailboxReason;
+        const auto submitResult = processorFace.submit(
+            OpenTune::F0RequestKey{OpenTune::ContentKey{OpenTune::DomainKind::StandaloneClip, 7001, 0}},
+            [](const std::shared_ptr<OpenTune::F0RunOwnerState>&) {
+                OpenTune::F0ExtractionService::Result result;
+                result.errorMessage = "dispatcher rejection regression";
+                return result;
+            },
+            [&committed](OpenTune::F0ExtractionService::Result&&) { ++committed; },
+            [&](OpenTune::F0ExtractionService::Result&& result) {
+                mailboxReason = result.errorMessage;
+                ++mailboxDelivered;
+                juce::MessageManager::callAsync([] {
+                    juce::MessageManager::getInstance()->stopDispatchLoop();
+                });
+            });
+        if (check(submitResult == OpenTune::F0ExtractionService::SubmitResult::Accepted,
+                  "processor_mailbox_regression_submit_rejected")
+            && check(juce::MessageManager::callAsync([&dispatcherRan] {
+                   dispatcherRan.store(true, std::memory_order_release);
+               }), "message_dispatch_post_failed"))
+        {
+            juce::MessageManager::getInstance()->runDispatchLoop();
+            mailboxPassed = check(mailboxDelivered == 1 && committed == 0
+                                      && mailboxReason == "dispatcher rejection regression",
+                                  "processor_mailbox_did_not_deliver_failed_result");
+            mailboxPassed = check(dispatcherRan.load(std::memory_order_acquire),
+                                  "message_dispatch_not_run") && mailboxPassed;
+        }
+        else
+            mailboxPassed = false;
+    }
     OpenTuneTest::trace("ARALifecycleContractTests", "message_dispatch_complete");
 
+    documentController.beginEditing();
     documentController.destroyAudioModification (rebuiltModification);
     documentController.destroyAudioSource (rebuiltSource);
+    documentController.endEditing();
     documentController.destroyDocumentController();
     factory->uninitializeARA();
 
     juce::Timer::callPendingTimersSynchronously();
-    if (rendererLifecyclePassed)
-        std::fprintf (stdout, "{\"event\":\"ara_lifecycle_contract\",\"result\":\"success\",\"completionGate\":\"pumped\",\"wrapperGeneration\":\"recreated\"}\n");
-    else
-        std::fprintf (stderr, "{\"event\":\"ara_lifecycle_contract\",\"result\":\"failure\",\"reason\":\"renderer_lifecycle_regression_failed\"}\n");
+    const bool passed = rendererLifecyclePassed && noteTopologyPassed && restoreStampPassed
+        && shutdownPassed && mailboxPassed && araFacePassed;
+    if (passed)
+        std::fprintf (stdout, "{\"event\":\"ara_lifecycle_contract\",\"result\":\"success\",\"completionGate\":\"pumped\",\"wrapperGeneration\":\"recreated\",\"noteTopology\":\"initialized_once\",\"restoreStamp\":\"adopted_or_reanalyzed\"}\n");
     OpenTuneTest::trace("ARALifecycleContractTests", "process_end");
-    return rendererLifecyclePassed ? 0 : 1;
+    return passed ? 0 : 1;
 }
 
 int main(int argc, char** argv)

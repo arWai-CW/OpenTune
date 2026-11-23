@@ -10,8 +10,6 @@
 
 namespace OpenTune {
 
-std::atomic<uint64_t> F0InferenceService::configurationRevision_{1};
-
 class F0InferenceService::Impl {
 public:
     Impl(std::shared_ptr<Ort::Env> env) : env_(std::move(env)) {
@@ -42,43 +40,22 @@ public:
         return true;
     }
 
-    std::optional<F0ExtractionConfigSnapshot> snapshotExtractionConfig(bool includeModelDigest) const
+    F0ExtractionConfigSnapshot snapshotExtractionConfig() const
     {
+        std::lock_guard<std::mutex> lock(extractorMutex_);
         F0ExtractionConfigSnapshot config;
+        config.modelType = currentModelType_;
+        config.modelDirectory = modelDir_;
+        config.confidence = confidenceThreshold_;
+        config.f0Min = f0Min_;
+        config.f0Max = f0Max_;
+        config.backend = AccelerationDetector::getInstance().getSelection();
+        config.selectionRevision = selectionRevision_;
+        if (cpuFallbackSticky_.load(std::memory_order_acquire))
         {
-            std::lock_guard<std::mutex> lock(extractorMutex_);
-            if (!initialized_.load(std::memory_order_acquire))
-                return std::nullopt;
-            config.modelType = currentModelType_;
-            config.modelDirectory = modelDir_;
-            config.confidence = confidenceThreshold_;
-            config.f0Min = f0Min_;
-            config.f0Max = f0Max_;
+            config.backend.backend = AccelerationDetector::AccelBackend::CPU;
+            config.backend.dmlAdapterIndex = 0;
         }
-
-        config.modelPath = ModelFactory::getModelPath(config.modelType, config.modelDirectory);
-        if (includeModelDigest) {
-            if (const auto digest = ModelFactory::getModelWeightDigest(config.modelPath)) {
-                config.modelWeightDigest = *digest;
-                config.modelWeightDigestAvailable = true;
-            }
-        }
-        const bool forceCpu = cpuFallbackSticky_.load(std::memory_order_acquire);
-        const auto backend = AccelerationDetector::getInstance().getSelection().backend;
-        if (forceCpu || backend == AccelerationDetector::AccelBackend::CPU)
-            config.backend = "CPU";
-#if defined(_WIN32)
-        else if (backend == AccelerationDetector::AccelBackend::DirectML)
-            config.backend = "DirectML";
-#elif defined(__APPLE__)
-        else if (backend == AccelerationDetector::AccelBackend::CoreML)
-            config.backend = "CoreML";
-#else
-        else
-            config.backend = "CPU";
-#endif
-        config.algorithmVersion = FCPEExtractor::kCacheAlgorithmVersion;
-        config.resamplingAlgorithmVersion = ResamplingManager::kCacheAlgorithmVersion;
         return config;
     }
 
@@ -90,6 +67,7 @@ public:
         std::function<void(float)> progressCallback,
         std::function<void(const std::vector<float>&, int)> partialCallback,
         const F0ExtractionConfigSnapshot* requestedConfig = nullptr,
+        const F0ModelVersion* requestedModel = nullptr,
         int* actualHopSize = nullptr,
         int* actualSampleRate = nullptr,
         std::string* actualBackend = nullptr)
@@ -178,11 +156,14 @@ public:
             // 发生 DML Run 失败，本 service 生命周期内的后续提取全部走 CPU，
             // 避免每个任务重复 DML 失败。不影响全局 AccelerationDetector，
             // 也不影响 vocoder。
-            const bool forceCpuForExtractor = cpuFallbackSticky_.load(std::memory_order_acquire)
-                || (requestedConfig != nullptr && requestedConfig->backend == "CPU");
+            auto backend = requestedConfig != nullptr
+                ? config.backend : AccelerationDetector::getInstance().getSelection();
+            if (requestedConfig == nullptr && cpuFallbackSticky_.load(std::memory_order_acquire))
+                backend = {};
+            const auto model = requestedModel != nullptr
+                ? *requestedModel : ModelFactory::resolveF0ModelVersion(config.modelType, config.modelDirectory);
             auto extractorResult = ModelFactory::createF0Extractor(
-                config.modelType, config.modelDirectory, *env_, resamplingManager_,
-                forceCpuForExtractor);
+                config.modelType, model, *env_, resamplingManager_, backend);
 
             if (!extractorResult) {
                 AppLogger::error("[F0InferenceService] Failed to create F0 extractor: "
@@ -193,7 +174,7 @@ public:
                 const auto updateActualBackend = [&] {
                     if (actualBackend == nullptr)
                         return;
-                    *actualBackend = config.backend;
+                    *actualBackend = AccelerationDetector::backendName(backend.backend);
                     if (const auto* fcpe = dynamic_cast<const FCPEExtractor*>(extractor.get());
                         fcpe != nullptr && !fcpe->isGpuActive())
                         *actualBackend = "CPU";
@@ -287,10 +268,9 @@ public:
                 // CPU 重试是否成功），sticky 置位，后续提取直接走 CPU。
                 if (auto* fcpe = dynamic_cast<FCPEExtractor*>(extractor.get())) {
                     if (fcpe->didDmlRunFail()) {
-                        bool expected = false;
-                        if (cpuFallbackSticky_.compare_exchange_strong(
-                                expected, true, std::memory_order_acq_rel))
-                            F0InferenceService::configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
+                        std::lock_guard<std::mutex> lock(extractorMutex_);
+                        if (!cpuFallbackSticky_.exchange(true, std::memory_order_acq_rel))
+                            ++selectionRevision_;
                     }
                 }
             }
@@ -331,56 +311,9 @@ public:
         }
 
         currentModelType_ = type;
-        F0InferenceService::configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
+        ++selectionRevision_;
         AppLogger::info("[F0InferenceService] Selected model: FCPE (session will be created on next extraction)");
         return true;
-    }
-
-    F0ModelType getCurrentF0Model() const {
-        std::lock_guard<std::mutex> lock(extractorMutex_);
-        return currentModelType_;
-    }
-
-    std::vector<F0ModelInfo> getAvailableF0Models() const {
-        std::string modelDir;
-        {
-            std::lock_guard<std::mutex> lock(extractorMutex_);
-            modelDir = modelDir_;
-        }
-        return ModelFactory::getAvailableF0Models(modelDir);
-    }
-
-    void setConfidenceThreshold(float threshold) {
-        std::unique_lock<std::mutex> lock(extractorMutex_);
-        confidenceThreshold_ = threshold;
-        F0InferenceService::configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
-    }
-
-    void setF0Min(float minFreq) {
-        std::unique_lock<std::mutex> lock(extractorMutex_);
-        f0Min_ = minFreq;
-        F0InferenceService::configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
-    }
-
-    void setF0Max(float maxFreq) {
-        std::unique_lock<std::mutex> lock(extractorMutex_);
-        f0Max_ = maxFreq;
-        F0InferenceService::configurationRevision_.fetch_add(1, std::memory_order_acq_rel);
-    }
-
-    float getConfidenceThreshold() const {
-        std::lock_guard<std::mutex> lock(extractorMutex_);
-        return confidenceThreshold_;
-    }
-
-    float getF0Min() const {
-        std::lock_guard<std::mutex> lock(extractorMutex_);
-        return f0Min_;
-    }
-
-    float getF0Max() const {
-        std::lock_guard<std::mutex> lock(extractorMutex_);
-        return f0Max_;
     }
 
     int getF0HopSize() const {
@@ -391,11 +324,6 @@ public:
     int getF0SampleRate() const {
         std::lock_guard<std::mutex> lock(extractorMutex_);
         return f0SampleRate_;
-    }
-
-    bool isInitialized() const {
-        // 语义：service 已配置（modelDir + modelType 已设置），不是 session 常驻。
-        return initialized_.load(std::memory_order_acquire);
     }
 
 private:
@@ -416,6 +344,7 @@ private:
     std::atomic<bool> initialized_{false};
     // FCPE 默认值；session 释放后 getter 仍返回正确值。
     // set 参数后下一次 extractF0 创建的新 session 应继承。
+    uint64_t selectionRevision_{0};
     float confidenceThreshold_{0.006f};
     float f0Min_{32.7f};
     float f0Max_{1975.5f};
@@ -454,9 +383,9 @@ Result<std::vector<float>> F0InferenceService::extractF0(
                              std::move(progressCallback), std::move(partialCallback));
 }
 
-std::optional<F0ExtractionConfigSnapshot> F0InferenceService::snapshotExtractionConfig(bool includeModelDigest) const
+F0ExtractionConfigSnapshot F0InferenceService::snapshotExtractionConfig() const
 {
-    return pImpl_->snapshotExtractionConfig(includeModelDigest);
+    return pImpl_->snapshotExtractionConfig();
 }
 
 Result<std::vector<float>> F0InferenceService::extractF0ForAnalysis(
@@ -464,13 +393,14 @@ Result<std::vector<float>> F0InferenceService::extractF0ForAnalysis(
     size_t length,
     int sampleRate,
     std::shared_ptr<F0RunOwnerState> ownerState,
-    const F0ExtractionConfigSnapshot* config,
+    const F0ExtractionConfigSnapshot& config,
+    const F0ModelVersion& model,
     int& actualHopSize,
     int& actualSampleRate,
     std::string& actualBackend)
 {
     return pImpl_->extractF0(audio, length, sampleRate, std::move(ownerState), {}, {},
-                             config, &actualHopSize, &actualSampleRate, &actualBackend);
+                             &config, &model, &actualHopSize, &actualSampleRate, &actualBackend);
 }
 
 void F0InferenceService::terminateActiveRun(const std::shared_ptr<F0RunOwnerState>& ownerState) {
@@ -481,48 +411,12 @@ bool F0InferenceService::setF0Model(F0ModelType type, std::string* errorMessage)
     return pImpl_->setF0Model(type, errorMessage);
 }
 
-F0ModelType F0InferenceService::getCurrentF0Model() const {
-    return pImpl_->getCurrentF0Model();
-}
-
-std::vector<F0ModelInfo> F0InferenceService::getAvailableF0Models() const {
-    return pImpl_->getAvailableF0Models();
-}
-
-void F0InferenceService::setConfidenceThreshold(float threshold) {
-    pImpl_->setConfidenceThreshold(threshold);
-}
-
-void F0InferenceService::setF0Min(float minFreq) {
-    pImpl_->setF0Min(minFreq);
-}
-
-void F0InferenceService::setF0Max(float maxFreq) {
-    pImpl_->setF0Max(maxFreq);
-}
-
-float F0InferenceService::getConfidenceThreshold() const {
-    return pImpl_->getConfidenceThreshold();
-}
-
-float F0InferenceService::getF0Min() const {
-    return pImpl_->getF0Min();
-}
-
-float F0InferenceService::getF0Max() const {
-    return pImpl_->getF0Max();
-}
-
 int F0InferenceService::getF0HopSize() const {
     return pImpl_->getF0HopSize();
 }
 
 int F0InferenceService::getF0SampleRate() const {
     return pImpl_->getF0SampleRate();
-}
-
-bool F0InferenceService::isInitialized() const {
-    return pImpl_->isInitialized();
 }
 
 } // namespace OpenTune

@@ -550,7 +550,6 @@ private:
     std::shared_ptr<ResamplingManager> resamplingManager_;
 
     std::unordered_set<ContentKey> pendingTimeToolSeedKeys_; // message-thread only
-    std::unordered_map<ContentKey, uint64_t> f0RequestTokens_; // message-thread only
     std::deque<OriginalF0FailureEvent> pendingF0FailureEvents_; // message-thread only
 
     // 运行时惰性解析进程级 F0 服务，消除冷启动空快照
@@ -968,10 +967,7 @@ public:
         const std::optional<ScaleSnapConfig>& scaleSnap,
         bool preserveManualOutsideEdits = false);
 
-    // 仅生成音符唯一入口：ContentEditCommands 统一计划后拓扑提交。
-    // 不写 correction segments、不吸附、不请求 render。不创建 undo、不 mark dirty。
-    // 空音符（全静音）是合法结果：仍提交拓扑 patch 清除该 range 音符。
-    bool generateNotesOnlyByContentKey(ContentKey key, const NoteGeneratorParams& params);
+    void initializeLocalNoteTopology(ContentKey key, const NoteGeneratorParams& params);
 public:
 
     ReferenceAnalysisPreheatStatus preheatReferenceFeatures(ContentKey key);
@@ -1048,9 +1044,9 @@ public:
     SnapSettings getSnapSettings() const;
     void setSnapSettings(const SnapSettings& snap);
 
-    /** Valid after runtime initialization; the processor owns this object. */
-    AppPreferences& getAppPreferences() noexcept { return *appPreferences_; }
-    const AppPreferences& getAppPreferences() const noexcept { return *appPreferences_; }
+    /** Valid after runtime initialization. ARA shares the document's preferences. */
+    AppPreferences& getAppPreferences() noexcept;
+    const AppPreferences& getAppPreferences() const noexcept;
 
     UndoManager& getUndoManager() { return undoManager_; }
     PianoKeyAudition& getPianoKeyAudition() { return pianoKeyAudition_; }

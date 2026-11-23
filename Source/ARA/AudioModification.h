@@ -1,10 +1,10 @@
 #pragma once
 #include "AudioSource.h"
-#include "AraF0Types.h"
 #include "../Utils/SourceWindow.h"
 #include "../Content/ContentKey.h"
 #include "../Content/ContentState.h"
 #include "../Content/EditableContentSnapshot.h"
+#include "../Content/OriginalF0InputStamp.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <cstdint>
 #include <memory>
@@ -36,12 +36,15 @@ struct AudioModification
     std::optional<ContentState> content;
     std::optional<OriginalF0InputStamp> originalF0InputStamp;
     bool analysisContinuationPending{false};
+    bool noteTopologyInitPending{false};
 
     // 身份更新
     void updateIdentity(juce::ARAAudioModification* modification);
     bool attachSource(const AudioSource& source);
-    void resetContent() noexcept;
-    void invalidateDerivedContent() noexcept;
+    void revokeAnalysisReception() noexcept;
+    void clearOriginalAnalysis();
+    void registerNoteTopologyInitialization(bool notesPrimary) noexcept;
+    bool hasReadyOriginalF0() const;
     bool isRenderable() const noexcept;
 
     // 内容辅助
@@ -50,9 +53,6 @@ struct AudioModification
 
     // 内容生命周期
     ContentKey contentKey() const noexcept;
-
-private:
-    AraSourceShape cachedSourceShape_;  // 从 AudioSource 缓存（ARA2 委托）
 
 public:
     // 编辑入口：应用命令并推高 revision

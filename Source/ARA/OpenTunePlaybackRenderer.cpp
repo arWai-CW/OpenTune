@@ -179,6 +179,8 @@ void OpenTunePlaybackRenderer::didAddPlaybackRegion(ARA::PlugIn::PlaybackRegion*
 
     publishRenderPlanFor(std::move(playbackRegions),
                          hostSampleRate_.load(std::memory_order_acquire));
+    if (documentController_ != nullptr)
+        documentController_->presentationChanges().sendChangeMessage();
 }
 
 void OpenTunePlaybackRenderer::willRemovePlaybackRegion(ARA::PlugIn::PlaybackRegion* playbackRegion) noexcept
@@ -194,6 +196,8 @@ void OpenTunePlaybackRenderer::willRemovePlaybackRegion(ARA::PlugIn::PlaybackReg
                           playbackRegions.end());
     publishRenderPlanFor(std::move(playbackRegions),
                          hostSampleRate_.load(std::memory_order_acquire));
+    if (documentController_ != nullptr)
+        documentController_->presentationChanges().sendChangeMessage();
 }
 
 void OpenTunePlaybackRenderer::refreshRenderPlanFromDocument()
