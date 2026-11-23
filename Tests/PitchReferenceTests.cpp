@@ -179,6 +179,42 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
+bool testRunStartMedianDoesNotLookPastReferenceNoteChange()
+{
+    constexpr int frameCount = 80;
+    constexpr int rangeStartFrame = 20;
+    constexpr int changeFrame = 23;
+    constexpr double frameSeconds = 0.01;
+    constexpr double baseHz = 200.0;
+    const float firstReferenceHz = 220.0f;
+    const float secondReferenceHz = static_cast<float>(firstReferenceHz * std::exp2(100.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount);
+    for (int i = 0; i < frameCount; ++i)
+        referenceF0[static_cast<size_t>(i)] = i < changeFrame ? firstReferenceHz : secondReferenceHz;
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(baseHz)), {}, 1, 100.0)};
+    target.notes = {{0.0, duration, static_cast<float>(baseHz)}};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{rangeStartFrame, frameCount}});
+    constexpr int outputFrameCount = frameCount - rangeStartFrame;
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != rangeStartFrame || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(outputFrameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    return nearPitch(corrected[0], firstReferenceHz, 2.0)
+        && nearPitch(corrected[1], firstReferenceHz, 2.0)
+        && nearPitch(corrected[2], firstReferenceHz, 2.0)
+        && nearPitch(corrected[changeFrame + 10 - rangeStartFrame], secondReferenceHz, 2.0)
+        && nearPitch(corrected[outputFrameCount - 1], secondReferenceHz, 2.0);
+}
+
 bool testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()
 {
     constexpr int frameCount = 90;
@@ -471,6 +507,10 @@ int main()
     }
     if (!testConstantTargetMovesPitchCenterWithoutChangingRegister()) {
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
+        return 1;
+    }
+    if (!testRunStartMedianDoesNotLookPastReferenceNoteChange()) {
+        std::fputs("FAIL: Reference tuning uses a symmetric median window at run edges\n", stderr);
         return 1;
     }
     if (!testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()) {

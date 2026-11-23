@@ -106,14 +106,26 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
+            std::vector<int> noteBoundaries{0, count};
+            for (const auto& note : target.notes) {
+                const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
+                const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
+                if (noteStart > 0 && noteStart < count)
+                    noteBoundaries.push_back(noteStart);
+                if (noteEnd > 0 && noteEnd < count)
+                    noteBoundaries.push_back(noteEnd);
+            }
+            std::sort(noteBoundaries.begin(), noteBoundaries.end());
+            noteBoundaries.erase(std::unique(noteBoundaries.begin(), noteBoundaries.end()),
+                                 noteBoundaries.end());
+
             std::vector<float> filteredOffsets(static_cast<size_t>(count));
             std::vector<float> medianWindow;
             medianWindow.reserve(static_cast<size_t>(medianWindowFrames));
             for (int i = 0; i < count; ++i) {
-                const int begin = std::max(0, i - medianWindowRadius);
-                const int end = std::min(count, i + medianWindowRadius + 1);
+                const int radius = std::min(medianWindowRadius, std::min(i, count - 1 - i));
                 medianWindow.clear();
-                for (int j = begin; j < end; ++j)
+                for (int j = i - radius; j <= i + radius; ++j)
                     medianWindow.push_back(run[static_cast<size_t>(j)].offsetCents);
                 std::sort(medianWindow.begin(), medianWindow.end());
                 const size_t middle = medianWindow.size() / 2;
@@ -123,15 +135,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 filteredOffsets[static_cast<size_t>(i)] = median;
             }
 
-            std::vector<int> boundaries{0, count};
-            for (const auto& note : target.notes) {
-                const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
-                const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
-                if (noteStart > 0 && noteStart < count)
-                    boundaries.push_back(noteStart);
-                if (noteEnd > 0 && noteEnd < count)
-                    boundaries.push_back(noteEnd);
-            }
+            std::vector<int> boundaries = noteBoundaries;
             for (int i = 1; i < count; ++i) {
                 if (std::abs(static_cast<double>(filteredOffsets[static_cast<size_t>(i)])
                         - filteredOffsets[static_cast<size_t>(i - 1)]) > kReferencePitchOffsetJumpThresholdCents)
