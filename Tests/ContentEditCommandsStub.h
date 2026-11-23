@@ -30,12 +30,12 @@ public:
         const juce::String&) const override { return {}; }
     std::optional<ContentNoteCorrectionPlan> planNoteCorrection(
         const EditableContentSnapshot&, const std::vector<Note>&, F0FrameRange,
-        const NoteGeneratorParams&) const override { return std::nullopt; }
+        const NoteGeneratorParams&, bool) const override { return std::nullopt; }
     F0FrameRange noteFrameRange(
         const PitchCurveSnapshot&, const std::vector<Note>&, const std::vector<std::size_t>&) const override { return {}; }
     ContentAutoSnapPlan planAutoSnap(
         const EditableContentSnapshot&, const std::optional<std::vector<std::size_t>>&,
-        const ScaleSnapConfig&, const NoteGeneratorParams&) const override { return {}; }
+        const ScaleSnapConfig&, const NoteGeneratorParams&, bool) const override { return {}; }
     std::optional<std::vector<Note>> planAutoTuneContentRange(
         const EditableContentSnapshot&, int, int, const NoteGeneratorParams&,
         const std::optional<ScaleSnapConfig>&) const override { return std::nullopt; }
@@ -54,7 +54,7 @@ public:
     PitchShiftEditAction* commitPitchShiftEdit(ContentKey, const PitchShiftSettings&) override { return nullptr; }
     ContentEditCommitResult commitAutoTuneContentRangeUndoable(
         ContentKey, int, int, const NoteGeneratorParams&, const std::optional<ScaleSnapConfig>&,
-        const juce::String&) override { return {}; }
+        const juce::String&, bool) override { return {}; }
     bool generateNotesOnly(ContentKey, const NoteGeneratorParams&) override { return false; }
     bool commitGeneratedNotesOnly(ContentKey, ContentNoteRangePatch) override { return false; }
     bool ensureTimeToolAnchorSeed(ContentKey) override { return false; }

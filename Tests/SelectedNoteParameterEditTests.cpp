@@ -1,5 +1,6 @@
 #include "ContentEditCommandsStub.h"
 #include "Content/EditableContentSnapshot.h"
+#include "Content/ContentPatchGeometry.h"
 #include "Utils/PianoRollEditAction.h"
 #include "Utils/SelectedNoteParameterEdit.h"
 #include <algorithm>
@@ -94,6 +95,9 @@ std::vector<PitchCorrectionSegment> segmentsInRange(
         clipped.endFrame = clippedEnd;
         clipped.f0Data.assign(segment.f0Data.begin() + offset,
                               segment.f0Data.begin() + offset + length);
+        if (offset + length <= static_cast<int>(segment.baseF0Data.size()))
+            clipped.baseF0Data.assign(segment.baseF0Data.begin() + offset,
+                                      segment.baseF0Data.begin() + offset + length);
         result.push_back(std::move(clipped));
     }
     return result;
@@ -179,7 +183,8 @@ bool checkPurePlanForParameter(AudioEditingScheme::ParameterId id, float value,
         || patch->beforeSegments.front().endFrame != 10
         || patch->beforeSegments.front().f0Data != std::vector<float>({224.0f, 225.0f, 226.0f,
                                                                         227.0f, 228.0f, 229.0f})
-        || patch->beforeSegments.front().baseF0Data != snapshot.pitchCurve->getCorrectionSegments().front().baseF0Data)
+        || patch->beforeSegments.front().baseF0Data != std::vector<float>({214.0f, 215.0f, 216.0f,
+                                                                            217.0f, 218.0f, 219.0f}))
         return false;
 
     return patch->affectedRange.startFrame == affectedRange.startFrame
@@ -322,6 +327,52 @@ bool checkEditActionUsesBoundContentKey()
         && sameSegments(commands->lastSegments, {afterSegment});
 }
 
+bool checkMixEditActionPreservesManualPieces()
+{
+    using Source = PitchCorrectionSegment::Source;
+    const ContentKey key{DomainKind::StandaloneClip, 77, 0};
+    auto commands = std::make_shared<RecordingCommands>();
+    auto snapshot = makeSnapshot();
+    auto curve = PitchCurve::fromSnapshot(snapshot.pitchCurve);
+    snapshot.pitchCurve = curve->setManualCorrectionRange(
+        10, 90, std::vector<float>(80, 350.0f), Source::LineAnchor);
+    const auto& initial = snapshot.pitchCurve->getCorrectionSegments();
+    const auto patch = planSelectedNoteParameterEdit(
+        *commands, key, snapshot, {0}, snapshot.notesRevision,
+        AudioEditingScheme::ParameterId::RetuneSpeed, 0.8f, 0.15f, 0.0f, 7.5f, true);
+    if (!patch || !patch->changed)
+        return false;
+
+    const auto sourceAt = [](const auto& corrections, int frame) {
+        for (const auto& segment : corrections)
+            if (segment.startFrame <= frame && frame < segment.endFrame)
+                return segment.source;
+        return Source::None;
+    };
+    const auto range = patch->affectedRange;
+    const auto replace = [&](const auto& current, const auto& replacement) {
+        return replaceSegmentsInFrameRange(current, replacement, range.startFrame, range.endFrameExclusive);
+    };
+    const auto committed = replace(initial, patch->afterSegments);
+    PianoRollEditAction action(
+        commands, key, "Edit note", patch->beforeNotes, patch->afterNotes,
+        patch->beforeSegments, patch->afterSegments, {{range.startFrame, range.endFrameExclusive}});
+    action.undo();
+    const auto undone = replace(committed, commands->lastSegments);
+    if (sourceAt(undone, 30) != Source::LineAnchor
+        || !sameNotes(commands->lastNotes, patch->beforeNotes))
+        return false;
+
+    action.redo();
+    const auto redone = replace(undone, commands->lastSegments);
+    return sameNotes(commands->lastNotes, patch->afterNotes)
+        && sameSegments(committed, redone)
+        && sourceAt(redone, 15) == Source::LineAnchor
+        && sourceAt(redone, 30) == Source::NoteBased
+        && sourceAt(redone, 59) == Source::LineAnchor
+        && sourceAt(redone, 75) == Source::LineAnchor;
+}
+
 } // namespace
 
 int main()
@@ -334,7 +385,8 @@ int main()
                                       9.0f, 0.15f, 0.0f, 7.5f)
         || !checkSharedNoteValuePlanner()
         || !checkStaleNotesRevisionRejected()
-        || !checkEditActionUsesBoundContentKey()) {
+        || !checkEditActionUsesBoundContentKey()
+        || !checkMixEditActionPreservesManualPieces()) {
         std::cerr << "Selected-note parameter edit regression failed\n";
         return 1;
     }

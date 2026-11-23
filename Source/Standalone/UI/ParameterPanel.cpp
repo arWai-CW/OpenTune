@@ -923,6 +923,10 @@ int ParameterPanel::layoutContent(int width)
         if (experimentalFeaturesEnabled_)
             buttons.push_back(timeToolButton_.get());
         buttons.push_back(scissorsToolButton_.get());
+        if (openDyneMixEnabled_) {
+            buttons.push_back(drawNoteToolButton_.get());
+            buttons.push_back(lineAnchorToolButton_.get());
+        }
         buttons.push_back(handDrawToolButton_.get());
         buttons.push_back(eraserToolButton_.get());
         buttons.push_back(autoTuneToolButton_.get());
@@ -1139,18 +1143,19 @@ void ParameterPanel::setExperimentalFeaturesEnabled(bool enabled)
     repaint();
 }
 
-void ParameterPanel::setOpenDyneMode(bool enabled)
+void ParameterPanel::setOpenDyneMode(bool enabled, bool mixEnabled)
 {
-    if (openDyneMode_ == enabled) {
+    mixEnabled = enabled && mixEnabled;
+    if (openDyneMode_ == enabled && openDyneMixEnabled_ == mixEnabled) {
         return;
     }
 
     openDyneMode_ = enabled;
+    openDyneMixEnabled_ = mixEnabled;
 
     // Select 与 AUTO 在两种布局均保留，恒可见
-    // OpenTune 专属工具：DrawNote/LineAnchor 只在 OpenTune 布局显示；HandDraw 两种模式均可见
-    if (drawNoteToolButton_)    drawNoteToolButton_->setVisible(!enabled);
-    if (lineAnchorToolButton_)  lineAnchorToolButton_->setVisible(!enabled);
+    if (drawNoteToolButton_)    drawNoteToolButton_->setVisible(!enabled || mixEnabled);
+    if (lineAnchorToolButton_)  lineAnchorToolButton_->setVisible(!enabled || mixEnabled);
 
     // OpenDyne 专属工具：Pitch/PitchModulation/PitchDrift/VolumeEnvelope/Scissors 只在 OpenDyne 布局显示
     if (pitchToolButton_)                pitchToolButton_->setVisible(enabled);

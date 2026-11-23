@@ -14,6 +14,7 @@ namespace {
 constexpr const char* kSharedLanguageKey = "shared.language";
 constexpr const char* kSharedThemeKey = "shared.theme.activeTheme";
 constexpr const char* kSharedAudioEditingSchemeKey = "shared.audioEditing.scheme";
+constexpr const char* kSharedOpenDyneMixKey = "shared.audioEditing.openDyneMix";
 constexpr const char* kSharedPianoRollNoteNameModeKey = "shared.pianoRoll.noteNameMode";
 constexpr const char* kSharedPianoRollShowUnvoicedFramesKey = "shared.pianoRoll.showUnvoicedFrames";
 constexpr const char* kSharedPianoRollShowPianoKeyboardKey = "shared.pianoRoll.showPianoKeyboard";
@@ -431,6 +432,7 @@ AppPreferencesState loadStateFromProperties(const juce::PropertiesFile& properti
     state.shared.theme = themeFromToken(properties.getValue(kSharedThemeKey, toThemeToken(state.shared.theme)));
     state.shared.audioEditingScheme = audioEditingSchemeFromToken(
         properties.getValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme)));
+    state.shared.openDyneMixEnabled = properties.getBoolValue(kSharedOpenDyneMixKey, state.shared.openDyneMixEnabled);
     state.shared.pianoRollVisualPreferences.noteNameMode = noteNameModeFromToken(
         properties.getValue(kSharedPianoRollNoteNameModeKey,
                             toNoteNameModeToken(state.shared.pianoRollVisualPreferences.noteNameMode)));
@@ -532,6 +534,7 @@ void writeStateToProperties(juce::PropertiesFile& properties, const AppPreferenc
     properties.setValue(kSharedLanguageKey, toLanguageToken(state.shared.language));
     properties.setValue(kSharedThemeKey, toThemeToken(state.shared.theme));
     properties.setValue(kSharedAudioEditingSchemeKey, toAudioEditingSchemeToken(state.shared.audioEditingScheme));
+    properties.setValue(kSharedOpenDyneMixKey, state.shared.openDyneMixEnabled);
     properties.setValue(kSharedPianoRollNoteNameModeKey,
                         toNoteNameModeToken(state.shared.pianoRollVisualPreferences.noteNameMode));
     properties.setValue(kSharedPianoRollShowUnvoicedFramesKey,
@@ -1092,6 +1095,13 @@ bool AppPreferences::getOutOfScaleDragEnabled() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     return state_.shared.outOfScaleDragEnabled;
+}
+
+void AppPreferences::setOpenDyneMixEnabled(bool enabled)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    state_.shared.openDyneMixEnabled = enabled;
+    saveLocked();
 }
 
 void AppPreferences::setAccessibilityModeEnabled(bool enabled)

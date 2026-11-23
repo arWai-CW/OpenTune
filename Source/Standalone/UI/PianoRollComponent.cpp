@@ -304,8 +304,10 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
                                     juce::String description) {
         if (processor_ == nullptr || !editedContentKey_.isValid())
             return DrawNoteCommitResult{};
+        auto edit = input;
+        edit.preserveManualOutsideEdits = openDyneMixEnabled_;
         return processor_->drawNote(
-            editedContentKey_, input, expectedNotesRevision, std::move(description));
+            editedContentKey_, edit, expectedNotesRevision, std::move(description));
     };
     toolCtx.applyDrawNoteResult = [this](const DrawNoteCommitResult& result,
                                          const std::vector<Note>& beforeNotes,
@@ -367,7 +369,8 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
             params.vibratoRate = currentVibratoRate_;
             result = processor_->commitNoteBasedCorrectionDraft(
                 editedContentKey_, expectedNotesRevision, notes, editRange, params,
-                pendingUndoDescription_.isNotEmpty() ? pendingUndoDescription_ : LOC(kEdit));
+                pendingUndoDescription_.isNotEmpty() ? pendingUndoDescription_ : LOC(kEdit),
+                openDyneMixEnabled_);
         }
 
         interactionState_.noteDraft.clear();
@@ -516,7 +519,7 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
         params.retuneSpeed = currentRetuneSpeed_;
         params.vibratoDepth = currentVibratoDepth_;
         params.vibratoRate = currentVibratoRate_;
-        return contentCommands_->planNoteCorrection(*snapshot, notes, editRange, params);
+        return contentCommands_->planNoteCorrection(*snapshot, notes, editRange, params, openDyneMixEnabled_);
     };
     toolCtx.applyAutoSnap = [this](const std::vector<std::size_t>& targets,
                                    const ScaleSnapConfig& scaleSnap,
@@ -527,7 +530,7 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
         if (snapshot == nullptr)
             return false;
         const auto plan = contentCommands_->planAutoSnap(
-            *snapshot, targets, scaleSnap, getCurrentAutoTuneParams());
+            *snapshot, targets, scaleSnap, getCurrentAutoTuneParams(), openDyneMixEnabled_);
         if (plan.status != ContentAutoSnapPlan::Status::Commit)
             return false;
         pendingUndoDescription_ = description;
@@ -710,6 +713,7 @@ PianoRollToolHandler::Context PianoRollComponent::buildToolHandlerContext() {
     toolCtx.setMouseCursor = [this](const juce::MouseCursor& c) { setMouseCursor(c); };
     toolCtx.grabKeyboardFocus = [this]() { grabKeyboardFocus(); };
     toolCtx.getAudioEditingScheme = [this]() { return audioEditingScheme_; };
+    toolCtx.isOpenDyneMixEnabled = [this]() { return openDyneMixEnabled_; };
     toolCtx.notifyPlayheadChange = [this](double time, bool commit) {
         const uint64_t seekEpoch = playHeadState_.presentationEpoch.load(std::memory_order_acquire);
         const double hostTime = playHeadState_.timeInSeconds.load(std::memory_order_relaxed);
@@ -808,7 +812,7 @@ namespace {
 struct ToolBarItem {
     ToolId id;
     juce::String name;
-    const char* shortcut;
+    juce::String shortcut;
     std::function<juce::Path()> iconFactory;
 };
 
@@ -857,6 +861,10 @@ void PianoRollComponent::showToolMenuFromKeyboard()
             { ToolId::Eraser, LOC(kEraser), Id::Count },
             { ToolId::VolumeEnvelope, LOC(kToolODVolumeEnvelope), Id::ToolODVolumeEnvelope },
         };
+        if (allowsTuneDrawingTools()) {
+            entries.push_back({ ToolId::DrawNote, LOC(kToolDrawNote), Id::ToolMixDrawNote });
+            entries.push_back({ ToolId::LineAnchor, LOC(kToolLineAnchor), Id::ToolMixLineAnchor });
+        }
         if (experimentalFeaturesEnabled_)
             entries.push_back({ ToolId::TimeTool, LOC(kTime), Id::ToolTimeTool });
         entries.push_back({ ToolId::Scissors, LOC(kToolODScissors), Id::ToolODScissors });
@@ -932,6 +940,16 @@ void PianoRollComponent::showToolSelectionBar(juce::Point<int> screenPos)
             { { ToolId::Eraser,    LOC(kEraser),   "",    []{ return ToolbarIcons::getEraseIcon(); } } },
             { { ToolId::VolumeEnvelope, LOC(kToolODVolumeEnvelope), "F4", []{ return makeToolIcon(ToolId::VolumeEnvelope); } } },
         };
+        if (allowsTuneDrawingTools()) {
+            using Id = KeyShortcutConfig::ShortcutId;
+            const auto shortcut = [this](Id id) {
+                return KeyShortcutConfig::getShortcutBinding(shortcutSettings_, id).getDisplayNames();
+            };
+            mainItems.push_back({ { ToolId::DrawNote, LOC(kToolDrawNote), shortcut(Id::ToolMixDrawNote),
+                                    []{ return ToolbarIcons::getDrawNoteIcon(); } } });
+            mainItems.push_back({ { ToolId::LineAnchor, LOC(kToolLineAnchor), shortcut(Id::ToolMixLineAnchor),
+                                    []{ return ToolbarIcons::getLineAnchorIcon(); } } });
+        }
         if (experimentalFeaturesEnabled_)
             mainItems.push_back({ { ToolId::TimeTool, LOC(kTime), "T", []{ return makeToolIcon(ToolId::TimeTool); } } });
         mainItems.push_back({ { ToolId::Scissors, LOC(kToolODScissors), "F6", []{ return makeToolIcon(ToolId::Scissors); } } });
@@ -1963,9 +1981,7 @@ void PianoRollComponent::drawTransientOverlay(juce::Graphics& g)
     juce::Graphics::ScopedSaveState overlaySave(g);
     g.addTransform(juce::AffineTransform::translation(0.0f, static_cast<float>(rulerHeight_)));
 
-    // note-drag Corrected F0 预览已收敛为 noteDrag.previewSnapshot（renderer 消费），
-    // HandDraw/LineAnchor 预览仅 OpenTune
-    if (!isOpenDyne()) {
+    if (allowsTuneDrawingTools()) {
         drawHandDrawPreview(g);
         drawLineAnchorPreview(g);
     }
@@ -3260,7 +3276,7 @@ AudioEditingScheme::ParameterEditResult PianoRollComponent::editParameter(AudioE
         const auto postSnapCfg = makeScaleSnapConfigFromUi(scaleRootNote_, scaleType_);
         auto edit = contentCommands_->commitAutoTuneContentRangeUndoable(
             editedContentKey_, requestedRange.startFrame, requestedRange.endFrameExclusive,
-            getCurrentAutoTuneParams(), postSnapCfg, LOC_RAW("Split note"));
+            getCurrentAutoTuneParams(), postSnapCfg, LOC_RAW("Split note"), openDyneMixEnabled_);
         if (edit.snapshot == nullptr) {
             result.status = AudioEditingScheme::ParameterEditStatus::Failed;
             return result;
@@ -3292,7 +3308,8 @@ AudioEditingScheme::ParameterEditResult PianoRollComponent::editParameter(AudioE
             currentRetuneSpeed_,
             currentVibratoDepth_,
             currentVibratoRate_,
-            LOC_RAW("Edit note"));
+            LOC_RAW("Edit note"),
+            openDyneMixEnabled_);
         result.status = edit.status;
         result.changed = edit.changed;
         if (edit.status != AudioEditingScheme::ParameterEditStatus::Applied || !edit.changed) {
@@ -4471,16 +4488,18 @@ void PianoRollComponent::restoreViewportState(const ViewportState& state)
     overlay_->repaint();
 }
 
-// ── OpenDyne scheme 切换原子重置（计划 §二.3） ──
-void PianoRollComponent::applyAudioEditingScheme(AudioEditingScheme::Scheme scheme)
+void PianoRollComponent::setAudioEditingScheme(AudioEditingScheme::Scheme scheme, bool mixEnabled)
 {
-    if (audioEditingScheme_ == scheme)
+    const bool nowOpenDyne = AudioEditingScheme::usesNotesPrimaryScheme(scheme);
+    mixEnabled = nowOpenDyne && mixEnabled;
+    if (audioEditingScheme_ == scheme && openDyneMixEnabled_ == mixEnabled)
         return;
 
-    const bool wasOpenDyne = AudioEditingScheme::usesNotesPrimaryScheme(audioEditingScheme_);
+    const bool wasOpenDyne = isOpenDyne();
     audioEditingScheme_ = scheme;
-    const bool nowOpenDyne = AudioEditingScheme::usesNotesPrimaryScheme(audioEditingScheme_);
+    openDyneMixEnabled_ = mixEnabled;
 
+    dismissToolPopup();
     stopNotePitchAudition();
     // 清除当前 transient drag/resize/drawing/scissors/volume 预览
     interactionState_.resetTransient();
@@ -4491,12 +4510,11 @@ void PianoRollComponent::applyAudioEditingScheme(AudioEditingScheme::Scheme sche
 
     // 切入 OpenDyne：DrawNote→Pitch，LineAnchor→Select；HandDraw/Select/TimeTool 保持
     // 切回 OpenTune：Pitch→DrawNote，OpenDyne-only 工具（VolumeEnvelope/Scissors）→Select
-    if (nowOpenDyne) {
-        if (currentTool_ == ToolId::DrawNote)
-            setCurrentTool(ToolId::Pitch);
-        else if (currentTool_ == ToolId::LineAnchor)
-            setCurrentTool(ToolId::Select);
-    } else if (wasOpenDyne) {
+    if (!allowsTuneDrawingTools()) {
+        const auto fallback = toolWithTuneDrawingAvailability(currentTool_, false);
+        if (fallback != currentTool_)
+            setCurrentTool(fallback);
+    } else if (!nowOpenDyne && wasOpenDyne) {
         if (currentTool_ == ToolId::Pitch || currentTool_ == ToolId::PitchModulation || currentTool_ == ToolId::PitchDrift)
             setCurrentTool(ToolId::DrawNote);
         else if (currentTool_ == ToolId::VolumeEnvelope || currentTool_ == ToolId::Scissors)
@@ -4535,6 +4553,8 @@ void PianoRollComponent::ensureOpenDyneNotesIfNeeded()
 }
 
 void PianoRollComponent::setCurrentTool(ToolId tool) {
+    tool = toolWithTuneDrawingAvailability(tool, allowsTuneDrawingTools());
+
     if (currentTool_ != tool)
         stopNotePitchAudition();
 
@@ -4882,7 +4902,7 @@ void PianoRollComponent::mouseUp(const juce::MouseEvent& e) {
 bool PianoRollComponent::fingerDragOnEmptySpacePans() const noexcept {
     if (currentTool_ == ToolId::HandDraw)
         return false;
-    if (currentTool_ == ToolId::DrawNote && !isOpenDyne())
+    if (currentTool_ == ToolId::DrawNote && allowsTuneDrawingTools())
         return false;
     return true;
 }
@@ -6360,7 +6380,7 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::applyAutoSnapToAllNo
                 targets->push_back(static_cast<std::size_t>(index));
     }
     const auto plan = contentCommands_->planAutoSnap(
-        *contentSnapshot, targets, scaleSnap, getCurrentAutoTuneParams());
+        *contentSnapshot, targets, scaleSnap, getCurrentAutoTuneParams(), openDyneMixEnabled_);
     if (plan.status == ContentAutoSnapPlan::Status::NoChange)
         return { AutoTuneApplyStatus::NoChange };
     if (plan.status == ContentAutoSnapPlan::Status::EmptyRange)

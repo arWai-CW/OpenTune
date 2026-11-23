@@ -95,7 +95,7 @@ public:
     void setExperimentalFeaturesEnabled(bool enabled);
 
     /** OpenDyne（NotesPrimary）模式：切换工具在上 / Pitch Shift 在底部布局。 */
-    void setOpenDyneMode(bool enabled);
+    void setOpenDyneMode(bool enabled, bool mixEnabled = false);
 
     /** Pitch Grid 全局开关回调：切换 No Snap / Chromatic / Key Scale 吸附模式。 */
     std::function<void(PitchGridMode)> onPitchGridModeChanged;
@@ -240,6 +240,7 @@ private:
 
     bool experimentalFeaturesEnabled_ = false;
     bool openDyneMode_ = false;
+    bool openDyneMixEnabled_ = false;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ParameterPanel)
 };

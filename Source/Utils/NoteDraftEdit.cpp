@@ -5,10 +5,13 @@
 
 namespace OpenTune {
 
-NoteDraftEditPlan planNoteDraftEdit(const std::vector<Note>& baselineNotes,
-                                    const std::vector<Note>& workingNotes)
+namespace {
+
+template <typename AddRange>
+void forEachChangedNoteRange(const std::vector<Note>& baselineNotes,
+                            const std::vector<Note>& workingNotes,
+                            AddRange addRange)
 {
-    NoteDraftEditPlan plan;
     const auto notesContentEqual = [](const Note& left, const Note& right) {
         return left.endTime == right.endTime
             && left.pitch == right.pitch
@@ -20,8 +23,6 @@ NoteDraftEditPlan planNoteDraftEdit(const std::vector<Note>& baselineNotes,
             && left.eq == right.eq;
     };
 
-    double dirtyStartTime = 1e30;
-    double dirtyEndTime = -1e30;
     std::size_t beforeIndex = 0;
     std::size_t workingIndex = 0;
     while (beforeIndex < baselineNotes.size() || workingIndex < workingNotes.size()) {
@@ -29,26 +30,49 @@ NoteDraftEditPlan planNoteDraftEdit(const std::vector<Note>& baselineNotes,
         const bool hasWorking = workingIndex < workingNotes.size();
         if (hasBefore && hasWorking
             && baselineNotes[beforeIndex].startTime == workingNotes[workingIndex].startTime) {
-            if (!notesContentEqual(baselineNotes[beforeIndex], workingNotes[workingIndex])) {
-                dirtyStartTime = std::min(dirtyStartTime, baselineNotes[beforeIndex].startTime);
-                dirtyEndTime = std::max({ dirtyEndTime,
-                                          baselineNotes[beforeIndex].endTime,
-                                          workingNotes[workingIndex].endTime });
-            }
+            if (!notesContentEqual(baselineNotes[beforeIndex], workingNotes[workingIndex]))
+                addRange(baselineNotes[beforeIndex].startTime,
+                         std::max(baselineNotes[beforeIndex].endTime, workingNotes[workingIndex].endTime));
             ++beforeIndex;
             ++workingIndex;
         } else if (!hasWorking
                    || (hasBefore && baselineNotes[beforeIndex].startTime
                        < workingNotes[workingIndex].startTime)) {
-            dirtyStartTime = std::min(dirtyStartTime, baselineNotes[beforeIndex].startTime);
-            dirtyEndTime = std::max(dirtyEndTime, baselineNotes[beforeIndex].endTime);
+            addRange(baselineNotes[beforeIndex].startTime, baselineNotes[beforeIndex].endTime);
             ++beforeIndex;
         } else {
-            dirtyStartTime = std::min(dirtyStartTime, workingNotes[workingIndex].startTime);
-            dirtyEndTime = std::max(dirtyEndTime, workingNotes[workingIndex].endTime);
+            addRange(workingNotes[workingIndex].startTime, workingNotes[workingIndex].endTime);
             ++workingIndex;
         }
     }
+}
+
+} // namespace
+
+std::vector<F0FrameRange> changedNoteFrameRanges(const std::vector<Note>& baselineNotes,
+                                                const std::vector<Note>& workingNotes,
+                                                const F0Timeline& timeline)
+{
+    std::vector<F0FrameRange> ranges;
+    if (!timeline.isEmpty())
+        forEachChangedNoteRange(baselineNotes, workingNotes, [&](double start, double end) {
+            const F0FrameRange range{timeline.exclusiveFrameAt(start), timeline.exclusiveFrameAt(end)};
+            if (!range.isEmpty())
+                ranges.push_back(range);
+        });
+    return ranges;
+}
+
+NoteDraftEditPlan planNoteDraftEdit(const std::vector<Note>& baselineNotes,
+                                    const std::vector<Note>& workingNotes)
+{
+    NoteDraftEditPlan plan;
+    double dirtyStartTime = 1e30;
+    double dirtyEndTime = -1e30;
+    forEachChangedNoteRange(baselineNotes, workingNotes, [&](double start, double end) {
+        dirtyStartTime = std::min(dirtyStartTime, start);
+        dirtyEndTime = std::max(dirtyEndTime, end);
+    });
 
     if (dirtyEndTime <= dirtyStartTime)
         return plan;

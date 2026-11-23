@@ -771,11 +771,13 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             int endFrameExclusive,
             const NoteGeneratorParams& params,
             const std::optional<ScaleSnapConfig>& scaleSnap,
-            const juce::String& description) override
+            const juce::String& description,
+            bool preserveManualOutsideEdits) override
         {
             const auto before = proc_.getContentSnapshot(key);
             if (before == nullptr || before->pitchCurve == nullptr
-                || !proc_.autoTuneContentRangeByContentKey(key, startFrame, endFrameExclusive, params, scaleSnap))
+                || !proc_.autoTuneContentRangeByContentKey(key, startFrame, endFrameExclusive,
+                                                         params, scaleSnap, preserveManualOutsideEdits))
                 return {};
 
             const auto after = proc_.getContentSnapshot(key);
@@ -936,17 +938,21 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             const EditableContentSnapshot& snapshot,
             const std::vector<Note>& notes,
             F0FrameRange editRange,
-            const NoteGeneratorParams& params) const override
+            const NoteGeneratorParams& params,
+            bool preserveManualOutsideEdits) const override
         {
             if (snapshot.pitchCurve == nullptr || editRange.isEmpty())
                 return std::nullopt;
             const auto& curve = *snapshot.pitchCurve;
             const F0Timeline timeline{curve.getHopSize(), curve.getSampleRate(), static_cast<int>(curve.size())};
+            const auto manualReplacementRanges = preserveManualOutsideEdits
+                ? changedNoteFrameRanges(snapshot.notes, notes, timeline) : std::vector<F0FrameRange>{};
             auto scratch = PitchCurve::fromSnapshot(snapshot.pitchCurve);
             auto corrected = scratch->applyCorrectionToRange(
                 notes, editRange.startFrame, editRange.endFrameExclusive,
                 static_cast<float>(snapshot.pitchShiftSettings.getPitchRatio()),
-                params.retuneSpeed, params.vibratoDepth, params.vibratoRate);
+                params.retuneSpeed, params.vibratoDepth, params.vibratoRate, 1.0f,
+                preserveManualOutsideEdits ? &manualReplacementRanges : nullptr);
             const auto affected = PitchCurve::expandNoteBasedCorrectionRange(
                 editRange.startFrame, editRange.endFrameExclusive, timeline.endFrameExclusive());
             if (affected.isEmpty() || corrected == nullptr)
@@ -985,7 +991,8 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             const EditableContentSnapshot& snapshot,
             const std::optional<std::vector<std::size_t>>& targets,
             const ScaleSnapConfig& scaleSnap,
-            const NoteGeneratorParams& params) const override
+            const NoteGeneratorParams& params,
+            bool preserveManualOutsideEdits) const override
         {
             ContentAutoSnapPlan plan;
             plan.notes = snapshot.notes;
@@ -1039,7 +1046,21 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                 targetNotes.push_back(note);
             }
             const auto noteFrames = timeline.rangeForTimes(targetStart, targetEnd);
-            if (!pitchChanged && fullyCorrected(curve, noteFrames.startFrame, noteFrames.endFrameExclusive))
+            std::vector<F0FrameRange> manualReplacementRanges;
+            if (preserveManualOutsideEdits) {
+                for (const auto& note : targetNotes)
+                    manualReplacementRanges.push_back({timeline.exclusiveFrameAt(note.startTime),
+                                                       timeline.exclusiveFrameAt(note.endTime)});
+            }
+            if (!pitchChanged && fullyCorrected(curve, noteFrames.startFrame, noteFrames.endFrameExclusive)
+                && (!preserveManualOutsideEdits || std::none_of(
+                    curve.getCorrectionSegments().begin(), curve.getCorrectionSegments().end(),
+                    [&](const auto& segment) {
+                        return (segment.source == PitchCorrectionSegment::Source::HandDraw
+                                || segment.source == PitchCorrectionSegment::Source::LineAnchor)
+                            && halfOpenRangesOverlap(segment.startFrame, segment.endFrame,
+                                                     noteFrames.startFrame, noteFrames.endFrameExclusive);
+                    })))
                 return plan;
 
             if (pitchChanged) {
@@ -1059,7 +1080,8 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             const auto corrected = scratch->applyCorrectionToRange(
                 targetNotes, editRange.startFrame, editRange.endFrameExclusive,
                 static_cast<float>(snapshot.pitchShiftSettings.getPitchRatio()),
-                params.retuneSpeed, params.vibratoDepth, params.vibratoRate);
+                params.retuneSpeed, params.vibratoDepth, params.vibratoRate, 1.0f,
+                preserveManualOutsideEdits && !selectionActive ? &manualReplacementRanges : nullptr);
             const auto affected = PitchCurve::expandNoteBasedCorrectionRange(
                 editRange.startFrame, editRange.endFrameExclusive, timeline.endFrameExclusive());
 
@@ -1091,7 +1113,7 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
 
                 for (const auto& segment : corrected->getCorrectionSegments())
                     for (const auto& frames : targetFrames)
-                        if (auto cut = cutSegment(segment, frames.startFrame, frames.endFrameExclusive))
+                        if (auto cut = clipPitchCorrectionSegment(segment, frames.startFrame, frames.endFrameExclusive))
                             segments.push_back(std::move(*cut));
 
                 for (const auto& segment : curve.getCorrectionSegments()) {
@@ -1115,7 +1137,9 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                             break;
                     }
                     for (const auto& span : spans)
-                        if (auto kept = cutSegment(segment, span.startFrame, span.endFrameExclusive))
+                        if (auto kept = clipPitchCorrectionSegment(segment,
+                               std::max(span.startFrame, affected.startFrame),
+                               std::min(span.endFrameExclusive, affected.endFrameExclusive)))
                             segments.push_back(std::move(*kept));
                 }
             }
@@ -1310,22 +1334,6 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                     covered = false;
             });
             return covered;
-        }
-
-        static std::optional<PitchCorrectionSegment> cutSegment(
-            const PitchCorrectionSegment& segment, int start, int end)
-        {
-            const int clipStart = std::max(segment.startFrame, start);
-            const int clipEnd = std::min(segment.endFrame, end);
-            const int offset = clipStart - segment.startFrame;
-            if (clipEnd <= clipStart || offset + clipEnd - clipStart > static_cast<int>(segment.f0Data.size()))
-                return std::nullopt;
-            auto clipped = segment;
-            clipped.startFrame = clipStart;
-            clipped.endFrame = clipEnd;
-            clipped.f0Data.assign(segment.f0Data.begin() + offset,
-                                  segment.f0Data.begin() + offset + clipEnd - clipStart);
-            return clipped;
         }
 
         OpenTuneAudioProcessor& proc_;
@@ -5367,7 +5375,8 @@ SelectedNoteParameterEditResult OpenTuneAudioProcessor::editSelectedNoteParamete
     float retuneSpeedDefault,
     float vibratoDepthDefault,
     float vibratoRateDefault,
-    juce::String undoDescription)
+    juce::String undoDescription,
+    bool preserveManualOutsideEdits)
 {
     SelectedNoteParameterEditResult result;
     auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
@@ -5384,7 +5393,7 @@ SelectedNoteParameterEditResult OpenTuneAudioProcessor::editSelectedNoteParamete
     }
     const auto patch = planSelectedNoteParameterEdit(
         *contentCommands_, key, *snapshot, selectedNoteIndices, expectedNotesRevision, parameterId, value,
-        retuneSpeedDefault, vibratoDepthDefault, vibratoRateDefault);
+        retuneSpeedDefault, vibratoDepthDefault, vibratoRateDefault, preserveManualOutsideEdits);
     if (!patch) {
         if (snapshot->notesRevision != expectedNotesRevision) {
             result.status = AudioEditingScheme::ParameterEditStatus::Failed;
@@ -5608,7 +5617,8 @@ OpenTuneAudioProcessor::NoteDraftCommitResult OpenTuneAudioProcessor::commitNote
     const std::vector<Note>& workingNotes,
     F0FrameRange editRange,
     NoteGeneratorParams params,
-    juce::String undoDescription)
+    juce::String undoDescription,
+    bool preserveManualOutsideEdits)
 {
     NoteDraftCommitResult result;
     auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
@@ -5632,7 +5642,7 @@ OpenTuneAudioProcessor::NoteDraftCommitResult OpenTuneAudioProcessor::commitNote
     }
 
     const auto correction = contentCommands_->planNoteCorrection(
-        *snapshot, workingNotes, editRange, params);
+        *snapshot, workingNotes, editRange, params, preserveManualOutsideEdits);
     if (!correction)
         return result;
 
@@ -6795,7 +6805,8 @@ bool OpenTuneAudioProcessor::autoTuneContentRangeByContentKey(
     int startFrame,
     int endFrameExclusive,
     const NoteGeneratorParams& params,
-    const std::optional<ScaleSnapConfig>& scaleSnap)
+    const std::optional<ScaleSnapConfig>& scaleSnap,
+    bool preserveManualOutsideEdits)
 {
     auto snap = getContentSnapshot(key);
     if (snap == nullptr || snap->pitchCurve == nullptr || contentCommands_ == nullptr)
@@ -6806,7 +6817,7 @@ bool OpenTuneAudioProcessor::autoTuneContentRangeByContentKey(
         return false;
     return commitAutoTunePlanByContentKey(
         key, std::move(*plannedNotes), startFrame, endFrameExclusive,
-        params.retuneSpeed, params.vibratoDepth, params.vibratoRate);
+        params.retuneSpeed, params.vibratoDepth, params.vibratoRate, preserveManualOutsideEdits);
 }
 
 bool OpenTuneAudioProcessor::commitAutoTunePlanByContentKey(ContentKey key,
@@ -6815,7 +6826,8 @@ bool OpenTuneAudioProcessor::commitAutoTunePlanByContentKey(ContentKey key,
                                                              int endFrameExclusive,
                                                              float retuneSpeed,
                                                              float vibratoDepth,
-                                                             float vibratoRate)
+                                                             float vibratoRate,
+                                                             bool preserveManualOutsideEdits)
 {
     auto snap = getContentSnapshot(key);
     if (!snap || !snap->pitchCurve) return false;
@@ -6823,13 +6835,15 @@ bool OpenTuneAudioProcessor::commitAutoTunePlanByContentKey(ContentKey key,
     if (endFrameExclusive <= startFrame || mergedNotes.empty()) return false;
 
     auto derivedCurve = PitchCurve::fromSnapshot(snap->pitchCurve);
+    const std::vector<F0FrameRange> manualReplacementRanges{{startFrame, endFrameExclusive}};
     derivedCurve->applyCorrectionToRange(mergedNotes,
                                          startFrame,
                                          endFrameExclusive,
                                          static_cast<float>(snap->pitchShiftSettings.getPitchRatio()),
                                          retuneSpeed,
                                          vibratoDepth,
-                                         vibratoRate);
+                                         vibratoRate, 1.0f,
+                                         preserveManualOutsideEdits ? &manualReplacementRanges : nullptr);
 
     bool ok = false;
     switch (key.domainKind) {

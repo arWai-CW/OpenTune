@@ -1,4 +1,5 @@
 #include "Utils/DrawNoteEdit.h"
+#include "Utils/NoteDraftEdit.h"
 #include "Utils/PitchUtils.h"
 #include <cmath>
 #include <iostream>
@@ -236,10 +237,101 @@ bool checkStaleRevision()
     return plan.status == DrawNotePlanStatus::StaleRevision;
 }
 
+bool checkMixDrawNotePrecedence()
+{
+    using Source = PitchCorrectionSegment::Source;
+    auto snapshot = makeSnapshot({makeNote(16.0, 38.0, 220.0f)});
+    auto curve = std::make_shared<PitchCurve>();
+    curve->setHopSize(1);
+    curve->setSampleRate(1.0);
+    std::vector<float> f0(64, 220.0f);
+    f0[26] = 0.0f;
+    curve->setOriginalF0(f0);
+    curve->setManualCorrectionRange(5, 28, std::vector<float>(23, 330.0f), Source::HandDraw);
+    snapshot.pitchCurve = curve->setManualCorrectionRange(
+        28, 49, std::vector<float>(21, 360.0f), Source::LineAnchor);
+
+    auto input = makeInput(23.25, 32.0, 440.0f);
+    input.preserveManualOutsideEdits = true;
+    const auto plan = planDrawNoteEdit(snapshot, input, 12);
+    auto segments = replaceSegmentsInFrameRange(
+        snapshot.pitchCurve->getCorrectionSegments(), plan.segmentsToCommit,
+        plan.affectedRange.startFrame, plan.affectedRange.endFrameExclusive);
+    const auto sourceAt = [](const auto& corrections, int frame) {
+        for (const auto& segment : corrections)
+            if (segment.startFrame <= frame && frame < segment.endFrame)
+                return segment.source;
+        return Source::None;
+    };
+    if (plan.status != DrawNotePlanStatus::Ready || plan.afterNotes.size() != 3
+        || sourceAt(segments, 6) != Source::HandDraw
+        || sourceAt(segments, 23) != Source::HandDraw
+        || sourceAt(segments, 24) != Source::NoteBased
+        || sourceAt(segments, 26) != Source::None
+        || sourceAt(segments, 31) != Source::NoteBased
+        || sourceAt(segments, 32) != Source::LineAnchor
+        || sourceAt(segments, 48) != Source::LineAnchor)
+        return false;
+
+    curve->replaceCorrectionSegments(segments);
+    const auto lineAfter = curve->setManualCorrectionRange(24, 29, std::vector<float>(5, 390.0f), Source::LineAnchor);
+    const auto handAfter = curve->setManualCorrectionRange(24, 25, {410.0f}, Source::HandDraw);
+    return sourceAt(lineAfter->getCorrectionSegments(), 24) == Source::LineAnchor
+        && sourceAt(handAfter->getCorrectionSegments(), 24) == Source::HandDraw
+        && sourceAt(handAfter->getCorrectionSegments(), 26) == Source::None
+        && sourceAt(handAfter->getCorrectionSegments(), 28) == Source::LineAnchor
+        && sourceAt(handAfter->getCorrectionSegments(), 30) == Source::NoteBased;
+}
+
+bool checkMixDisjointNoteChanges()
+{
+    using Source = PitchCorrectionSegment::Source;
+    PitchCurve curve;
+    curve.setHopSize(1);
+    curve.setSampleRate(1.0);
+    curve.setOriginalF0(std::vector<float>(100, 220.0f));
+    const auto manual = curve.setManualCorrectionRange(8, 92, std::vector<float>(84, 333.0f), Source::LineAnchor);
+    const std::vector<Note> before{
+        makeNote(24.0, 32.0, 220.0f), makeNote(42.0, 49.0, 220.0f), makeNote(63.0, 74.0, 220.0f)
+    };
+    auto after = before;
+    after.front().pitchOffset = 2.0f;
+    after.back().pitchOffset = 4.0f;
+    const auto exactRanges = changedNoteFrameRanges(before, after, F0Timeline{1, 1.0, 100});
+    if (exactRanges.size() != 2 || exactRanges[0].startFrame != 24
+        || exactRanges[0].endFrameExclusive != 32 || exactRanges[1].startFrame != 63
+        || exactRanges[1].endFrameExclusive != 74)
+        return false;
+
+    const auto mix = curve.applyCorrectionToRange(after, 24, 74, 1.0f, 0.42f, 0.0f, 7.5f, 1.0f, &exactRanges);
+    const auto legacy = PitchCurve::fromSnapshot(manual)->applyCorrectionToRange(after, 24, 74, 1.0f, 0.42f, 0.0f, 7.5f);
+    const auto effectiveAt = [](const PitchCurveSnapshot& snapshot, int frame) {
+        float value = -1.0f;
+        snapshot.forEachEffectiveF0Span(frame, frame + 1, 1.0f, [&](int, const float* values, int, float gain) {
+            value = values[0] * gain;
+        });
+        return value;
+    };
+    for (const int frame : {9, 23, 32, 45, 62, 74, 91})
+        if (!near(effectiveAt(*mix, frame), 333.0f))
+            return false;
+    const auto& segments = mix->getCorrectionSegments();
+    for (const auto& segment : segments)
+        if (segment.source == Source::LineAnchor && segment.baseF0Data != segment.f0Data)
+            return false;
+    return near(effectiveAt(*mix, 27), effectiveAt(*legacy, 27))
+        && near(effectiveAt(*mix, 68), effectiveAt(*legacy, 68))
+        && !near(effectiveAt(*legacy, 45), 333.0f);
+}
+
 } // namespace
 
 int main()
 {
+    if (!checkMixDrawNotePrecedence() || !checkMixDisjointNoteChanges()) {
+        std::cerr << "Mix note/manual precedence failed\n";
+        return 1;
+    }
     if (!checkNoOverlapAndNoteOnlyPatch()) {
         std::cerr << "Draw note no-overlap/note-only patch failed\n";
         return 1;

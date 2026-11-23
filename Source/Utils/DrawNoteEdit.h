@@ -14,6 +14,7 @@ struct DrawNoteEditInput
     float retuneSpeed = 0.0f;
     float vibratoDepth = 0.0f;
     float vibratoRate = 0.0f;
+    bool preserveManualOutsideEdits = false;
 };
 
 enum class DrawNotePlanStatus

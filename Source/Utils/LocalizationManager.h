@@ -274,6 +274,7 @@ constexpr const char* kLanguageLabel = "Interface Language";
 constexpr const char* kAudioEditingScheme = "Audio Editing Scheme";
 constexpr const char* kSchemeOpenTune = "OpenTune";
 constexpr const char* kSchemeOpenDyne = "OpenDyne";
+constexpr const char* kOpenDyneMix = "Mix: Tune drawing tools";
 constexpr const char* kGridStyle = "Grid Style";
 constexpr const char* kGridStylePianoLanes = "Piano Lanes";
 constexpr const char* kGridStyleEqualSpacing = "Equal Spacing";
@@ -650,6 +651,7 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kAudioEditingScheme, "Audio Editing Scheme", "音频编辑方案", "音声編集方式", "Схема аудиоредактирования", "Esquema de edicion de audio" },
         { Keys::kSchemeOpenTune, "OpenTune", "OpenTune", "OpenTune", "OpenTune", "OpenTune" },
         { Keys::kSchemeOpenDyne, "OpenDyne", "OpenDyne", "OpenDyne", "OpenDyne", "OpenDyne" },
+        { Keys::kOpenDyneMix, "Mix: Tune drawing tools", "混合模式：Tune 绘制工具", "Mix：Tune の描画ツール", "Микс: инструменты рисования Tune", "Mix: herramientas de dibujo de Tune" },
         { Keys::kGridStyle, "Grid Style", "网格样式", "グリッドスタイル", "Стиль сетки", "Estilo de cuadricula" },
         { Keys::kGridStylePianoLanes, "Piano Lanes", "钢琴键槽", "ピアノレーン", "Клавиши пианино", "Teclas de piano" },
         { Keys::kGridStyleEqualSpacing, "Equal Spacing", "等距", "等間隔", "Равный интервал", "Espaciado igual" },

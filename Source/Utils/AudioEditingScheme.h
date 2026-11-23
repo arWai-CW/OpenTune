@@ -83,6 +83,11 @@ inline bool usesNotesPrimaryScheme(Scheme scheme) noexcept
     return scheme == Scheme::NotesPrimary;
 }
 
+inline bool allowsTuneDrawingTools(Scheme scheme, bool mixEnabled) noexcept
+{
+    return !usesNotesPrimaryScheme(scheme) || mixEnabled;
+}
+
 inline bool isEditableVoicedFrame(float frequencyHz) noexcept
 {
     return frequencyHz > 0.0f;

@@ -178,6 +178,7 @@ public:
         std::function<float()> getVibratoDepth;
         std::function<float()> getVibratoRate;
         std::function<AudioEditingScheme::Scheme()> getAudioEditingScheme;
+        std::function<bool()> isOpenDyneMixEnabled;
         std::function<const KeyShortcutConfig::KeyShortcutSettings&()> getShortcutSettings;
         std::function<double()> getDirtyStartTime;
         std::function<void(double)> setDirtyStartTime;
@@ -381,6 +382,7 @@ private:
     void resetSelectedNotesVolumeByKeyboard();
     bool applyNoteDefaultActionByKeyboard();
     void switchToolFromKeyboard(ToolId tool);
+    bool allowsTuneDrawingTools() const;
     bool commitKeyboardNoteEdit(const std::vector<Note>& work, const std::vector<int>& changedIndices,
                                 const juce::String& undoDescription);
     // Hit-test handles within ±5 px of a TimeGrid handle's output_seconds.

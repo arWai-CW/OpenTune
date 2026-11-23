@@ -59,6 +59,7 @@ struct SharedPreferencesState {
     Language language = Language::Chinese;
     ThemeId theme = ThemeId::Aurora;
     AudioEditingScheme::Scheme audioEditingScheme = AudioEditingScheme::Scheme::CorrectedF0Primary;
+    bool openDyneMixEnabled = false;
     PianoRollVisualPreferences pianoRollVisualPreferences;
     ZoomSensitivityConfig::ZoomSensitivitySettings zoomSensitivity =
         ZoomSensitivityConfig::ZoomSensitivitySettings::getDefault();
@@ -147,6 +148,7 @@ public:
     void setNoteTransposePreviewEnabled(bool enabled);
     bool getNoteTransposePreviewEnabled() const;
     void setOutOfScaleDragEnabled(bool enabled);
+    void setOpenDyneMixEnabled(bool enabled);
     bool getOutOfScaleDragEnabled() const;
 
     void setAccessibilityModeEnabled(bool enabled);

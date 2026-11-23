@@ -44,6 +44,7 @@ std::optional<SelectedNoteParameterPatch> planSelectedNoteParameterEdit(
     float value,
     float retuneSpeedDefault,
     float vibratoDepthDefault,
-    float vibratoRateDefault);
+    float vibratoRateDefault,
+    bool preserveManualOutsideEdits = false);
 
 } // namespace OpenTune
