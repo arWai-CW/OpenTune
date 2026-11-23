@@ -60,8 +60,14 @@ void normalizePoints(std::vector<AutomationPoint>& points)
 void AutomationLane::setRegionGain(double startTime, double endTime, float gainDb,
                                     double rampDuration)
 {
-    const double rampStart = std::max(0.0, startTime - rampDuration);
-    const double rampEnd = endTime + rampDuration;
+    setRegionGain(startTime, endTime, gainDb, rampDuration, rampDuration);
+}
+
+void AutomationLane::setRegionGain(double startTime, double endTime, float gainDb,
+                                    double leadingRampSeconds, double trailingRampSeconds)
+{
+    const double rampStart = std::max(0.0, startTime - leadingRampSeconds);
+    const double rampEnd = endTime + trailingRampSeconds;
     const float gainBefore = evalAt(rampStart);
     const float gainAfter = evalAt(rampEnd);
 
