@@ -1046,22 +1046,25 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                 targetNotes.push_back(note);
             }
             const auto noteFrames = timeline.rangeForTimes(targetStart, targetEnd);
-            std::vector<F0FrameRange> manualReplacementRanges;
-            if (preserveManualOutsideEdits) {
-                for (const auto& note : targetNotes)
-                    manualReplacementRanges.push_back({timeline.exclusiveFrameAt(note.startTime),
-                                                       timeline.exclusiveFrameAt(note.endTime)});
+            std::vector<F0FrameRange> targetNoteFrames;
+            if (selectionActive || preserveManualOutsideEdits) {
+                for (const auto& note : targetNotes) {
+                    const F0FrameRange range{timeline.exclusiveFrameAt(note.startTime),
+                                             timeline.exclusiveFrameAt(note.endTime)};
+                    if (!range.isEmpty())
+                        targetNoteFrames.push_back(range);
+                }
             }
-            if (!pitchChanged && fullyCorrected(curve, noteFrames.startFrame, noteFrames.endFrameExclusive)
-                && (!preserveManualOutsideEdits || std::none_of(
-                    curve.getCorrectionSegments().begin(), curve.getCorrectionSegments().end(),
-                    [&](const auto& segment) {
-                        return (segment.source == PitchCorrectionSegment::Source::HandDraw
-                                || segment.source == PitchCorrectionSegment::Source::LineAnchor)
-                            && halfOpenRangesOverlap(segment.startFrame, segment.endFrame,
-                                                     noteFrames.startFrame, noteFrames.endFrameExclusive);
-                    })))
-                return plan;
+            if (!pitchChanged) {
+                const bool alreadyCorrected = preserveManualOutsideEdits
+                    ? std::all_of(targetNoteFrames.begin(), targetNoteFrames.end(),
+                                  [&](F0FrameRange range) {
+                                      return fullyCorrected(curve, range.startFrame, range.endFrameExclusive, true);
+                                  })
+                    : fullyCorrected(curve, noteFrames.startFrame, noteFrames.endFrameExclusive);
+                if (alreadyCorrected)
+                    return plan;
+            }
 
             if (pitchChanged) {
                 dirtyStart = std::min(dirtyStart, targetStart);
@@ -1081,7 +1084,7 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                 targetNotes, editRange.startFrame, editRange.endFrameExclusive,
                 static_cast<float>(snapshot.pitchShiftSettings.getPitchRatio()),
                 params.retuneSpeed, params.vibratoDepth, params.vibratoRate, 1.0f,
-                preserveManualOutsideEdits && !selectionActive ? &manualReplacementRanges : nullptr);
+                preserveManualOutsideEdits && !selectionActive ? &targetNoteFrames : nullptr);
             const auto affected = PitchCurve::expandNoteBasedCorrectionRange(
                 editRange.startFrame, editRange.endFrameExclusive, timeline.endFrameExclusive());
 
@@ -1091,19 +1094,12 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
                     if (segment.startFrame < affected.endFrameExclusive && segment.endFrame > affected.startFrame)
                         segments.push_back(segment);
             } else {
-                std::vector<F0FrameRange> noteFrames;
-                for (const auto& note : targetNotes) {
-                    const int start = timeline.exclusiveFrameAt(note.startTime);
-                    const int end = timeline.exclusiveFrameAt(note.endTime);
-                    if (end > start)
-                        noteFrames.push_back({start, end});
-                }
-                std::sort(noteFrames.begin(), noteFrames.end(),
+                std::sort(targetNoteFrames.begin(), targetNoteFrames.end(),
                           [](const F0FrameRange& a, const F0FrameRange& b) {
                               return a.startFrame < b.startFrame;
                           });
                 std::vector<F0FrameRange> targetFrames;
-                for (const auto& frames : noteFrames) {
+                for (const auto& frames : targetNoteFrames) {
                     if (targetFrames.empty() || targetFrames.back().endFrameExclusive < frames.startFrame)
                         targetFrames.push_back(frames);
                     else
@@ -1324,10 +1320,21 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
             return result;
         }
 
-        static bool fullyCorrected(const PitchCurveSnapshot& curve, int start, int end)
+        static bool fullyCorrected(const PitchCurveSnapshot& curve, int start, int end,
+                                   bool ignoreManualCorrections = false)
         {
             if (start < 0 || end > static_cast<int>(curve.size()) || end <= start)
                 return false;
+            if (ignoreManualCorrections) {
+                const auto& segments = curve.getCorrectionSegments();
+                auto segment = std::lower_bound(segments.begin(), segments.end(), start,
+                    [](const PitchCorrectionSegment& seg, int frame) { return seg.endFrame <= frame; });
+                for (; segment != segments.end() && segment->startFrame < end; ++segment) {
+                    if (segment->source == PitchCorrectionSegment::Source::HandDraw
+                        || segment->source == PitchCorrectionSegment::Source::LineAnchor)
+                        return false;
+                }
+            }
             bool covered = true;
             curve.forEachCorrectionF0Span(start, end, [&](int, const float* values, int) {
                 if (values == nullptr)
