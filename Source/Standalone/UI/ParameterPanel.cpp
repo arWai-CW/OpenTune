@@ -895,14 +895,16 @@ void ParameterPanel::ToolStrip::resized()
 {
     const std::array buttons {
         owner_.selectToolButton_.get(),
-        owner_.drawNoteToolButton_.get(),
-        owner_.lineAnchorToolButton_.get(),
+        owner_.openDyneMode_ ? nullptr : owner_.drawNoteToolButton_.get(),
+        owner_.openDyneMode_ ? nullptr : owner_.lineAnchorToolButton_.get(),
         owner_.pitchToolButton_.get(),
         owner_.pitchModulationToolButton_.get(),
         owner_.pitchDriftToolButton_.get(),
         owner_.volumeEnvelopeToolButton_.get(),
         owner_.openDyneMode_ ? owner_.timeToolButton_.get() : nullptr,
         owner_.scissorsToolButton_.get(),
+        owner_.openDyneMode_ ? owner_.drawNoteToolButton_.get() : nullptr,
+        owner_.openDyneMode_ ? owner_.lineAnchorToolButton_.get() : nullptr,
         owner_.handDrawToolButton_.get(),
         owner_.eraserToolButton_.get(),
         owner_.openDyneMode_ ? nullptr : owner_.timeToolButton_.get(),
@@ -1096,18 +1098,19 @@ void ParameterPanel::setExperimentalFeaturesEnabled(bool enabled)
     toolStrip_.resized();
 }
 
-void ParameterPanel::setOpenDyneMode(bool enabled)
+void ParameterPanel::setOpenDyneMode(bool enabled, bool mixEnabled)
 {
-    if (openDyneMode_ == enabled) {
+    mixEnabled = enabled && mixEnabled;
+    if (openDyneMode_ == enabled && openDyneMixEnabled_ == mixEnabled) {
         return;
     }
 
     openDyneMode_ = enabled;
+    openDyneMixEnabled_ = mixEnabled;
 
     // Select 与 AUTO 在两种布局均保留，恒可见
-    // OpenTune 专属工具：DrawNote/LineAnchor 只在 OpenTune 布局显示；HandDraw 两种模式均可见
-    if (drawNoteToolButton_)    drawNoteToolButton_->setVisible(!enabled);
-    if (lineAnchorToolButton_)  lineAnchorToolButton_->setVisible(!enabled);
+    if (drawNoteToolButton_)    drawNoteToolButton_->setVisible(!enabled || mixEnabled);
+    if (lineAnchorToolButton_)  lineAnchorToolButton_->setVisible(!enabled || mixEnabled);
 
     // OpenDyne 专属工具：Pitch/PitchModulation/PitchDrift/VolumeEnvelope/Scissors 只在 OpenDyne 布局显示
     if (pitchToolButton_)                pitchToolButton_->setVisible(enabled);

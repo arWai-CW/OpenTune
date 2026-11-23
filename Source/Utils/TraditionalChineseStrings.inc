@@ -94,6 +94,7 @@
     { Keys::kAudioEditingScheme, "音訊編輯方案" },
     { Keys::kSchemeOpenTune, "OpenTune" },
     { Keys::kSchemeOpenDyne, "OpenDyne" },
+    { Keys::kOpenDyneMix, "混合模式：Tune 繪製工具" },
     { Keys::kGridStyle, "網格樣式" },
     { Keys::kGridStylePianoLanes, "鋼琴鍵槽" },
     { Keys::kGridStyleEqualSpacing, "等距" },

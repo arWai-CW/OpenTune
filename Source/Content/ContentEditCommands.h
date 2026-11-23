@@ -155,7 +155,8 @@ public:
         const EditableContentSnapshot& snapshot,
         const std::vector<Note>& notes,
         F0FrameRange editRange,
-        const NoteGeneratorParams& params) const = 0;
+        const NoteGeneratorParams& params,
+        bool preserveManualOutsideEdits = false) const = 0;
 
     virtual F0FrameRange noteFrameRange(
         const PitchCurveSnapshot& curve,
@@ -166,7 +167,8 @@ public:
         const EditableContentSnapshot& snapshot,
         const std::optional<std::vector<std::size_t>>& targets,
         const ScaleSnapConfig& scaleSnap,
-        const NoteGeneratorParams& params) const = 0;
+        const NoteGeneratorParams& params,
+        bool preserveManualOutsideEdits = false) const = 0;
 
     virtual std::optional<std::vector<Note>> planAutoTuneContentRange(
         const EditableContentSnapshot& snapshot,
@@ -208,7 +210,8 @@ public:
         int endFrameExclusive,
         const NoteGeneratorParams& params,
         const std::optional<ScaleSnapConfig>& scaleSnap,
-        const juce::String& description) = 0;
+        const juce::String& description,
+        bool preserveManualOutsideEdits = false) = 0;
 
     // 仅生成音符唯一入口：generate → validate → 拓扑提交。
     // 全内容范围（0..f0Count，内部从同一 snapshot 派生）。不写 correction segments、
