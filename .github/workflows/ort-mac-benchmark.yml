@@ -55,13 +55,10 @@ jobs:
                 https://raw.githubusercontent.com/intel/onnxruntime/c4fb724e810bb496165b9015c77f402727392933/include/onnxruntime/core/providers/coreml/coreml_provider_factory.h \
                 -o "$work/$v/build/native/include/coreml_provider_factory.h"
             else
-              lib="$work/$v/libonnxruntime.dylib"
+              lib="$work/$v/libonnxruntime.$v.dylib"
               unzip -p "$work/$v.zip" runtimes/osx-arm64/native/libonnxruntime.dylib > "$lib"
-              # Resolve the candidate using our rpath regardless of the NuGet install name.
-              install_name_tool -id @rpath/libonnxruntime.dylib "$lib"
-              codesign --force --sign - "$lib"
             fi
-            lipo -verify_arch arm64 "$lib"
+            lipo "$lib" -verify_arch arm64
             otool -arch arm64 -L "$lib"
             otool -arch arm64 -l "$lib" | awk '$1 == "minos" {print}'
             cmake -S Tests/OrtMacBenchmark -B "$work/build-$v" -DCMAKE_BUILD_TYPE=Release \
