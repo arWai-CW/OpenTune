@@ -277,7 +277,7 @@ bool testIsolatedAttackStaysPut()
 
 bool testLoudAudioOutsideOverlapDoesNotHideAttacks()
 {
-    constexpr int rate = 16000;
+    static constexpr int rate = 16000;
     juce::AudioBuffer<float> targetAudio(1, 5 * rate), guideAudio(1, 5 * rate);
     targetAudio.clear();
     guideAudio.clear();
@@ -337,7 +337,7 @@ bool testTimingRejectionReportsStageAndCounts()
 
 bool testLastFramesOfOverlapCanProvideTheThirdMatch()
 {
-    constexpr int rate = 16000;
+    static constexpr int rate = 16000;
     juce::AudioBuffer<float> targetAudio(1, 3 * rate), guideAudio(1, 3 * rate);
     targetAudio.clear();
     guideAudio.clear();
