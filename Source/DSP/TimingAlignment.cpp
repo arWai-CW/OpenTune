@@ -102,12 +102,20 @@ bool validSpan(const TimeHandle& first, const TimeHandle& second)
                                                   second.output_seconds - first.output_seconds);
 }
 
-bool insertAnchor(std::vector<TimeHandle>& handles, const TimeHandle& anchor)
+auto anchorInsertionPoint(std::vector<TimeHandle>& handles, const TimeHandle& anchor)
 {
     const auto after = std::lower_bound(handles.begin(), handles.end(), anchor.source_seconds,
         [](const TimeHandle& handle, double time) { return handle.source_seconds < time; });
     if (after == handles.begin() || after == handles.end()
         || !validSpan(*(after - 1), anchor) || !validSpan(anchor, *after))
+        return handles.end();
+    return after;
+}
+
+bool insertAnchor(std::vector<TimeHandle>& handles, const TimeHandle& anchor)
+{
+    const auto after = anchorInsertionPoint(handles, anchor);
+    if (after == handles.end())
         return false;
     handles.insert(after, anchor);
     return true;
@@ -406,6 +414,7 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
             lockTime(targetGrid.tauForward(targets[i].onset.sourceSeconds));
 
     const auto lastLockedId = id;
+    bool skippedProtectedMove = false;
     for (size_t i = 0; i < targets.size(); ++i) {
         const double time = targets[i].timeline;
         const double source = targets[i].onset.sourceSeconds;
@@ -419,7 +428,21 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         if (oldOutput <= *firstLock || oldOutput >= *lastLock || output <= *firstLock || output >= *lastLock)
             continue;
         const auto kind = targets[i].onset.highFrequencyDominant ? HandleKind::OnsetSibilant : HandleKind::OnsetVoiced;
-        insertAnchor(handles, {++id, source, output, kind, Confidence::High});
+        const TimeHandle anchor{++id, source, output, kind, Confidence::High};
+        const auto after = anchorInsertionPoint(handles, anchor);
+        if (after == handles.end())
+            continue;
+
+        // Adding a moving anchor changes both halves of its stretch span.
+        const auto& left = *(after - 1);
+        if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
+                return std::min(range.end, after->output_seconds)
+                    - std::max(range.begin, left.output_seconds) > boundaryEpsilon;
+            })) {
+            skippedProtectedMove = true;
+            continue;
+        }
+        handles.insert(after, anchor);
     }
 
     const auto unsafeMove = [&](size_t i, double output) -> const char* {
@@ -484,14 +507,19 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         result.maxMoveSeconds = std::max(result.maxMoveSeconds,
             std::abs(handle.output_seconds - targetGrid.tauForward(handle.source_seconds)));
     }
-    if (result.movedAnchors == 0)
-        return reject(rejection);
-    if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
-            return !preservesTimingAudioInRange(targetGrid, *result.grid, range);
-        })) {
+    const auto rejectProtectedTiming = [&] {
         result.affectsProtectedTiming = true;
         return reject("timing would affect another placement that shares these ARA edits");
+    };
+    if (result.movedAnchors == 0) {
+        if (skippedProtectedMove)
+            return rejectProtectedTiming();
+        return reject(rejection);
     }
+    if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
+            return !preservesTimingAudioInRange(targetGrid, *result.grid, range);
+        }))
+        return rejectProtectedTiming();
     return result;
 }
 

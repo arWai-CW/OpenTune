@@ -462,6 +462,24 @@ bool testBlockedAttackKeepsSafeNeighbor()
         && std::abs(plan.grid->tauForward(0.90) - 0.915) < 1e-9
         && std::abs(plan.grid->tauForward(0.63) - 0.643) < 0.013;
 }
+
+bool testProtectedSiblingDoesNotDiscardIndependentMove()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.34, 0.34, HandleKind::UserAdded},
+        {3, 1.17, 1.17, HandleKind::UserAdded},
+        {4, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {0.90, true}, {1.50, false}};
+    const std::vector<TimingOnset> guide{{0.56, true}, {0.643, false}, {0.915, true}, {1.54, false}};
+    const TimingOutputRange sibling{1.0, 1.17};
+    const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0, {sibling});
+    return plan.grid && plan.movedAnchors == 1 && plan.matchedAttacks == 4
+        && std::abs(plan.grid->tauForward(1.50) - 1.54) < 1e-9
+        && preservesTimingAudioInRange(*grid, *plan.grid, sibling);
+}
 }
 
 int main()
@@ -480,6 +498,10 @@ int main()
     }
     if (!testBlockedAttackKeepsSafeNeighbor()) {
         std::fputs("A blocked attack discarded a safe neighboring timing move\n", stderr);
+        return 1;
+    }
+    if (!testProtectedSiblingDoesNotDiscardIndependentMove()) {
+        std::fputs("A move affecting a pooled sibling discarded an independent timing move\n", stderr);
         return 1;
     }
     if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
