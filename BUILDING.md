@@ -46,6 +46,10 @@ macOS：
 python3 scripts/github_actions/patch-juce-ara.py
 ```
 
+> 修复 macOS 界面文字乱码：更新 OpenTune 源码后，已有的 JUCE 8.0.12 checkout 不用重装，
+> 重新运行上面的脚本，再重新构建并让 DAW 加载新插件。脚本移植了
+> [JUCE 的字形缓存修复](https://github.com/juce-framework/JUCE/commit/6725e79fb525612398f6cec65f44dee16801d40e)。
+>
 > 脚本同时给 `juce_StandaloneFilterWindow.h` 的标题栏补上最大化按钮（JUCE 8.0.12 上游只有最小化和关闭）。
 > 不运行脚本时，Standalone 主窗口右上角只有 — 和 ×，且最大化按钮缺失。
 >

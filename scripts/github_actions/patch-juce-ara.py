@@ -26,6 +26,8 @@ PATCHED_PATHS = {
     "modules/juce_core/threads/juce_OpenTuneCallbackGate.h",
     "modules/juce_core/threads/juce_SpinLock.h",
     "modules/juce_core/threads/juce_Thread.cpp",
+    "modules/juce_graphics/contexts/juce_GraphicsContext.cpp",
+    "modules/juce_graphics/fonts/juce_Font.cpp",
     "modules/juce_gui_basics/native/juce_Windowing_windows.cpp",
 }
 
