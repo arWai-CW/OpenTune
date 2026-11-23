@@ -124,6 +124,7 @@ private:
     bool rateHoldExceeded_ = false;
 
     static constexpr double kDecayPerTrackingUpdate = 0.995;
+    static constexpr double kIdentityRateEpsilon = 1.0e-4;
 
     bool isReadable(double addr) const;
     float readInterpolated(double addr) const;
@@ -132,9 +133,14 @@ private:
     /// (detector shadow hop-held samples between tracking update events).
     /// A tracking update whose target rate leaves the ±75 cent contract also
     /// keeps the held rate; the contract bounds every applied rate.
+    /// identityTarget marks a sample with no correction request. Once the
+    /// applied rate has returned to 1, the read address is realigned to the
+    /// input (one cycle-jump fade), so unedited audio after an edit in the
+    /// same chunk is the source again, sample for sample.
     float processSample(double cyclePeriod, double targetResampleRate,
                         bool updateResampleRate = true,
-                        bool snapMode = false);
+                        bool snapMode = false,
+                        bool identityTarget = false);
 };
 
 } // namespace OpenTune

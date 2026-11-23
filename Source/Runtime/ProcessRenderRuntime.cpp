@@ -2105,6 +2105,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
     std::vector<float> effectiveF0;
     std::vector<float> vocoderF0;
     std::vector<float> vocoderUv;
+    std::shared_ptr<const VocoderSplicePayload> splicePayload;
 
     const double relChunkStartSec = TimeCoordinate::samplesToSeconds(
         job.startSample, RenderCache::kSampleRate);
@@ -2350,12 +2351,13 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                             values[static_cast<size_t>(k)];
                 });
 
-            // 目标本身超出 ±75 音分时轻量周期重采样合同不成立：整段
-            // AutoTune 分支不执行，沿既有 fall-through 进入 vocoder。
-            const bool targetWithinLightContract =
-                !chunkNeedsVocoder(autoTuneTargetF0.data(), safeNumF0Frames,
-                                   originalF0Full, f0StartFrame);
-            if (targetWithinLightContract)
+            // A correction that returns to the source is no correction: the
+            // light render then reproduces the source sample for sample.
+            clearIdentityCorrections(autoTuneTargetF0, originalF0Full, f0StartFrame);
+
+            // Frames beyond the ±75 cent light contract, or with a long
+            // detector-invalid run, are rendered by the vocoder and spliced
+            // into the light render; the rest of the chunk stays light.
             {
                 // Supply the source context needed by the pitch resampler:
                 // preceding waveform history for cycle transitions and future
@@ -2403,6 +2405,11 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                         originalF0Full.data(), originalF0Size, f0FrameRate,
                         static_cast<double>(f0StartFrame) + firstSampleFramePhase);
 
+                const LightRenderPlan lightPlan = planLightRender(
+                    autoTuneTargetF0, originalF0Full.data() + f0StartFrame,
+                    safeNumF0Frames, detectorFrames.data(), detectorNumSamples,
+                    RenderCache::kSampleRate, f0FrameRate, firstSampleFramePhase);
+
                 // snapMode：所有音符 retuneSpeed 均为 1.0 时，DSP 跳过 EMA 直接锁定
                 bool snapMode = true;
                 for (const auto& n : contentSnap->notes) {
@@ -2413,7 +2420,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                     monoAudio.data(),
                     detectorNumSamples,
                     originalF0Full.data() + f0StartFrame,
-                    autoTuneTargetF0.data(),
+                    lightPlan.dspTarget.data(),
                     safeNumF0Frames,
                     f0FrameRate,
                     firstSampleFramePhase,
@@ -2437,7 +2444,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                         AutoTunePitchShifter channelShifter(RenderCache::kSampleRate);
                         auto plane = channelShifter.shiftChunkWithSharedPeriods(
                             source + boundaries.trueStartSample, detectorNumSamples,
-                            autoTuneTargetF0.data(), safeNumF0Frames, f0FrameRate, firstSampleFramePhase,
+                            lightPlan.dspTarget.data(), safeNumF0Frames, f0FrameRate, firstSampleFramePhase,
                             source + boundaries.trueEndSample, shifterLookaheadSamples,
                             source + boundaries.trueStartSample - shifterLookbehindSamples,
                             shifterLookbehindSamples, repair, snapMode);
@@ -2461,6 +2468,17 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                         + ", continuityCents=" + juce::String(repair.continuityCents, 3)
                         + ", actualSamples=" + juce::String(static_cast<juce::int64>(shiftedAudioSamples))
                         + ", revision=" + juce::String(static_cast<juce::int64>(coreJob.targetRevision)) + ")");
+                }
+                else if (lightPlan.needsVocoder)
+                {
+                    auto payload = std::make_shared<VocoderSplicePayload>();
+                    payload->weights = buildVocoderSpliceWeights(
+                        lightPlan.vocoderFrames, detectorNumSamples,
+                        RenderCache::kSampleRate, f0FrameRate,
+                        firstSampleFramePhase, monoAudio.data());
+                    payload->lightAudio = std::move(repair.audio);
+                    payload->numChannels = numChannels;
+                    splicePayload = std::move(payload);
                 }
                 else
                 {
@@ -2778,7 +2796,7 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                              requeueAudioBuffer, requeueAudioSampleRate,
                               captureContentKey, chunkObjId,
                               jobStartSample, frozenBoundaries, contentSnap,
-                              hybridPayload,
+                              hybridPayload, splicePayload,
                               completion](
                                  VocoderRenderScheduler::JobResult result,
                                  const juce::String& error,
@@ -2821,9 +2839,20 @@ void ProcessRenderRuntime::processChunkRenderJob(std::shared_ptr<ContentRenderSe
                 return;
             }
 
+            int publishedChannels = 1;
+            if (splicePayload != nullptr)
+            {
+                auto spliced = spliceVocoderIntoLight(*splicePayload, publishedAudio);
+                if (!spliced.empty())
+                {
+                    publishedAudio = std::move(spliced);
+                    publishedChannels = splicePayload->numChannels;
+                }
+            }
+
             const auto publishResult = publishChunkWithPerNoteEq(
                 *renderCache, boundaries, std::move(publishedAudio), targetRevision,
-                contentSnap->notes);
+                contentSnap->notes, publishedChannels);
 
             if (publishResult == RenderCache::ChunkRenderResult::InvalidInput
                 || publishResult == RenderCache::ChunkRenderResult::MemoryLimitExceeded)
