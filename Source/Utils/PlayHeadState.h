@@ -18,6 +18,7 @@
  */
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -100,6 +101,16 @@ struct PlayHeadPresentationProjection
     // Use only from codepaths that guarantee a single writer (Standalone local path).
     void publish(double positionSec, double nowClockSec, double horizonSec, uint64_t epoch)
     {
+        // Contiguous standalone blocks extend the horizon, not the clock origin.
+        // Callback scheduling jitter must not become presentation timing jitter.
+        const auto previous = load();
+        if (previous.valid && previous.epoch == epoch
+            && std::abs(previous.horizon - positionSec) < 1.0e-7
+            && horizonSec > positionSec)
+        {
+            positionSec = previous.anchorPosition;
+            nowClockSec = previous.anchorClock;
+        }
         sequence.fetch_add(1, std::memory_order_acq_rel);  // enter write (odd)
         anchorPositionSeconds.store(positionSec,  std::memory_order_relaxed);
         anchorClockSeconds.store(nowClockSec,      std::memory_order_relaxed);
