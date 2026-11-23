@@ -601,9 +601,7 @@ ParameterPanel::ParameterPanel()
     pitchGridSelector_.setColour(juce::ComboBox::textColourId, UIColors::textPrimary);
     pitchGridSelector_.setColour(juce::ComboBox::outlineColourId, UIColors::panelBorder);
     pitchGridSelector_.getProperties().set("noArrow", true);
-    pitchGridSelector_.getProperties().set("fontHeight", UIColors::navFontHeight);
     pitchGridSelector_.setJustificationType(juce::Justification::centred);
-    // 滚轮调参：ComboBox 在 JUCE 中默认关闭，此处显式开启；鼠标在控件上时事件被其消费，Viewport 不滚
     pitchGridSelector_.setScrollWheelEnabled(true);
     toolStrip_.addChildComponent(pitchGridSelector_);
 
@@ -918,7 +916,7 @@ void ParameterPanel::ToolStrip::resized()
 
     auto row = getLocalBounds();
     constexpr int gap = 4;
-    const int gridWidth = owner_.openDyneMode_ ? juce::jmin(120, row.getWidth() / 4) : 0;
+    const int gridWidth = owner_.openDyneMode_ ? juce::jmin(144, row.getWidth() / 4) : 0;
     const int gapCount = owner_.openDyneMode_ ? count : count - 1;
     const int buttonWidth = juce::jlimit(0, 44, (row.getWidth() - gridWidth - gap * gapCount) / count);
 
