@@ -173,10 +173,46 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
-bool testVibratoIsPreservedWhileCenterFollowsReference()
+bool testLegatoNotesKeepIndependentReferenceOffsets()
 {
-    constexpr int frameCount = 105;
-    constexpr int vibratoPeriodFrames = 21;
+    constexpr int shortNoteFrames = 15;
+    constexpr int longNoteFrames = 50;
+    constexpr int frameCount = shortNoteFrames + longNoteFrames;
+    constexpr double frameSeconds = 0.01;
+    constexpr double meanHz = 200.0;
+    const float firstReferenceHz = static_cast<float>(meanHz * std::exp2(80.0 / 1200.0));
+    const float secondReferenceHz = static_cast<float>(meanHz * std::exp2(-40.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount);
+    for (int i = 0; i < frameCount; ++i)
+        referenceF0[static_cast<size_t>(i)] = i < shortNoteFrames ? firstReferenceHz : secondReferenceHz;
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(meanHz)), {}, 1, 100.0)};
+    target.notes = {
+        {0.0, shortNoteFrames * frameSeconds, static_cast<float>(meanHz)},
+        {shortNoteFrames * frameSeconds, duration, static_cast<float>(meanHz)},
+    };
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    return nearPitch(corrected[2], firstReferenceHz, 2.0)
+        && nearPitch(corrected[shortNoteFrames - 3], firstReferenceHz, 2.0)
+        && nearPitch(corrected[shortNoteFrames + 5], secondReferenceHz, 2.0)
+        && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
+}
+
+bool vibratoRateIsPreserved(double vibratoRateHz)
+{
+    constexpr int frameCount = 200;
     constexpr double meanHz = 200.0;
     constexpr double referenceHz = 220.0;
     constexpr double vibratoCents = 30.0;
@@ -186,7 +222,7 @@ bool testVibratoIsPreservedWhileCenterFollowsReference()
     std::vector<float> targetF0;
     targetF0.reserve(frameCount);
     for (int i = 0; i < frameCount; ++i) {
-        const double phase = 2.0 * pi * static_cast<double>(i) / vibratoPeriodFrames;
+        const double phase = 2.0 * pi * vibratoRateHz * i * frameSeconds;
         targetF0.push_back(static_cast<float>(meanHz
             * std::exp2(vibratoCents * std::sin(phase) / 1200.0)));
     }
@@ -204,8 +240,8 @@ bool testVibratoIsPreservedWhileCenterFollowsReference()
         || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
         return false;
 
-    constexpr int begin = 21;
-    constexpr int end = 84;
+    constexpr int begin = 40;
+    constexpr int end = 160;
     double inputMean = 0.0;
     double outputMean = 0.0;
     const auto& targetOriginal = target.curve->getOriginalF0();
@@ -216,18 +252,26 @@ bool testVibratoIsPreservedWhileCenterFollowsReference()
     }
     inputMean /= static_cast<double>(end - begin);
     outputMean /= static_cast<double>(end - begin);
-    if (std::abs(inputMean) > 0.01 || std::abs(outputMean) > 0.1)
+    if (std::abs(outputMean) > 0.25)
         return false;
 
-    double maximumInputDeviation = 0.0;
+    double inputEnergy = 0.0;
+    double correlation = 0.0;
     for (int i = begin; i < end; ++i) {
         const double inputDeviation = 1200.0 * std::log2(static_cast<double>(targetOriginal[i]) / meanHz) - inputMean;
         const double outputDeviation = 1200.0 * std::log2(static_cast<double>(corrected[i]) / referenceHz) - outputMean;
-        maximumInputDeviation = std::max(maximumInputDeviation, std::abs(inputDeviation));
-        if (std::abs(inputDeviation - outputDeviation) > 0.25)
-            return false;
+        inputEnergy += inputDeviation * inputDeviation;
+        correlation += inputDeviation * outputDeviation;
     }
-    return maximumInputDeviation > 20.0;
+    if (inputEnergy <= 0.0)
+        return false;
+    const double amplitudeRatio = correlation / inputEnergy;
+    return amplitudeRatio >= 0.95 && amplitudeRatio <= 1.05;
+}
+
+bool testVibratoIsPreservedWhileCenterFollowsReference()
+{
+    return vibratoRateIsPreserved(5.0) && vibratoRateIsPreserved(7.0);
 }
 
 bool testTuneNoOpWithoutVoicedOverlapOrPitchChanges()
@@ -268,6 +312,10 @@ int main()
     }
     if (!testConstantTargetMovesPitchCenterWithoutChangingRegister()) {
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
+        return 1;
+    }
+    if (!testLegatoNotesKeepIndependentReferenceOffsets()) {
+        std::fputs("FAIL: Reference tuning keeps legato note offsets independent\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {

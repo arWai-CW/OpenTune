@@ -6271,7 +6271,7 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::tuneToPitchReference
 
     auto plan = planPitchReferenceCorrection(
         {activeContentProjection(), snapshot->timeGrid, snapshot->pitchCurve,
-         static_cast<float>(snapshot->pitchShiftSettings.getPitchRatio())},
+         static_cast<float>(snapshot->pitchShiftSettings.getPitchRatio()), snapshot->notes},
         pitchReferences_, ranges);
     if (!plan.hasClipOverlap)
         return { AutoTuneApplyStatus::NoReferenceClipOverlap };
