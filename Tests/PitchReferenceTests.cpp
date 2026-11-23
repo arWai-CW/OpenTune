@@ -179,6 +179,39 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
+bool testLeadingReferenceNoteChangeKeepsJumpBoundary()
+{
+    constexpr int frameCount = 60;
+    constexpr int boundaryFrame = 8;
+    constexpr double frameSeconds = 0.01;
+    constexpr double baseHz = 200.0;
+    const float firstReferenceHz = 220.0f;
+    const float secondReferenceHz = static_cast<float>(firstReferenceHz * std::exp2(100.0 / 1200.0));
+
+    std::vector<float> referenceF0(frameCount);
+    for (int i = 0; i < frameCount; ++i)
+        referenceF0[static_cast<size_t>(i)] = i < boundaryFrame ? firstReferenceHz : secondReferenceHz;
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::vector<float>(frameCount, static_cast<float>(baseHz)), {}, 1, 100.0)};
+    target.notes = {{0.0, duration, static_cast<float>(baseHz)}};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    return nearPitch(corrected[2], firstReferenceHz, 1.0)
+        && nearPitch(corrected[boundaryFrame - 2], firstReferenceHz, 1.0)
+        && nearPitch(corrected[boundaryFrame + 10], secondReferenceHz, 2.0)
+        && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
+}
+
 bool testShortReferenceOrnamentDoesNotBecomeTargetOrnament()
 {
     constexpr int frameCount = 100;
@@ -354,6 +387,10 @@ int main()
     }
     if (!testConstantTargetMovesPitchCenterWithoutChangingRegister()) {
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
+        return 1;
+    }
+    if (!testLeadingReferenceNoteChangeKeepsJumpBoundary()) {
+        std::fputs("FAIL: Reference tuning keeps a leading note change boundary\n", stderr);
         return 1;
     }
     if (!testShortReferenceOrnamentDoesNotBecomeTargetOrnament()) {
