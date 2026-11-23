@@ -2297,7 +2297,7 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     if (appliedThemeId_ != effectiveTheme)
         applyThemeToEditor(effectiveTheme);
 
-    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme);
+    pianoRoll_.setAudioEditingScheme(sharedPreferences.audioEditingScheme, sharedPreferences.openDyneMixEnabled);
     pianoRoll_.setExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
     pianoRoll_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     pianoRoll_.setNoteNameMode(visualPreferences.noteNameMode);
@@ -2311,7 +2311,8 @@ void OpenTuneAudioProcessorEditor::syncSharedAppPreferences()
     menuBar_.setShowPianoKeyboard(visualPreferences.showPianoKeyboard);
     menuBar_.setScaleAssistEnabled(visualPreferences.scaleAssistEnabled);
     parameterPanel_.setExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
-    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme));
+    parameterPanel_.setOpenDyneMode(AudioEditingScheme::usesNotesPrimaryScheme(sharedPreferences.audioEditingScheme),
+                                   sharedPreferences.openDyneMixEnabled);
     parameterPanel_.setActiveTool(static_cast<int>(pianoRoll_.getCurrentTool()));
     arrangementView_.setZoomSensitivity(sharedPreferences.zoomSensitivity);
     menuBar_.setNoteNameMode(visualPreferences.noteNameMode);

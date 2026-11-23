@@ -352,8 +352,7 @@ void PianoRollToolHandler::mouseDown(const juce::MouseEvent& e)
             handleSelectTool(e);
             break;
         case ToolId::DrawNote:
-            // OpenDyne（NotesPrimary）：DrawNote 新建音符路径不进入。
-            if (!AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme())) {
+            if (allowsTuneDrawingTools()) {
                 handleDrawNoteMouseDown(e);
             }
             break;
@@ -417,7 +416,7 @@ void PianoRollToolHandler::mouseDrag(const juce::MouseEvent& e)
             // DrawNote / HandDraw：保持旧路径
             auto startEvent = e.withNewPosition(mouseDownPos.toFloat());
             if (tool == ToolId::DrawNote
-                && !AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme())) {
+                && allowsTuneDrawingTools()) {
                 handleDrawNoteMouseDown(startEvent);
                 handleDrawNoteDrag(e);
             } else if (tool == ToolId::HandDraw) {
@@ -441,8 +440,7 @@ void PianoRollToolHandler::mouseDrag(const juce::MouseEvent& e)
             handleSelectDrag(e);
             break;
         case ToolId::DrawNote:
-            // OpenDyne（NotesPrimary）：DrawNote 新建音符路径不进入。
-            if (!AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme())) {
+            if (allowsTuneDrawingTools()) {
                 handleDrawNoteDrag(e);
             }
             break;
@@ -540,7 +538,7 @@ void PianoRollToolHandler::mouseUp(const juce::MouseEvent& e)
             } else if (tool == ToolId::HandDraw) {
                 handleDrawCurveUp(e);
             } else if (tool == ToolId::DrawNote
-                && !AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme())) {
+                && allowsTuneDrawingTools()) {
                 handleDrawNoteUp(e);
             }
             finishMouseParameterTargetChange();
@@ -585,8 +583,7 @@ void PianoRollToolHandler::mouseUp(const juce::MouseEvent& e)
             handleEraserUp();
             break;
         case ToolId::DrawNote:
-            // OpenDyne（NotesPrimary）：DrawNote 新建音符路径不进入。
-            if (!AudioEditingScheme::usesNotesPrimaryScheme(ctx_.getAudioEditingScheme())) {
+            if (allowsTuneDrawingTools()) {
                 handleDrawNoteUp(e);
             }
             break;
@@ -687,22 +684,17 @@ bool PianoRollToolHandler::keyPressed(const juce::KeyPress& key,
     }
 
     // ==== Tool switching (via configurable shortcuts) ====
-    // OpenTune（PitchPrimary）工具切换走可配置快捷键；OpenDyne（NotesPrimary）用固定 F1/F2/F4/F6，
-    // DrawNote/LineAnchor 只在 OpenTune 分支生效，绝不穿透到 OpenDyne。
-    // HandDraw 两种模式共用（OpenDyne 下自由绘制音高曲线）。
-    // ToolTimeTool/ToolAutoTune 与通用 SelectAll/Delete/CancelSelection 两 scheme 共用。
+    using ShortcutId = KeyShortcutConfig::ShortcutId;
     if (!isOpenDyne) {
-        if (matches(KeyShortcutConfig::ShortcutId::ToolDrawNote)) {
+        if (matches(ShortcutId::ToolDrawNote)) {
             switchToolFromKeyboard(ToolId::DrawNote);
             return true;
         }
-
         if (matches(KeyShortcutConfig::ShortcutId::ToolSelect)) {
             switchToolFromKeyboard(ToolId::Select);
             return true;
         }
-
-        if (matches(KeyShortcutConfig::ShortcutId::ToolLineAnchor)) {
+        if (matches(ShortcutId::ToolLineAnchor)) {
             switchToolFromKeyboard(ToolId::LineAnchor);
             return true;
         }
@@ -757,6 +749,16 @@ bool PianoRollToolHandler::keyPressed(const juce::KeyPress& key,
     if (matches(KeyShortcutConfig::ShortcutId::CancelSelection))
         return ctx_.notifyEscapeKey == nullptr || ctx_.notifyEscapeKey();
 
+    if (isOpenDyne && allowsTuneDrawingTools()) {
+        if (matches(ShortcutId::ToolMixDrawNote)) {
+            switchToolFromKeyboard(ToolId::DrawNote);
+            return true;
+        }
+        if (matches(ShortcutId::ToolMixLineAnchor)) {
+            switchToolFromKeyboard(ToolId::LineAnchor);
+            return true;
+        }
+    }
     return false;
 }
 
@@ -1535,6 +1537,12 @@ void PianoRollToolHandler::switchToolFromKeyboard(ToolId tool)
         ctx_.notifyToolChangedFromKeyboard(tool);
 }
 
+bool PianoRollToolHandler::allowsTuneDrawingTools() const
+{
+    return AudioEditingScheme::allowsTuneDrawingTools(
+        ctx_.getAudioEditingScheme(), ctx_.isOpenDyneMixEnabled && ctx_.isOpenDyneMixEnabled());
+}
+
 void PianoRollToolHandler::moveSelectedNotesPitchByKeyboard(int direction, bool fineCents, bool resetToSung,
                                                              bool semitoneIgnoringScale)
 {
@@ -2287,8 +2295,7 @@ void PianoRollToolHandler::handleDrawNoteTool(const juce::MouseEvent& e)
                                              *currentTime);
 
     float targetF0 = ctx_.getViewMapper().yToFreq(static_cast<float>(e.y - ctx_.contentOriginY));
-    // DrawNote 是 OpenTune（CorrectedF0Primary）专属工具：绘制音符允许全部半音
-    // （chromatic），直接半音量化，不读活动调式/顶栏 scale。
+    // Draw Note uses chromatic snapping even when the Dyne scale is active.
     int roundedMidi = static_cast<int>(std::lround(PitchUtils::freqToMidi(targetF0)));
     float snappedF0 = PitchUtils::midiToFreq(static_cast<float>(roundedMidi));
 
@@ -3509,6 +3516,9 @@ void PianoRollToolHandler::showToolContextMenu(const juce::MouseEvent& e)
 void PianoRollToolHandler::handleLineAnchorMouseDown(const juce::MouseEvent& e)
 // 线锚点工具鼠标按下处理：放置锚点，在锚点间生成线性插值的F0曲线
 {
+    if (!allowsTuneDrawingTools())
+        return;
+
     const auto editRange = sourceEditRange();
     // 搂8.5 鈥?LineAnchor places anchors at SOURCE time (PitchCurve indexing).
     const auto clickTime = pixelXToSourceTime(e.x);
@@ -3520,7 +3530,7 @@ void PianoRollToolHandler::handleLineAnchorMouseDown(const juce::MouseEvent& e)
 
     float clickFreq = ctx_.getViewMapper().yToFreq(static_cast<float>(e.y - ctx_.contentOriginY));
     clickFreq = std::max(20.0f, clickFreq);
-    const auto scheme = ctx_.getAudioEditingScheme();
+    constexpr auto scheme = AudioEditingScheme::Scheme::CorrectedF0Primary;
 
     const auto contentSnapshot = ctx_.getEditableContentSnapshot();
     if (contentSnapshot == nullptr || contentSnapshot->pitchCurve == nullptr) return;
@@ -3530,20 +3540,7 @@ void PianoRollToolHandler::handleLineAnchorMouseDown(const juce::MouseEvent& e)
     if (f0tl.isEmpty()) return;
 
     const float midiNote = PitchUtils::freqToMidi(clickFreq);
-    const bool openDyne = AudioEditingScheme::usesNotesPrimaryScheme(scheme);
-    float snappedFreq;
-    if (openDyne && e.mods.isAltDown()) {
-        snappedFreq = clickFreq;  // OpenDyne Alt：旁路量化，直接使用点击频率
-    } else if (openDyne) {
-        // OpenDyne：按活动调式音阶吸附
-        const auto scaleSnap = ctx_.getActiveScaleSnap ? ctx_.getActiveScaleSnap() : std::nullopt;
-        const ScaleSnapConfig snap = scaleSnap.value_or(ScaleSnapConfig{});
-        const int roundedMidi = static_cast<int>(std::lround(snap.quantizeMidiToActiveScale(midiNote)));
-        snappedFreq = PitchUtils::midiToFreq(static_cast<float>(roundedMidi));
-    } else {
-        // OpenTune：允许全部半音（chromatic），不读活动调式
-        snappedFreq = PitchUtils::midiToFreq(static_cast<float>(std::lround(midiNote)));
-    }
+    const float snappedFreq = PitchUtils::midiToFreq(static_cast<float>(std::lround(midiNote)));
 
     int clickFrame = f0tl.frameAtOrBefore(*clickTime);
 
@@ -3557,7 +3554,7 @@ void PianoRollToolHandler::handleLineAnchorMouseDown(const juce::MouseEvent& e)
     }
 
     if (!ctx_.getState().drawing.isPlacingAnchors) {
-        if (AudioEditingScheme::allowsLineAnchorSegmentSelection(scheme)) {
+        if (AudioEditingScheme::allowsLineAnchorSegmentSelection(ctx_.getAudioEditingScheme())) {
             int segmentIdx = ctx_.findLineAnchorSegmentNear(e.x, e.y - ctx_.contentOriginY);
             if (segmentIdx >= 0) {
                 if (e.mods.isCtrlDown() || e.mods.isCommandDown()) {
@@ -3622,7 +3619,6 @@ void PianoRollToolHandler::handleLineAnchorMouseDown(const juce::MouseEvent& e)
     ctx_.editManualCorrection(std::move(ops), editedStartFrame, editedEndFrameExclusive - 1,
                               LOC_RAW("Anchor correction"));
     ctx_.notifyPitchCurveEdited(editedStartFrame, editedEndFrameExclusive - 1);
-    selectNotesForEditedFrameRange(ctx_, editedStartFrame, editedEndFrameExclusive);
 
     LineAnchor newAnchor;
     newAnchor.time = *clickTime;

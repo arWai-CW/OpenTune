@@ -774,7 +774,8 @@ public:
         float retuneSpeedDefault,
         float vibratoDepthDefault,
         float vibratoRateDefault,
-        juce::String undoDescription = "Edit note");
+        juce::String undoDescription = "Edit note",
+        bool preserveManualOutsideEdits = false);
     struct SelectedNoteEqEditResult
     {
         SelectedNoteEqEditStatus status = SelectedNoteEqEditStatus::Failed;
@@ -833,7 +834,8 @@ public:
         const std::vector<Note>& workingNotes,
         F0FrameRange editRange,
         NoteGeneratorParams params,
-        juce::String undoDescription);
+        juce::String undoDescription,
+        bool preserveManualOutsideEdits = false);
     DrawNoteCommitResult drawNote(
         ContentKey key,
         const DrawNoteEditInput& input,
@@ -952,7 +954,8 @@ private:
                                         int endFrameExclusive,
                                         float retuneSpeed,
                                         float vibratoDepth,
-                                        float vibratoRate);
+                                        float vibratoRate,
+                                        bool preserveManualOutsideEdits);
 
 public:
     // 普通 AUTO 唯一核心：ContentEditCommands 统一计划生成、吸附与范围合并，再提交完整结果。
@@ -962,7 +965,8 @@ public:
         int startFrame,
         int endFrameExclusive,
         const NoteGeneratorParams& params,
-        const std::optional<ScaleSnapConfig>& scaleSnap);
+        const std::optional<ScaleSnapConfig>& scaleSnap,
+        bool preserveManualOutsideEdits = false);
 
     // 仅生成音符唯一入口：ContentEditCommands 统一计划后拓扑提交。
     // 不写 correction segments、不吸附、不请求 render。不创建 undo、不 mark dirty。

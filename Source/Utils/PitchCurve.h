@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include "F0Timeline.h"
 #include "Note.h"
 #include "PitchUtils.h"
@@ -41,6 +42,27 @@ struct PitchCorrectionSegment {
     PitchCorrectionSegment(int start, int end, const std::vector<float>& data, Source src = Source::None)
         : startFrame(start), endFrame(end), f0Data(data), source(src) {}
 };
+
+inline std::optional<PitchCorrectionSegment> clipPitchCorrectionSegment(
+    const PitchCorrectionSegment& segment, int startFrame, int endFrameExclusive)
+{
+    const int start = std::max(segment.startFrame, startFrame);
+    const int end = std::min(segment.endFrame, endFrameExclusive);
+    const int offset = start - segment.startFrame;
+    const int length = end - start;
+    if (length <= 0 || offset + length > static_cast<int>(segment.f0Data.size()))
+        return std::nullopt;
+
+    PitchCorrectionSegment clipped;
+    clipped.startFrame = start;
+    clipped.endFrame = end;
+    clipped.source = segment.source;
+    clipped.parameterSnapshot = segment.parameterSnapshot;
+    clipped.f0Data.assign(segment.f0Data.begin() + offset, segment.f0Data.begin() + offset + length);
+    if (offset + length <= static_cast<int>(segment.baseF0Data.size()))
+        clipped.baseF0Data.assign(segment.baseF0Data.begin() + offset, segment.baseF0Data.begin() + offset + length);
+    return clipped;
+}
 
 static std::vector<bool> computeVocoderMask(
     const std::vector<float>& originalF0,
@@ -349,7 +371,8 @@ public:
         float retuneSpeed,
         float vibratoDepth = 0.0f,
         float vibratoRate = 7.5f,
-        float pitchDriftScale = 1.0f);
+        float pitchDriftScale = 1.0f,
+        const std::vector<F0FrameRange>* manualReplacementRanges = nullptr);
 
     static constexpr int getCorrectedF0BoundaryContextFrames() noexcept { return 8; }
     static F0FrameRange expandNoteBasedCorrectionRange(int startFrame, int endFrameExclusive, int frameCount) noexcept;

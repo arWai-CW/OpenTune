@@ -52,6 +52,8 @@ enum class ShortcutId {
     ZoomVerticalOut,
     FitSelectedNotes,
     FitAllNotes,
+    ToolMixDrawNote,
+    ToolMixLineAnchor,
     Count
 };
 
@@ -509,6 +511,10 @@ inline const ShortcutInfo kShortcutInfos[] = {
     { ShortcutId::FitAllNotes, "shared.shortcuts.fitAllNotes", Loc::Keys::kFitAllNotes,
       kPluginEditorGeneralScope | kPianoRollOpenTuneScope | kPianoRollOpenDyneScope,
       { KeyBinding('0', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier) } },
+    { ShortcutId::ToolMixDrawNote, "shared.shortcuts.toolMixDrawNote", Loc::Keys::kToolDrawNote,
+      kPianoRollOpenDyneScope, { KeyBinding('7', {}) } },
+    { ShortcutId::ToolMixLineAnchor, "shared.shortcuts.toolMixLineAnchor", Loc::Keys::kToolLineAnchor,
+      kPianoRollOpenDyneScope, { KeyBinding('8', {}) } },
 };
 
 inline constexpr size_t kShortcutCount = sizeof(kShortcutInfos) / sizeof(kShortcutInfos[0]);
