@@ -43,8 +43,8 @@ jobs:
           -R '^(AutoTunePitchShifterTests|PlaybackCacheRealtimeTests|PitchReferenceTests|TimeStretchTests|ARALifecycleContractTests|AppPreferencesEditorSizeTests)$'
 
   macos:
-    name: macOS Universal2 build
-    # Match the release runner; the Universal2 preset also compiles for Apple silicon.
+    name: macOS arm64 build
+    # Match the release runner; the arm64 preset cross-compiles for Apple silicon.
     runs-on: macos-15-intel
     timeout-minutes: 150
     steps:
@@ -70,10 +70,10 @@ jobs:
         run: bash scripts/build-onnxruntime-macos.sh
 
       - name: Configure
-        run: cmake --preset macos-universal2-ara-ninja
+        run: cmake --preset macos-arm64-ara-ninja
 
       - name: Build VST3, AU and standalone
         run: >-
-          cmake --build --preset macos-universal2-ara-release
+          cmake --build --preset macos-arm64-ara-release
           --target OpenTune_VST3 OpenTuneAU_AU OpenTuneStandalone_Standalone
           --parallel 3

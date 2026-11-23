@@ -6,7 +6,7 @@
 # 未设置 SIGN_IDENTITY 时本脚本也使用 ad-hoc；Actions 会设为 Developer ID Application，
 # 并用 PKG_SIGN_IDENTITY（Developer ID Installer）签名 PKG。
 # 用法：
-#   scripts/github_actions/package-macos.sh                     # 构建 Universal2 并生成 PKG
+#   scripts/github_actions/package-macos.sh                     # 构建 arm64 并生成 PKG
 #   scripts/github_actions/package-macos.sh --skip-build        # 跳过构建，直接打包已有产物
 #   scripts/github_actions/package-macos.sh --clean             # 清空构建目录后重新构建
 # ==============================================================================
@@ -42,12 +42,12 @@ for arg in "$@"; do
     esac
 done
 
-# ── 唯一 macOS Release 目标：Universal2 ───────────────────────────────────────
-OSX_ARCHS="arm64 x86_64"
-PRESET="macos-universal2-ara-ninja"
-BUILD_DIR="${ROOT_DIR}/build-macos-universal2-ninja"
-DMG_ARCH_LABEL="Universal2"
-PKG_HOST_ARCHS="x86_64,arm64"
+# ── 唯一 macOS Release 目标：Apple Silicon (arm64) ───────────────────────────
+OSX_ARCHS="arm64"
+PRESET="macos-arm64-ara-ninja"
+BUILD_DIR="${ROOT_DIR}/build-macos-arm64-ninja"
+DMG_ARCH_LABEL="arm64"
+PKG_HOST_ARCHS="arm64"
 PKG_MIN_OS="12.0"
 
 STANDALONE_ARTIFACTS="${BUILD_DIR}/OpenTuneStandalone_artefacts/Release"
@@ -95,7 +95,7 @@ fi
 
 # ── 构建 ──────────────────────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = false ]; then
-    echo "Building OpenTune ${VERSION} (Universal2: x86_64 + arm64, Release, Ninja)"
+    echo "Building OpenTune ${VERSION} (${OSX_ARCHS}, Release, Ninja)"
 
     if [ "$CLEAN" = true ] && [ -d "${BUILD_DIR}" ]; then
         echo "  Cleaning the build directory..."
@@ -139,11 +139,17 @@ echo "  AU.component:   $(du -sh "${AU_BUNDLE}" | cut -f1)"
 validate_macho_architectures() {
     local binary="$1"
     local label="$2"
+    local mode="${3:-exact}"
     local actual_archs
 
     actual_archs="$(lipo -archs "${binary}" | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
-    if [ "${actual_archs}" != "${OSX_ARCHS}" ]; then
-        echo "${label} is not Universal2: ${actual_archs} (expected ${OSX_ARCHS})"
+    if [ "${mode}" = "contains" ]; then
+        if ! printf '%s\n' "${actual_archs}" | tr ' ' '\n' | grep -Fxq "${OSX_ARCHS}"; then
+            echo "${label} has no ${OSX_ARCHS} slice: ${actual_archs}"
+            exit 1
+        fi
+    elif [ "${actual_archs}" != "${OSX_ARCHS}" ]; then
+        echo "${label} is not ${OSX_ARCHS}: ${actual_archs}"
         exit 1
     fi
 }
@@ -151,6 +157,7 @@ validate_macho_architectures() {
 validate_bundle_macho_architectures() {
     local bundle="$1"
     local label="$2"
+    local mode="${3:-exact}"
     local path
     local relative_path
     local count=0
@@ -158,12 +165,12 @@ validate_bundle_macho_architectures() {
     while IFS= read -r -d '' path; do
         if [[ "$(file -b "${path}")" == *Mach-O* ]]; then
             relative_path="${path#"${bundle}"/}"
-            validate_macho_architectures "${path}" "${label}: ${relative_path}"
+            validate_macho_architectures "${path}" "${label}: ${relative_path}" "${mode}"
             count=$((count + 1))
         fi
     done < <(find "${bundle}" -type f -print0)
 
-    echo "  ${label}: ${count} Mach-O files contain x86_64 and arm64"
+    echo "  ${label}: ${count} Mach-O files contain ${OSX_ARCHS}"
 }
 
 validate_bundle_linkage() {
@@ -237,7 +244,8 @@ validate_bundle_linkage() {
 
 validate_bundle_linkage "${APP_BUNDLE}" "@executable_path/../Frameworks" "Standalone"
 validate_bundle_linkage "${VST3_BUNDLE}" "@loader_path/../Frameworks" "VST3"
-validate_bundle_macho_architectures "${AU_BUNDLE}" "AU artifact"
+# The build tree may still embed the universal2 ORT dylib; staging thins it to arm64.
+validate_bundle_macho_architectures "${AU_BUNDLE}" "AU artifact" contains
 validate_bundle_linkage "${AU_BUNDLE}" "@loader_path/../Frameworks" "AU artifact"
 
 # ── PKG：从 Installer/NOTICE.md 提取首屏文案 ──────────────────────────────────
@@ -396,7 +404,7 @@ PREINSTALL_EOF
     cat > "${PKG_BUILD_DIR}/Distribution.xml" << DISTRIBUTION_EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>${APP_NAME} ${VERSION} Universal2</title>
+    <title>${APP_NAME} ${VERSION} ${DMG_ARCH_LABEL}</title>
     <organization>com.daya</organization>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <options customize="never" require-scripts="true" hostArchitectures="${PKG_HOST_ARCHS}"/>
@@ -561,6 +569,29 @@ prune_stale_ort_dylibs() {
 prune_stale_ort_dylibs "${STAGING}/${APP_NAME}.app" "Standalone"
 prune_stale_ort_dylibs "${STAGING}/${APP_NAME}.vst3" "VST3"
 prune_stale_ort_dylibs "${STAGING}/${APP_NAME}.component" "AU"
+
+# ── Thin multi-arch Mach-O files in staging (e.g. the universal2 ORT dylib) ──────
+thin_bundle_macho() {
+    local bundle="$1"
+    local label="$2"
+    local path
+    local archs
+
+    while IFS= read -r -d '' path; do
+        if [[ "$(file -b "${path}")" == *Mach-O* ]]; then
+            archs="$(lipo -archs "${path}")"
+            if [ "${archs}" != "${OSX_ARCHS}" ]; then
+                lipo -thin "${OSX_ARCHS}" "${path}" -output "${path}.thin"
+                mv "${path}.thin" "${path}"
+                echo "  ${label}: ${path#"${bundle}"/} (${archs} -> ${OSX_ARCHS})"
+            fi
+        fi
+    done < <(find "${bundle}" -type f -print0)
+}
+
+thin_bundle_macho "${STAGING}/${APP_NAME}.app" "Standalone"
+thin_bundle_macho "${STAGING}/${APP_NAME}.vst3" "VST3"
+thin_bundle_macho "${STAGING}/${APP_NAME}.component" "AU"
 
 # ── 生成安装脚本 ─────────────────────────────────────────────────────────────
 INSTALL_SCRIPT="${STAGING}/安装 OpenTune.command"
@@ -766,7 +797,7 @@ cp "${ROOT_DIR}/NOTICE.txt" "${STAGING}/" 2>/dev/null || true
 cp "${ROOT_DIR}/NOTICE.zh-CN.txt" "${STAGING}/" 2>/dev/null || true
 cp "${ROOT_DIR}/STATEMENTS.txt" "${STAGING}/" 2>/dev/null || true
 
-# ── 校验最终 staging 中的双架构 Mach-O 与动态库链接 ────────────────────────────
+# ── 校验最终 staging 中的 arm64 Mach-O 与动态库链接 ────────────────────────────
 validate_bundle_macho_architectures "${STAGING}/${APP_NAME}.app" "Staged Standalone"
 validate_bundle_macho_architectures "${STAGING}/${APP_NAME}.vst3" "Staged VST3"
 validate_bundle_macho_architectures "${STAGING}/${APP_NAME}.component" "Staged AU"
@@ -781,7 +812,7 @@ for model in hifigan.onnx fcpe.onnx; do
     fi
 done
 
-# ── 在最终双架构产物合并、复制和校验后签名 ────────────────────────────────────
+# ── 在最终 arm64 产物裁剪、复制和校验后签名 ────────────────────────────────────
 sign_developer_id_bundle() {
     local bundle="$1"
     local label="$2"
@@ -852,7 +883,7 @@ echo "════════════════════════�
 echo "  File: ${PKG_PATH}"
 echo "  Size: ${PKG_SIZE}"
 echo "  Version: ${VERSION}"
-echo "  Architectures: Universal2 (x86_64 + arm64)"
+echo "  Architectures: Apple Silicon (${OSX_ARCHS})"
 echo "  Welcome page: notice text from Installer/NOTICE.md"
 echo "  Install: open the PKG and follow the prompts"
 echo "══════════════════════════════════════════════"
