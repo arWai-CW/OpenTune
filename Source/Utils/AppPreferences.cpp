@@ -381,9 +381,10 @@ KeyShortcutConfig::KeyShortcutSettings decodeShortcutSettings(const juce::Proper
         const auto& info = getShortcutInfo(id);
         if (!properties.containsKey(info.storageKey)) {
             auto& bindings = settings.bindings[static_cast<size_t>(id)].bindings;
-            std::erase_if(bindings, [&](const KeyBinding& binding) {
+            const auto conflicts = std::remove_if(bindings.begin(), bindings.end(), [&](const KeyBinding& binding) {
                 return findShortcutForBinding(settings, binding, info.scopes) != id;
             });
+            bindings.erase(conflicts, bindings.end());
         }
     }
 
