@@ -1246,19 +1246,18 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
         guides = std::move(guides), targets = std::move(targets), title, noAlignment]() mutable {
-        const auto detect = [](const Input& input) {
-            return detectTimingOnsets(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate);
+        const auto detect = [](const Input& input, const Input& other) {
+            return detectTimingOnsetsInOverlap(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate,
+                *input.snapshot->timeGrid, input.region.contentProjection, other.region.contentProjection);
         };
         try {
-            std::vector<std::vector<TimingOnset>> guideOnsets;
-            for (const auto& guide : guides)
-                guideOnsets.push_back(detect(guide));
             for (auto& target : targets) {
                 const auto& guide = guides[target.guideIndex];
-                const auto onsets = detect(target.input);
+                const auto onsets = detect(target.input, guide);
+                const auto guideOnsets = detect(guide, target.input);
                 const auto plan = [&](double strength) {
                     return alignTimingToReference(onsets, *target.input.snapshot->timeGrid,
-                        target.input.region.contentProjection, guideOnsets[target.guideIndex],
+                        target.input.region.contentProjection, guideOnsets,
                         *guide.snapshot->timeGrid, guide.region.contentProjection, strength);
                 };
                 target.gentle = plan(0.5);

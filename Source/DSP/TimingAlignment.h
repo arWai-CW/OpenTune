@@ -22,6 +22,12 @@ struct TimingAlignment
 
 std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate);
 
+std::vector<TimingOnset> detectTimingOnsetsInOverlap(const juce::AudioBuffer<float>& audio,
+                                                   double sampleRate,
+                                                   const TimeGridSnapshot& grid,
+                                                   const ContentTimelineProjection& placement,
+                                                   const ContentTimelineProjection& otherPlacement);
+
 TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
                                        const TimeGridSnapshot& targetGrid,
                                        const ContentTimelineProjection& targetPlacement,

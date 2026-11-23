@@ -112,25 +112,31 @@ bool insertAnchor(std::vector<TimeHandle>& handles, const TimeHandle& anchor)
     return true;
 }
 
-} // namespace
-
-std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate)
+std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate,
+                                          double sourceBegin, double sourceEnd)
 {
     if (!std::isfinite(sampleRate) || sampleRate < 1000.0 || sampleRate > 768000.0
         || audio.getNumChannels() == 0)
         return {};
 
+    const auto sampleAt = [&](double seconds) {
+        return static_cast<int>(std::ceil(std::clamp(seconds * sampleRate, 0.0,
+                                                    static_cast<double>(audio.getNumSamples()))));
+    };
+    const int firstSample = sampleAt(sourceBegin);
     const int hop = static_cast<int>(std::lround(sampleRate * hopSeconds));
-    const int frames = audio.getNumSamples() / hop;
+    const int frames = (sampleAt(sourceEnd) - firstSample) / hop;
+    if (frames < 7)
+        return {};
     struct Energy { double full = 0.0; double high = 0.0; };
     std::vector<Energy> envelope(static_cast<size_t>(frames));
     Energy peak;
     for (int frame = 0; frame < frames; ++frame) {
         auto& energy = envelope[static_cast<size_t>(frame)];
-        const int start = frame * hop;
+        const int start = firstSample + frame * hop;
         for (int ch = 0; ch < audio.getNumChannels(); ++ch) {
             const auto* samples = audio.getReadPointer(ch);
-            float previous = start > 0 ? samples[start - 1] : 0.0f;
+            float previous = start > firstSample ? samples[start - 1] : samples[start];
             for (int i = start; i < start + hop; ++i) {
                 const float sample = samples[i];
                 const float diff = sample - previous;
@@ -165,13 +171,39 @@ std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audi
         size_t attack = i;
         while (attack > i - 3 && flux[attack - 1] >= 0.4 * flux[i])
             --attack;
-        const double time = static_cast<double>(attack * hop) / sampleRate;
+        const double time = static_cast<double>(firstSample + attack * hop) / sampleRate;
         if (!onsets.empty() && time - onsets.back().sourceSeconds < 0.105)
             continue;
         const auto& energy = envelope[i];
         onsets.push_back({time, energy.high / peak.high > 1.5 * energy.full / peak.full});
     }
     return onsets;
+}
+
+} // namespace
+
+std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    return detectTimingOnsets(audio, sampleRate, 0.0, std::numeric_limits<double>::infinity());
+}
+
+std::vector<TimingOnset> detectTimingOnsetsInOverlap(const juce::AudioBuffer<float>& audio,
+                                                   double sampleRate,
+                                                   const TimeGridSnapshot& grid,
+                                                   const ContentTimelineProjection& placement,
+                                                   const ContentTimelineProjection& otherPlacement)
+{
+    const auto begin = std::max(placement.timelineStartSeconds, otherPlacement.timelineStartSeconds);
+    const auto end = std::min(placement.timelineEndSeconds(), otherPlacement.timelineEndSeconds());
+    if (!placement.isValid() || !otherPlacement.isValid() || grid.empty()
+        || !std::isfinite(begin) || !std::isfinite(end) || end <= begin)
+        return {};
+    const auto contentBegin = placement.projectTimelineTimeToContent(begin);
+    const auto contentEnd = placement.projectTimelineTimeToContent(end);
+    if (!std::isfinite(contentBegin) || !std::isfinite(contentEnd))
+        return {};
+    return detectTimingOnsets(audio, sampleRate,
+                             grid.tauInverse(contentBegin), grid.tauInverse(contentEnd));
 }
 
 TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
