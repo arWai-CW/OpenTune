@@ -170,12 +170,14 @@ private:
     std::vector<juce::ARAPlaybackRegion*> resolveContentScopeRegions() const;
     void readScopeAudio();
 #if JucePlugin_Enable_ARA
+    void attachAraPresentation();
     void onNewSelection(const juce::ARAViewSelection&) override;
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void refreshAraPresentation();
     void syncOriginalF0Overlay();
     PianoRollContentSync araPresentation_;
     std::vector<double> araOverviewSampleRates_;
+    bool araPresentationAttached_ = false;
 #endif
     void syncPresentedContentRevisions(ContentKey key, const EditableContentSnapshot* snapshot);
     void showOriginalF0Failures(std::deque<OriginalF0FailureEvent> events);
