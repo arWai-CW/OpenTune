@@ -571,6 +571,8 @@
     { "No other track with audio clips in this ARA document.", "同一份 ARA 文件內沒有其他含音訊片段的軌道。" },
     { "Select one to six target clips in the DAW, and choose a separate reference track.", "請在 DAW 選取一至六個目標片段，並選擇另一條軌道作為參考。" },
     { "No reliable timing changes.", "找不到可靠的拍位修正。" },
+    { "Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}", "有目標片段共用 ARA 編輯。請在 REAPER 選取這些片段，執行以下動作，再試一次：{0}" },
+    { "Some targets share ARA edits. Make those clips independent in the DAW, then retry.", "有目標片段共用 ARA 編輯。請在 DAW 將這些片段設為獨立，再試一次。" },
     { "Analyzing timing", "正在分析拍位" },
     { "The matched attacks are already aligned. No timing change was applied.", "已配對的起音已經對齊，未更改拍位。" },
     { "Choose alignment strength per clip. Pitch and the reference track are not edited.", "請為每個片段選擇對齊強度。音高及參考軌不會被修改。" },
