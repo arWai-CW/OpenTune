@@ -155,13 +155,13 @@ void testLateCallbackAndTransportResets()
         expect(std::abs(projection.load().anchorClock - 10.02) < 1.0e-9,
                "regular callback replaces the early clock origin");
         double previous = projection.load().projectAt(10.02);
-        for (int frame = 1; frame <= 40; ++frame)
+        for (int frame = 1; frame <= 200; ++frame)
         {
-            const double clock = 10.02 + frame * 0.005;
-            if (frame % 4 == 0)
-                publish(0.02 + frame * 0.005, clock, 1 + frame / 4);
+            const double clock = 10.02 + frame * 0.001;
+            if (frame % 20 == 0)
+                publish(0.02 + frame * 0.001, clock, 1 + frame / 20);
             const double position = projection.load().projectAt(clock);
-            expect(std::abs(position - previous - 0.005) < 1.0e-9,
+            expect(std::abs(position - previous - 0.001) < 1.0e-9,
                    "after late callback each frame advances without hold-then-jump");
             previous = position;
         }
