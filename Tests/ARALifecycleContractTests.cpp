@@ -184,7 +184,7 @@ struct HostAudioAccess final : ARA::Host::AudioAccessControllerInterface
 
         std::fill_n(static_cast<float*>(buffers[0]), static_cast<size_t>(samplesPerChannel), 0.25f);
         // Near Nyquist: the canonical 44.1 kHz path cannot preserve this 48 kHz signal.
-        for (auto i = std::max(ARA::ARASamplePosition{36000}, samplePosition); i < samplePosition + sampleCount; ++i)
+        for (auto i = (std::max)(ARA::ARASamplePosition{36000}, samplePosition); i < samplePosition + sampleCount; ++i)
             static_cast<float*>(buffers[0])[i - samplePosition] += (i % 2 == 0 ? 0.125f : -0.125f);
         return true;
     }
