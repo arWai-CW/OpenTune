@@ -4,6 +4,7 @@
 # 功能：构建 + ad-hoc 签名 + 生成 DMG / PKG 安装包
 # 用法：
 #   ./scripts/package-macos.sh                     # 构建 arm64 并生成 PKG
+#                                                  # （构建前自动打 JUCE 补丁，构建后将 VST3 链接到 ~/Library/Audio/Plug-Ins/VST3）
 #   ./scripts/package-macos.sh --format dmg        # 生成 arm64 DMG
 #   ./scripts/package-macos.sh --format both       # 同时生成 DMG 与 PKG
 #   ./scripts/package-macos.sh --skip-build        # 跳过构建，直接打包已有产物
@@ -123,6 +124,8 @@ if [ "$SKIP_BUILD" = false ]; then
         rm -rf "${BUILD_DIR}"
     fi
 
+    python3 "${ROOT_DIR}/scripts/github_actions/patch-juce-ara.py"
+
     cmake --preset "${PRESET}" --warn-uninitialized 2>&1 | tail -5
     cmake --build "${BUILD_DIR}" --parallel 2>&1 | tail -10
 
@@ -145,6 +148,20 @@ fi
 if [ ! -d "${AU_BUNDLE}" ]; then
     echo "❌ AU 产物不存在: ${AU_BUNDLE}"
     exit 1
+fi
+
+# ── 将构建出的 VST3 链接到用户 VST3 目录 ──────────────────────────────────────
+if [ "$SKIP_BUILD" = false ]; then
+    USER_VST3_DIR="${HOME}/Library/Audio/Plug-Ins/VST3"
+    USER_VST3_LINK="${USER_VST3_DIR}/${APP_NAME}.vst3"
+    mkdir -p "${USER_VST3_DIR}"
+    if [ -e "${USER_VST3_LINK}" ] && [ ! -L "${USER_VST3_LINK}" ]; then
+        USER_VST3_BACKUP="${USER_VST3_LINK}.bak-$(date +%Y%m%d%H%M%S)"
+        mv "${USER_VST3_LINK}" "${USER_VST3_BACKUP}"
+        echo "  已将原有 VST3 移至 ${USER_VST3_BACKUP}"
+    fi
+    ln -sfn "${VST3_BUNDLE}" "${USER_VST3_LINK}"
+    echo "✅ VST3 已链接: ${USER_VST3_LINK} → ${VST3_BUNDLE}"
 fi
 
 echo "▶ 产物验证"
