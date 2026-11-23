@@ -306,9 +306,9 @@ private:
     // Main GUI Components
     MenuBarComponent menuBar_;
     TransportBarComponent transportBar_;
+    ParameterPanel parameterPanel_;
     TopBarComponent topBar_;
     TrackPanelComponent trackPanel_;
-    ParameterPanel parameterPanel_;
     ArrangementViewComponent arrangementView_;
     PianoRollComponent pianoRoll_;
     TimelineOverviewComponent overviewStrip_;
@@ -343,7 +343,7 @@ private:
 
     // 现代布局：左右面板可折叠（用于“沉浸主画布”模式）
     bool isTrackPanelVisible_ = true;
-    bool isParameterPanelVisible_ = true;
+    bool isParameterPanelVisible_ = false;
     std::unique_ptr<OnboardingOverlayComponent> onboardingOverlay_;
     std::unique_ptr<OnboardingVisibilityWatcher> onboardingVisibilityWatcher_;
     std::unique_ptr<OnboardingModalWatcher> onboardingModalWatcher_;

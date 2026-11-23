@@ -38,6 +38,7 @@ public:
     UnifiedToolbarButton(const juce::String& name, juce::Path iconPath, juce::Path toggledIconPath = {});
 
     void setIcon(juce::Path iconPath);
+    void setToolbarLabel(const juce::String& label);
     void setConnectedEdges(int edges);
     // 实心图标（如播放三角/暂停条/停止方块）：粉色填充 + 深描边；默认线条型
     void setSolidIcon(bool solid);
@@ -49,6 +50,7 @@ public:
 private:
     juce::Path iconPath_;
     juce::Path toggledIconPath_;
+    juce::String toolbarLabel_;
     int connectedEdges_ = None;
     bool solidIcon_ = false;
     juce::Colour accentColour_;
