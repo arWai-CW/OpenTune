@@ -22,6 +22,9 @@ public:
     void resized() override;
 
     void applyTheme();
+    void addToolAction(juce::Button& button);
+    void setToolActionsVisible(bool visible);
+    bool areToolActionsVisible() const { return toolActions_.isVisible(); }
 
     // 外部回调：由宿主（PluginEditor）接管布局与可见性
     std::function<void()> onToggleTrackPanel;
@@ -38,6 +41,7 @@ private:
     MenuBarComponent& menuBar_;
     TransportBarComponent& transportBar_;
     juce::Component& toolStrip_;
+    juce::Component toolActions_;
 
     // 侧边栏开关（统一图标按钮）
     UnifiedToolbarButton trackPanelToggleButton_ { LOC(kTracks), {} }; // Icon set in constructor

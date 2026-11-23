@@ -182,7 +182,6 @@ private:
     void restoreOriginalClipTiming();
     void didUpdateRegionSequenceProperties(juce::ARARegionSequence* track) override;
     void willDestroyRegionSequence(juce::ARARegionSequence* track) override;
-    juce::TextButton referenceTrackButton_, tuneToReferenceButton_, alignTimingButton_;
     juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
     std::unique_ptr<juce::ThreadPool> timingAlignmentWorker_;
     std::unique_ptr<juce::AlertWindow> timingAlignmentPreview_;
@@ -227,6 +226,9 @@ private:
     MenuBarComponent menuBar_;
     TransportBarComponent transportBar_;
     ParameterPanel parameterPanel_;
+#if JucePlugin_Enable_ARA
+    UnifiedToolbarButton referenceTrackButton_, tuneToReferenceButton_, alignTimingButton_;
+#endif
     TopBarComponent topBar_;
     bool isParameterPanelVisible_ = false;
     PianoRollComponent pianoRoll_;
