@@ -164,9 +164,11 @@ std::vector<TimingOnset> detectTimingOnsets(const juce::AudioBuffer<float>& audi
     }
 
     std::vector<TimingOnset> onsets;
-    for (size_t i = 3; i + 3 < flux.size(); ++i) {
-        if (flux[i] < 0.16 || flux[i] <= flux[i - 1]
-            || flux[i] < *std::max_element(flux.begin() + i + 1, flux.begin() + i + 4))
+    for (size_t i = 3; i < flux.size(); ++i) {
+        if (flux[i] < 0.16 || flux[i] <= flux[i - 1])
+            continue;
+        const auto lookAheadEnd = flux.begin() + std::min(i + 4, flux.size());
+        if (std::any_of(flux.begin() + i + 1, lookAheadEnd, [&](double next) { return next > flux[i]; }))
             continue;
         size_t attack = i;
         while (attack > i - 3 && flux[attack - 1] >= 0.4 * flux[i])
