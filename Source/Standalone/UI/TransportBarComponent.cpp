@@ -1192,7 +1192,7 @@ void UnifiedToolbarButton::paintButton(juce::Graphics& g, bool shouldDrawButtonA
     if (toolbarLabel_.isNotEmpty())
     {
         const auto labelArea = bounds.removeFromBottom(14.0f).reduced(2.0f, 0.0f);
-        g.setFont(UIColors::getLabelFont(11.0f));
+        g.setFont(UIColors::getUIFontExact(12.0f));
         g.setColour(isEnabled() ? UIColors::textPrimary : UIColors::textDisabled);
         g.drawFittedText(toolbarLabel_, labelArea.toNearestInt(), juce::Justification::centred, 1);
     }
