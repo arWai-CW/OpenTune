@@ -81,6 +81,8 @@ public:
     // 撤销/重做可用性查询回调（每次菜单弹出时实时求值；未注入时视为恒可用）
     std::function<bool()> canUndoQuery;
     std::function<bool()> canRedoQuery;
+    std::function<bool()> canRestoreSelectedNotesQuery;
+    std::function<void()> onRestoreSelectedNotes;
 
     void refreshLocalizedText();  // 刷新本地化文本
     void setMouseTrailTheme(MouseTrailConfig::TrailTheme theme) { mouseTrailTheme_ = theme; }
@@ -126,6 +128,7 @@ private:
         EditUndo = 50,
         EditRedo,
         OutOfScaleDrag,
+        RestoreSelectedNotes,
 
         ShowWaveform = 100,
         PianoKeyboard,

@@ -1885,6 +1885,23 @@ if(OPENTUNE_BUILD_TESTS)
     endif()
     add_test(NAME VolumeEnvelopeRegionEditTests COMMAND OpenTuneVolumeEnvelopeRegionEditTests)
 
+    add_executable(OpenTuneSelectedNoteResetTests
+        Tests/SelectedNoteResetTests.cpp
+        Source/Content/ContentEditCommands.cpp
+        Source/Utils/AppLogger.cpp
+        Source/Utils/AutomationLane.cpp
+        Source/Utils/PianoRollEditAction.cpp
+        Source/Utils/PitchCurve.cpp
+        Source/Utils/TimeGrid.cpp
+        Source/Utils/UndoManager.cpp
+    )
+    target_include_directories(OpenTuneSelectedNoteResetTests PRIVATE Source)
+    target_link_libraries(OpenTuneSelectedNoteResetTests PRIVATE juce::juce_audio_basics)
+    if(MSVC)
+        target_compile_options(OpenTuneSelectedNoteResetTests PRIVATE /utf-8 /EHsc)
+    endif()
+    add_test(NAME SelectedNoteResetTests COMMAND OpenTuneSelectedNoteResetTests)
+
     add_executable(OpenTuneEraserStrokeEditTests
         Tests/EraserStrokeEditTests.cpp
     )

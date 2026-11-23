@@ -6257,6 +6257,31 @@ PianoRollComponent::AutoTuneApplyResult PianoRollComponent::tuneToPitchReference
     return { AutoTuneApplyStatus::Applied };
 }
 
+bool PianoRollComponent::canRestoreSelectedNotes() const
+{
+    return processor_ != nullptr && editedContentKey_.isValid()
+        && currentCurve_ != nullptr && !interactionState_.noteSelection.empty();
+}
+
+void PianoRollComponent::restoreSelectedNotes()
+{
+    if (!canRestoreSelectedNotes())
+        return;
+
+    parameterTargetWillChange(Listener::ParameterTargetChangePolicy::Cancel);
+    const auto snapshot = processor_->restoreSelectedPianoRollNotes(
+        editedContentKey_, interactionState_.noteSelection.selectedIndices, lastKnownNotesRevision_);
+    if (snapshot != nullptr) {
+        closeEqPopup();
+        cachedNotes_ = snapshot->notes;
+        lastKnownNotesRevision_ = snapshot->notesRevision;
+        lastKnownPitchRevision_ = snapshot->pitchRevision;
+        applyEditedContentCurve(snapshot->pitchCurve);
+        requestContentRedraw();
+    }
+    parameterTargetDidChange();
+}
+
 PianoRollComponent::AutoTuneApplyResult PianoRollComponent::applyAutoTuneToSelection()
 {
     if (!currentCurve_) {

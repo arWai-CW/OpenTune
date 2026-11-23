@@ -1267,23 +1267,7 @@ void OpenTuneAudioProcessor::initializeRuntimeStateOnce()
         static std::vector<PitchCorrectionSegment> segmentsInRange(
             const std::vector<PitchCorrectionSegment>& segments, int start, int end)
         {
-            std::vector<PitchCorrectionSegment> result;
-            for (const auto& segment : segments) {
-                if (segment.endFrame <= start || segment.startFrame >= end)
-                    continue;
-                const int clipStart = std::max(segment.startFrame, start);
-                const int clipEnd = std::min(segment.endFrame, end);
-                const int offset = clipStart - segment.startFrame;
-                if (clipEnd <= clipStart || offset + clipEnd - clipStart > static_cast<int>(segment.f0Data.size()))
-                    continue;
-                auto clipped = segment;
-                clipped.startFrame = clipStart;
-                clipped.endFrame = clipEnd;
-                clipped.f0Data.assign(segment.f0Data.begin() + offset,
-                                      segment.f0Data.begin() + offset + clipEnd - clipStart);
-                result.push_back(std::move(clipped));
-            }
-            return result;
+            return clipSegmentsToFrameRange(segments, start, end);
         }
 
         static std::vector<PitchCorrectionSegment> segmentsInRanges(
@@ -5460,6 +5444,49 @@ OpenTuneAudioProcessor::SelectedNoteEqEditResult OpenTuneAudioProcessor::editSel
         std::move(plan.beforePatch), std::move(plan.afterPatch)));
     result.status = SelectedNoteEqEditStatus::Applied;
     return result;
+}
+
+ContentCommitSnapshot OpenTuneAudioProcessor::restoreSelectedPianoRollNotes(
+    ContentKey key, const std::vector<int>& selectedIndices, uint64_t expectedNotesRevision)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    const auto before = getContentSnapshot(key);
+    if (before == nullptr || contentCommands_ == nullptr)
+        return {};
+
+    auto plan = planSelectedNoteReset(*before, selectedIndices, expectedNotesRevision);
+    if (plan.pitchRanges.empty() && !plan.volumeEnvelope)
+        return {};
+
+    const auto description = LOC(kRestoreSelectedNotes);
+    auto after = before;
+    std::unique_ptr<PianoRollEditAction> pitchAction;
+    if (!plan.pitchRanges.empty()) {
+        after = commitContentNotesAndSegmentsInRanges(key, std::move(plan.notes), {}, plan.pitchRanges);
+        if (after == nullptr)
+            return {};
+        pitchAction = contentCommands_->createPianoRollEditAction(
+            key, before->notes, before->pitchCurve->getCorrectionSegments(), after,
+            plan.pitchRanges, description);
+    }
+
+    if (plan.volumeEnvelope) {
+        if (auto withGain = commitVolumeEnvelope(key, *plan.volumeEnvelope)) {
+            after = std::move(withGain);
+            if (pitchAction)
+                pitchAction->setVolumeEnvelopePatch(before->volumeEnvelope, std::move(*plan.volumeEnvelope));
+            else
+                undoManager_.addAction(std::make_unique<VolumeEnvelopeEditAction>(
+                    contentCommands_, key, description, before->volumeEnvelope, std::move(*plan.volumeEnvelope)));
+        }
+    }
+    if (pitchAction)
+        undoManager_.addAction(std::move(pitchAction));
+    if (after == before)
+        return {};
+
+    notifyContentEditCompleted(key);
+    return after;
 }
 
 SelectedNoteDeleteResult OpenTuneAudioProcessor::deleteSelectedPianoRollNotes(

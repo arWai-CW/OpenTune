@@ -143,6 +143,9 @@ juce::PopupMenu MenuBarComponent::getMenuForIndex(int topLevelMenuIndex, const j
             menu.addItem(EditUndo, LOC(kUndo) + "  (Ctrl+Z)", canUndo);
             menu.addItem(EditRedo, LOC(kRedo) + "  (Ctrl+Shift+Z)", canRedo);
             menu.addSeparator();
+            menu.addItem(RestoreSelectedNotes, LOC(kRestoreSelectedNotes),
+                         canRestoreSelectedNotesQuery && canRestoreSelectedNotesQuery());
+            menu.addSeparator();
             menu.addItem(OutOfScaleDrag, LOC(kOutOfScaleDrag), true,
                          processor_.getAppPreferences().getOutOfScaleDragEnabled());
             break;
@@ -419,6 +422,11 @@ void MenuBarComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
 
         case EditRedo:
             listeners_.call([](Listener& l) { l.redoRequested(); });
+            break;
+
+        case RestoreSelectedNotes:
+            if (onRestoreSelectedNotes)
+                onRestoreSelectedNotes();
             break;
 
         default:
