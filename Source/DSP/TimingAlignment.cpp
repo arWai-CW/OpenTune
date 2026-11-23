@@ -422,56 +422,70 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
         insertAnchor(handles, {++id, source, output, kind, Confidence::High});
     }
 
-    // A blocked attack can move indirectly between two anchors. Remove only
-    // the new moves bracketing unsafe attacks, then recheck the joined spans.
+    const auto unsafeMove = [&](size_t i, double output) -> const char* {
+        const double after = targetPlacement.projectContentTimeToTimeline(output);
+        const double before = targets[i].timeline;
+        const double reference = before + offsetFor(i);
+        if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
+            return "stretch would move an unedited attack";
+        if (matches[i] >= 0 && std::abs(after - reference) > std::abs(before - reference) + 1e-6)
+            return "stretch would worsen a reliable match";
+        return nullptr;
+    };
+
+    // A blocked attack can still move indirectly between new anchors. Test
+    // the span made by removing either neighbor before discarding them both.
     const char* rejection = "no anchors can move within the timing limits";
     for (;;) {
-        result.movedAnchors = 0;
-        result.maxMoveSeconds = 0.0;
-        for (const auto& handle : handles) {
-            if (handle.id <= lastLockedId)
-                continue;
-            ++result.movedAnchors;
-            result.maxMoveSeconds = std::max(result.maxMoveSeconds,
-                std::abs(handle.output_seconds - targetGrid.tauForward(handle.source_seconds)));
-        }
-        if (result.movedAnchors == 0)
-            return reject(rejection);
         result.grid = TimeGridSnapshot::makeFromHandles(handles);
         if (!result.grid)
             return reject("stretch would create an invalid timing grid");
 
-        std::vector<bool> discard(handles.size());
-        bool unsafe = false;
+        bool removed = false;
         for (size_t i = 0; i < targets.size(); ++i) {
             const double source = targets[i].onset.sourceSeconds;
-            const double after = targetPlacement.projectContentTimeToTimeline(result.grid->tauForward(source));
-            const double before = targets[i].timeline;
-            const double reference = before + offsetFor(i);
-            if (std::abs(moveFor(i)) < minMove && std::abs(after - before) > 0.008)
-                rejection = "stretch would move an unedited attack";
-            else if (matches[i] >= 0 && std::abs(after - reference) > std::abs(before - reference) + 1e-6)
-                rejection = "stretch would worsen a reliable match";
-            else
+            const auto* reason = unsafeMove(i, result.grid->tauForward(source));
+            if (!reason)
                 continue;
 
-            unsafe = true;
+            rejection = reason;
             const auto right = std::lower_bound(handles.begin(), handles.end(), source,
                 [](const TimeHandle& handle, double time) { return handle.source_seconds < time; });
-            for (const auto neighbor : {right - 1, right})
-                if (neighbor->id > lastLockedId)
-                    discard[static_cast<size_t>(neighbor - handles.begin())] = true;
-        }
-        if (!unsafe)
+            const auto left = right - 1;
+            const bool canDropLeft = source < right->source_seconds && left->id > lastLockedId;
+            const bool canDropRight = right->id > lastLockedId;
+            if (!canDropLeft && !canDropRight)
+                return reject(rejection);
+            const auto spanIsSafe = [&](const TimeHandle& a, const TimeHandle& b) {
+                const double ratio = (source - a.source_seconds) / (b.source_seconds - a.source_seconds);
+                const double output = a.output_seconds + ratio * (b.output_seconds - a.output_seconds);
+                return unsafeMove(i, output) == nullptr;
+            };
+            if (canDropLeft && canDropRight) {
+                if (spanIsSafe(*left, *(right + 1)))
+                    handles.erase(right);
+                else if (spanIsSafe(*(left - 1), *right))
+                    handles.erase(left);
+                else
+                    handles.erase(left, right + 1);
+            } else {
+                handles.erase(canDropLeft ? left : right);
+            }
+            removed = true;
             break;
-        size_t retained = 0;
-        for (size_t i = 0; i < handles.size(); ++i)
-            if (!discard[i])
-                handles[retained++] = handles[i];
-        if (retained == handles.size())
-            return reject(rejection);
-        handles.resize(retained);
+        }
+        if (!removed)
+            break;
     }
+    for (const auto& handle : handles) {
+        if (handle.id <= lastLockedId)
+            continue;
+        ++result.movedAnchors;
+        result.maxMoveSeconds = std::max(result.maxMoveSeconds,
+            std::abs(handle.output_seconds - targetGrid.tauForward(handle.source_seconds)));
+    }
+    if (result.movedAnchors == 0)
+        return reject(rejection);
     if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
             return !preservesTimingAudioInRange(targetGrid, *result.grid, range);
         })) {

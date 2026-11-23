@@ -446,6 +446,22 @@ bool testBlockedAttackDoesNotDiscardSafeEdits()
     }
     return true;
 }
+
+bool testBlockedAttackKeepsSafeNeighbor()
+{
+    const auto grid = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 0.34, 0.34, HandleKind::UserAdded},
+        {3, 2.0, 2.0, HandleKind::ClipEnd}
+    });
+    const ContentTimelineProjection placement{0.0, 2.0, 0.0, 2.0};
+    const std::vector<TimingOnset> target{{0.50, true}, {0.63, false}, {0.90, true}};
+    const std::vector<TimingOnset> guide{{0.56, true}, {0.643, false}, {0.915, true}};
+    const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, 1.0);
+    return plan.grid && plan.movedAnchors == 1 && plan.matchedAttacks == 3
+        && std::abs(plan.grid->tauForward(0.90) - 0.915) < 1e-9
+        && std::abs(plan.grid->tauForward(0.63) - 0.643) < 0.013;
+}
 }
 
 int main()
@@ -460,6 +476,10 @@ int main()
     }
     if (!testBlockedAttackDoesNotDiscardSafeEdits()) {
         std::fputs("A blocked attack discarded independent safe timing edits\n", stderr);
+        return 1;
+    }
+    if (!testBlockedAttackKeepsSafeNeighbor()) {
+        std::fputs("A blocked attack discarded a safe neighboring timing move\n", stderr);
         return 1;
     }
     if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
