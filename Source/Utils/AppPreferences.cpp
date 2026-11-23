@@ -376,6 +376,17 @@ KeyShortcutConfig::KeyShortcutSettings decodeShortcutSettings(const juce::Proper
         }
     }
 
+    using namespace KeyShortcutConfig;
+    for (const auto id : {ShortcutId::ToolMixDrawNote, ShortcutId::ToolMixLineAnchor}) {
+        const auto& info = getShortcutInfo(id);
+        if (!properties.containsKey(info.storageKey)) {
+            auto& bindings = settings.bindings[static_cast<size_t>(id)].bindings;
+            std::erase_if(bindings, [&](const KeyBinding& binding) {
+                return findShortcutForBinding(settings, binding, info.scopes) != id;
+            });
+        }
+    }
+
     return settings;
 }
 

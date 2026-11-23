@@ -337,6 +337,8 @@ bool testLegacyShortcutMigration()
         juce::PropertiesFile legacySettings(propertiesOptions);
         legacySettings.setValue("shared.shortcuts.zoomHorizontalIn", "Ctrl+K");
         legacySettings.setValue("shared.shortcuts.zoomVerticalOut", "");
+        legacySettings.setValue("shared.shortcuts.delete", "7");
+        legacySettings.setValue("shared.shortcuts.toolLineAnchor", "8");
         legacySaved = legacySettings.save();
     }
     if (!legacySaved) {
@@ -347,6 +349,8 @@ bool testLegacyShortcutMigration()
     const auto horizontalZoomId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomHorizontalIn;
     const auto verticalZoomId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomVerticalOut;
     const auto verticalZoomInId = OpenTune::KeyShortcutConfig::ShortcutId::ZoomVerticalIn;
+    using OpenTune::KeyShortcutConfig::ShortcutId;
+    using OpenTune::KeyShortcutConfig::getShortcutBinding;
     const OpenTune::KeyShortcutConfig::KeyBinding customKey(
         'K', juce::ModifierKeys::ctrlModifier);
     const OpenTune::KeyShortcutConfig::KeyBinding wheelBinding(
@@ -365,7 +369,11 @@ bool testLegacyShortcutMigration()
                    .bindings.empty()
             && OpenTune::KeyShortcutConfig::getShortcutBinding(shortcuts, verticalZoomInId)
                    .hasBinding({ OpenTune::KeyShortcutConfig::BindingType::WheelUp,
-                                 juce::ModifierKeys::shiftModifier });
+                                 juce::ModifierKeys::shiftModifier })
+            && getShortcutBinding(shortcuts, ShortcutId::Delete).hasBinding({'7', {}})
+            && getShortcutBinding(shortcuts, ShortcutId::ToolMixDrawNote).bindings.empty()
+            && getShortcutBinding(shortcuts, ShortcutId::ToolLineAnchor).hasBinding({'8', {}})
+            && getShortcutBinding(shortcuts, ShortcutId::ToolMixLineAnchor).hasBinding({'8', {}});
     }
 
     bool persistedMigration = false;
