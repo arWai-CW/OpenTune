@@ -684,7 +684,9 @@ inline bool parseShortcutBinding(const juce::String& text, ShortcutBinding& outB
 inline bool matchesShortcut(const KeyShortcutSettings& settings, ShortcutId id, const juce::KeyPress& key)
 {
     const auto& binding = getShortcutBinding(settings, id);
-    KeyBinding testBinding(key.getKeyCode(), key.getModifiers());
+    const auto keyCode = key.getKeyCode();
+    KeyBinding testBinding(keyCode >= 'a' && keyCode <= 'z' ? keyCode - ('a' - 'A') : keyCode,
+                           key.getModifiers());
     return binding.hasBinding(testBinding);
 }
 
