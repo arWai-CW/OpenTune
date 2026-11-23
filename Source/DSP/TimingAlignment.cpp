@@ -208,13 +208,56 @@ std::vector<TimingOnset> detectTimingOnsetsInOverlap(const juce::AudioBuffer<flo
                              grid.tauInverse(contentBegin), grid.tauInverse(contentEnd));
 }
 
+bool preservesTimingAudioInRange(const TimeGridSnapshot& before, const TimeGridSnapshot& after,
+                                 TimingOutputRange range) noexcept
+{
+    if (before.empty() || after.empty() || !std::isfinite(range.begin) || !std::isfinite(range.end)
+        || range.end <= range.begin)
+        return false;
+
+    const auto& a = before.handles();
+    const auto& b = after.handles();
+    if (a.back().output_seconds != b.back().output_seconds)
+        return false;
+
+    const auto samePosition = [](const TimeHandle& first, const TimeHandle& second) {
+        return first.source_seconds == second.source_seconds && first.output_seconds == second.output_seconds;
+    };
+    const auto isIdentity = [](const TimeHandle& handle) { return handle.source_seconds == handle.output_seconds; };
+    constexpr double boundaryEpsilon = 1.0e-9;
+    for (size_t i = 1, j = 1; i < a.size() && j < b.size();) {
+        const auto begin = std::max(a[i - 1].output_seconds, b[j - 1].output_seconds);
+        const auto end = std::min(a[i].output_seconds, b[j].output_seconds);
+        if (begin >= range.end)
+            break;
+        if (std::min(range.end, end) - std::max(range.begin, begin) > boundaryEpsilon) {
+            // Stage 2 stretches whole anchor spans independently. Splitting a stretched
+            // span can change its waveform even when the time map there stays the same.
+            const bool sameSpan = samePosition(a[i - 1], b[j - 1]) && samePosition(a[i], b[j]);
+            const bool bothDry = isIdentity(a[i - 1]) && isIdentity(a[i]) && isIdentity(b[j - 1]) && isIdentity(b[j]);
+            if (!sameSpan && !bothDry)
+                return false;
+        }
+        if (a[i].output_seconds == b[j].output_seconds) {
+            ++i;
+            ++j;
+        } else if (a[i].output_seconds < b[j].output_seconds) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return true;
+}
+
 TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
                                        const TimeGridSnapshot& targetGrid,
                                        const ContentTimelineProjection& targetPlacement,
                                        const std::vector<TimingOnset>& guide,
                                        const TimeGridSnapshot& guideGrid,
                                        const ContentTimelineProjection& guidePlacement,
-                                       double strength)
+                                       double strength,
+                                       const std::vector<TimingOutputRange>& protectedRanges)
 {
     TimingAlignment result;
     const auto reject = [&](const char* stage) {
@@ -363,6 +406,12 @@ TimingAlignment alignTimingToReference(const std::vector<TimingOnset>& target,
             if (std::abs(after - reference) > std::abs(before - reference) + 1e-6)
                 return reject("stretch would worsen a reliable match");
         }
+    }
+    if (std::any_of(protectedRanges.begin(), protectedRanges.end(), [&](const auto& range) {
+            return !preservesTimingAudioInRange(targetGrid, *result.grid, range);
+        })) {
+        result.affectsProtectedTiming = true;
+        return reject("timing would affect another placement that shares these ARA edits");
     }
     return result;
 }

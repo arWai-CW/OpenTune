@@ -579,3 +579,4 @@
     { "Skip", "略過" },
     { "Apply", "套用" },
     { "A clip or the reference changed. Run timing alignment again.", "片段或參考軌已有變更，請重新執行拍位對齊。" },
+    { "These clip edits could not be combined safely. Try aligning fewer clips at once.", "無法安全合併這些片段的編輯。請減少一次對齊的片段數量。" },

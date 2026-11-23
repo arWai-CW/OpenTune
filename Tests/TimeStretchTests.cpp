@@ -131,6 +131,65 @@ bool testReferenceAlignment()
         && !align(guideOnsets, 0.0).grid;
 }
 
+bool testPooledSplitsCanAlignIndependently()
+{
+    const auto base = TimeGridSnapshot::makeIdentity(6.0);
+    const ContentTimelineProjection lead{10.0, 6.0, 0.0, 6.0};
+    const ContentTimelineProjection first{10.0, 2.0, 0.0, 2.0};
+    const ContentTimelineProjection second{13.0, 2.0, 2.0, 2.0};
+    const std::vector<TimingOnset> firstAttacks{{0.4, true}, {0.95, false}, {1.5, true}};
+    const std::vector<TimingOnset> firstReference{{0.46, true}, {1.01, false}, {1.56, true}};
+    const std::vector<TimingOnset> secondAttacks{{2.4, false}, {2.95, true}, {3.5, false}};
+    const std::vector<TimingOnset> secondReference{{3.34, false}, {3.89, true}, {4.44, false}};
+
+    const auto firstPlan = alignTimingToReference(firstAttacks, *base, first,
+        firstReference, *base, lead, 1.0, {{2.0, 4.0}, {4.0, 6.0}});
+    const auto copyConflict = alignTimingToReference(firstAttacks, *base, first,
+        firstReference, *base, lead, 1.0, {{0.0, 2.0}});
+    if (!firstPlan.grid || copyConflict.grid || !copyConflict.affectsProtectedTiming)
+        return false;
+    const auto alignSecond = [&](const TimeGridSnapshot& current) {
+        return alignTimingToReference(secondAttacks, current, second,
+            secondReference, *base, lead, 0.5, {{0.0, 2.0}, {4.0, 6.0}});
+    };
+    const auto preview = alignSecond(*base);
+    const auto combined = alignSecond(*firstPlan.grid);
+    if (!preview.grid || !combined.grid
+        || !preservesTimingAudioInRange(*preview.grid, *combined.grid, {2.0, 4.0})
+        || std::abs(combined.grid->tauForward(0.4) - 0.46) > 1e-9
+        || std::abs(combined.grid->tauForward(2.4) - 2.37) > 1e-9)
+        return false;
+
+    juce::AudioBuffer<float> input(1, sampleRate * 6);
+    for (int s = 0; s < input.getNumSamples(); ++s)
+        input.setSample(0, s, static_cast<float>(std::sin(2.0 * pi * 221 * s / sampleRate)));
+    SoundTouchStretcher stretcher(sampleRate, 1);
+    const auto firstAudio = stretcher.stretch(input, *firstPlan.grid);
+    const auto combinedAudio = stretcher.stretch(input, *combined.grid);
+    for (int s = 0; s < input.getNumSamples(); ++s) {
+        if (s >= 2 * sampleRate && firstAudio.getSample(0, s) != input.getSample(0, s))
+            return false;
+        if ((s < 2 * sampleRate || s >= 4 * sampleRate)
+            && combinedAudio.getSample(0, s) != firstAudio.getSample(0, s))
+            return false;
+    }
+    return true;
+}
+
+bool testSameTimeMapCanStillChangeStretchedSiblingAudio()
+{
+    const auto before = TimeGridSnapshot::makeFromHandles({
+        {1, 0.0, 0.0, HandleKind::ClipStart},
+        {2, 1.0, 1.2, HandleKind::UserAdded},
+        {3, 3.0, 3.0, HandleKind::ClipEnd}
+    });
+    auto handles = before->handles();
+    handles.insert(handles.begin() + 2, {4, 2.0, before->tauForward(2.0), HandleKind::InternalOnset});
+    const auto after = TimeGridSnapshot::makeFromHandles(std::move(handles));
+    return after && preservesTimingAudioInRange(*before, *after, {0.0, 1.2})
+        && !preservesTimingAudioInRange(*before, *after, {1.2, 2.1});
+}
+
 bool testDetectAttacksAcrossPitch()
 {
     constexpr int rate = 16000;
@@ -331,6 +390,10 @@ int main()
     }
     if (!testReferenceAlignment()) {
         std::fputs("Reference timing failed placement, strength, or preservation\n", stderr);
+        return 1;
+    }
+    if (!testPooledSplitsCanAlignIndependently() || !testSameTimeMapCanStillChangeStretchedSiblingAudio()) {
+        std::fputs("Pooled timing edits failed to preserve sibling splits\n", stderr);
         return 1;
     }
     if (!testDetectAttacksAcrossPitch()) {

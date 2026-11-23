@@ -1148,7 +1148,28 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         Input input;
         size_t guideIndex;
         juce::String label;
+        std::vector<TimingOutputRange> protectedRanges;
+        std::vector<TimingOnset> onsets, guideOnsets;
         TimingAlignment gentle, tight;
+    };
+
+    const auto protectedRangesFor = [](const Input& input) {
+        std::vector<TimingOutputRange> ranges;
+        const auto* placement = input.region.playbackRegion;
+        const auto* modification = placement->getAudioModification();
+        const auto origin = input.snapshot->sourceWindow.sourceStartSeconds;
+        // Siblings can be anywhere on the DAW timeline but still play the same samples.
+        for (const auto* sibling : modification->getPlaybackRegions()) {
+            if (sibling != placement)
+                ranges.push_back({sibling->getStartInAudioModificationTime() - origin,
+                                  sibling->getEndInAudioModificationTime() - origin});
+        }
+        return ranges;
+    };
+    const auto makePlan = [](const Target& target, const Input& guide, const TimeGridSnapshot& grid,
+                             double strength, const std::vector<TimingOutputRange>& protectedRanges) {
+        return alignTimingToReference(target.onsets, grid, target.input.region.contentProjection,
+            target.guideOnsets, *guide.snapshot->timeGrid, guide.region.contentProjection, strength, protectedRanges);
     };
 
     parameterPanel_.commitPendingEdits();
@@ -1165,11 +1186,6 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         auto snapshot = dc->readContentSnapshot(region.contentKey);
         if (!snapshot || !snapshot->audioBuffer || !snapshot->timeGrid || snapshot->timeGrid->empty()) {
             rejection = "audio or timing grid not loaded";
-            return {};
-        }
-        if (snapshot->timeGrid->totalDurationSeconds() > 180.0) {
-            rejection = "source duration " + juce::String(snapshot->timeGrid->totalDurationSeconds(), 1)
-                + " s exceeds the 180 s timing limit";
             return {};
         }
         return {region, std::move(snapshot)};
@@ -1197,7 +1213,6 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     }
 
     juce::StringArray diagnostics;
-    bool hasSharedTargets = false;
     std::vector<Input> guides;
     std::vector<Target> targets;
     const auto targetRegions = dc->getPlaybackRegionProjectionsFor(selected);
@@ -1206,15 +1221,6 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             + juce::String(static_cast<int>(selected.size())) + " selected targets have a valid DAW placement");
     for (const auto& region : targetRegions) {
         const auto position = "Target @ " + juce::String(region.startInPlaybackTime, 2) + " s: ";
-        const auto* modification = region.playbackRegion->getAudioModification();
-        // A shared modification would also change unselected host placements.
-        const auto placements = modification != nullptr ? modification->getPlaybackRegions().size() : 0;
-        if (placements != 1) {
-            hasSharedTargets = hasSharedTargets || placements > 1;
-            diagnostics.add(position + "expected 1 placement of the ARA audio modification, found "
-                + juce::String(static_cast<int>(placements)));
-            continue;
-        }
         juce::String rejection;
         const auto input = load(region, rejection);
         if (!input.snapshot) {
@@ -1250,6 +1256,12 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                 + juce::String(static_cast<int>(guideRegions.size())) + " reference clips)");
             continue;
         }
+        constexpr double maxTimingAnalysisSeconds = 180.0;
+        if (bestOverlap > maxTimingAnalysisSeconds) {
+            diagnostics.add(position + "reference overlap " + juce::String(bestOverlap, 1)
+                + " s exceeds the " + juce::String(static_cast<int>(maxTimingAnalysisSeconds)) + " s timing analysis limit");
+            continue;
+        }
         const auto existing = std::find_if(guides.begin(), guides.end(), [&](const auto& guide) {
             return guide.region.playbackRegion == bestGuide.region.playbackRegion;
         });
@@ -1261,29 +1273,25 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         if (name.isEmpty())
             name = LOC(kUnnamedReferenceTrack);
         name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
-        targets.push_back({input, guideIndex, std::move(name), {}, {}});
+        targets.push_back({input, guideIndex, std::move(name), protectedRangesFor(input), {}, {}, {}, {}});
     }
-    juce::String sharedTargetHelp;
-    if (hasSharedTargets) {
-        if (juce::PluginHostType{}.isReaper())
-            sharedTargetHelp = Loc::format(
-                LOC_RAW("Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}"),
-                juce::String("Item: Remove active takes from ARA edit pool (unpool)"));
-        else
-            sharedTargetHelp = LOC_RAW("Some targets share ARA edits. Make those clips independent in the DAW, then retry.");
-    }
+    const auto sharedTargetHelp = juce::PluginHostType{}.isReaper()
+        ? Loc::format(LOC_RAW("Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}"),
+                      juce::String("Item: Remove active takes from ARA edit pool (unpool)"))
+        : LOC_RAW("Some targets share ARA edits. Make those clips independent in the DAW, then retry.");
     const auto noAlignment = LOC_RAW("No reliable timing changes.");
-    const auto showFailure = [title, noAlignment, sharedTargetHelp](juce::Component& parent, const juce::StringArray& details) {
+    const auto showFailure = [title, noAlignment, sharedTargetHelp](juce::Component& parent,
+                                                                 const juce::StringArray& details, bool sharedConflict) {
         auto summary = details.isEmpty() ? noAlignment : noAlignment + "\n" + details[0];
         auto copied = details.joinIntoString("\n");
-        if (sharedTargetHelp.isNotEmpty()) {
+        if (sharedConflict) {
             summary += "\n\n" + sharedTargetHelp;
             copied += "\n" + sharedTargetHelp;
         }
         ConfirmDialogContent::showDiagnostic(&parent, title, summary, copied);
     };
     if (targets.empty()) {
-        showFailure(contentRoot_, diagnostics);
+        showFailure(contentRoot_, diagnostics, false);
         return;
     }
 
@@ -1295,25 +1303,26 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
     const juce::Component::SafePointer<OpenTuneAudioProcessorEditor> safe(this);
     timingAlignmentWorker_->addJob([safe, guideTrack = pitchReferenceTrack_, count = selected.size(),
         guides = std::move(guides), targets = std::move(targets), title, showFailure, sharedTargetHelp,
+        protectedRangesFor, makePlan,
         diagnostics = std::move(diagnostics)]() mutable {
         const auto detect = [](const Input& input, const Input& other) {
             return detectTimingOnsetsInOverlap(*input.snapshot->audioBuffer, input.snapshot->audioSampleRate,
                 *input.snapshot->timeGrid, input.region.contentProjection, other.region.contentProjection);
         };
+        bool sharedConflict = false;
         try {
             for (auto& target : targets) {
                 const auto& guide = guides[target.guideIndex];
-                const auto onsets = detect(target.input, guide);
-                const auto guideOnsets = detect(guide, target.input);
+                target.onsets = detect(target.input, guide);
+                target.guideOnsets = detect(guide, target.input);
                 const auto plan = [&](double strength) {
-                    return alignTimingToReference(onsets, *target.input.snapshot->timeGrid,
-                        target.input.region.contentProjection, guideOnsets,
-                        *guide.snapshot->timeGrid, guide.region.contentProjection, strength);
+                    return makePlan(target, guide, *target.input.snapshot->timeGrid, strength, target.protectedRanges);
                 };
                 target.gentle = plan(0.5);
                 target.tight = plan(1.0);
                 if (!target.gentle.grid && !target.tight.grid) {
                     const auto& a = target.tight;
+                    sharedConflict = sharedConflict || a.affectsProtectedTiming || target.gentle.affectsProtectedTiming;
                     const auto& targetRegion = target.input.region;
                     const double overlap = std::min(targetRegion.endInPlaybackTime, guide.region.endInPlaybackTime)
                         - std::max(targetRegion.startInPlaybackTime, guide.region.startInPlaybackTime);
@@ -1345,7 +1354,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
                 targets = std::move(targets), title, showFailure, sharedTargetHelp,
-                diagnostics = std::move(diagnostics), alreadyAligned]() mutable {
+                protectedRangesFor, makePlan, diagnostics = std::move(diagnostics), alreadyAligned, sharedConflict]() mutable {
             if (safe == nullptr)
                 return;
             safe->timingAlignmentRunning_ = false;
@@ -1359,7 +1368,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                     ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
                         LOC_RAW("The matched attacks are already aligned. No timing change was applied."));
                 else
-                    showFailure(safe->contentRoot_, diagnostics);
+                    showFailure(safe->contentRoot_, diagnostics, sharedConflict);
                 return;
             }
 
@@ -1367,7 +1376,7 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             if (count != targets.size())
                 detail += "\n" + Loc::format(LOC_RAW("{0} selected clips have no safe alignment and will be skipped."),
                                              juce::String(static_cast<int>(count - targets.size())));
-            if (sharedTargetHelp.isNotEmpty())
+            if (sharedConflict)
                 detail += "\n" + sharedTargetHelp;
             auto preview = std::make_unique<juce::AlertWindow>(title, detail,
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
@@ -1395,7 +1404,8 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
             window.setCentrePosition(bounds.getCentreX(), bounds.getCentreY());
             safe->contentRoot_.addChildComponent(window);
             window.enterModalState(true, juce::ModalCallbackFunction::create(
-                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title](int choice) {
+                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title,
+                 showFailure, protectedRangesFor, makePlan](int choice) {
                     if (safe == nullptr)
                         return;
                     const auto dialog = std::move(safe->timingAlignmentPreview_);
@@ -1423,18 +1433,42 @@ void OpenTuneAudioProcessorEditor::alignTimingToPitchReference()
                     for (size_t i = 0; i < targets.size(); ++i) {
                         const auto* box = dialog->getComboBoxComponent(juce::String(static_cast<int>(i)));
                         const auto& target = targets[i];
-                        const auto after = box->getSelectedId() == 2 ? target.gentle.grid
-                            : box->getSelectedId() == 3 ? target.tight.grid : nullptr;
-                        if (!after)
+                        const auto mode = box->getSelectedId();
+                        const auto previewGrid = mode == 2 ? target.gentle.grid
+                            : mode == 3 ? target.tight.grid : nullptr;
+                        if (!previewGrid)
                             continue;
                         const auto& input = target.input;
                         if (safe->pitchReferenceTrack_ != guideTrack || !unchanged(input)
-                            || !unchanged(guides[target.guideIndex])
-                            || input.region.playbackRegion->getAudioModification()->getPlaybackRegions().size() != 1) {
+                            || !unchanged(guides[target.guideIndex])) {
                             stale();
                             return;
                         }
-                        changes.push_back({input.region.contentKey, input.snapshot->timeGrid, after});
+                        const auto ranges = protectedRangesFor(input);
+                        const auto previous = std::find_if(changes.begin(), changes.end(), [&](const auto& change) {
+                            return change.key == input.region.contentKey;
+                        });
+                        if (previous == changes.end()) {
+                            if (std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+                                    return !preservesTimingAudioInRange(*input.snapshot->timeGrid, *previewGrid, range);
+                                })) {
+                                showFailure(safe->contentRoot_, {}, true);
+                                return;
+                            }
+                            changes.push_back({input.region.contentKey, input.snapshot->timeGrid, previewGrid});
+                            continue;
+                        }
+                        // Build one undoable grid per modification, with each split limited to its own audio.
+                        auto combined = makePlan(target, guides[target.guideIndex], *previous->after,
+                                                 mode == 2 ? 0.5 : 1.0, ranges);
+                        const auto& projection = input.region.contentProjection;
+                        if (!combined.grid || !preservesTimingAudioInRange(*previewGrid, *combined.grid,
+                                {projection.contentStartSeconds, projection.contentStartSeconds + projection.contentDurationSeconds})) {
+                            ConfirmDialogContent::showMessage(&safe->contentRoot_, title,
+                                LOC_RAW("These clip edits could not be combined safely. Try aligning fewer clips at once."));
+                            return;
+                        }
+                        previous->after = std::move(combined.grid);
                     }
                     if (changes.empty())
                         return;
