@@ -5378,17 +5378,21 @@ void PianoRollComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::M
         handleVerticalScrollPixels(pan.y);
 }
 
-void PianoRollComponent::handleOverviewWheel(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+std::optional<double> PianoRollComponent::handleOverviewWheel(const juce::MouseEvent& e,
+                                                             const juce::MouseWheelDetails& wheel)
 {
     if (e.mods.isShiftDown() || e.mods.isCtrlDown()
         || e.mods.isCommandDown() || e.mods.isAltDown()) {
         mouseWheelMove(e.getEventRelativeTo(this), wheel);
-        return;
+        return std::nullopt;
     }
 
+    const double pps = camera_.pixelsPerSecond;
     const float delta = std::abs(wheel.deltaX) > std::abs(wheel.deltaY) ? wheel.deltaX : wheel.deltaY;
     const auto pan = wheelEventToPixels(delta, 0.0f, wheel.isSmooth, zoomSensitivity_.scrollSpeed);
-    handleHorizontalScrollPixels(pan.x);
+    if (!(pps > 0.0) || pan.x == 0.0)
+        return std::nullopt;
+    return camera_.visibleStartSeconds - pan.x / pps;
 }
 
 void PianoRollComponent::mouseMagnify(const juce::MouseEvent& e, float scaleFactor)

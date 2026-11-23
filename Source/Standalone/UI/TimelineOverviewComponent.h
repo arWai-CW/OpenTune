@@ -54,6 +54,10 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    // Moves the viewport frame, clamped to the overview's range, and notifies
+    // listeners the same way a drag does.
+    void navigateTo(double visibleStartSeconds);
+
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
 private:

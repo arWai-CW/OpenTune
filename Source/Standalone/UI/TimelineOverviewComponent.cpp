@@ -343,6 +343,11 @@ void TimelineOverviewComponent::onHeartbeatTickRegular(std::vector<TimelineConte
     repaint();
 }
 
+void TimelineOverviewComponent::navigateTo(double visibleStartSeconds)
+{
+    requestNavigation(visibleStartSeconds);
+}
+
 void TimelineOverviewComponent::requestNavigation(double visibleStartSeconds)
 {
     const auto geometry = regularCaptureMode_ ? calculateRegularGeometry() : calculateGeometry();
@@ -470,6 +475,27 @@ void TimelineOverviewComponent::paint(juce::Graphics& g)
             const auto geometry = calculateRegularGeometry();
             if (geometry.previewPixelsPerSecond > 0.0)
             {
+                // Clip extents first, so clips whose audio has not been read yet
+                // still show where they sit instead of looking like gaps.
+                for (const auto& placement : regularPlacements_)
+                {
+                    if (!placement.projection.isValid())
+                        continue;
+                    const auto clipBounds = juce::Rectangle<float>(
+                        contentBounds.getX()
+                            + static_cast<float>((placement.projection.timelineStartSeconds
+                                                  - regularTimelineStart_)
+                                                 * geometry.previewPixelsPerSecond),
+                        contentBounds.getY(),
+                        static_cast<float>(placement.projection.timelineDurationSeconds
+                                           * geometry.previewPixelsPerSecond),
+                        contentBounds.getHeight()).getIntersection(contentBounds);
+                    if (clipBounds.isEmpty())
+                        continue;
+                    g.setColour(placement.displayColour.withAlpha(0.18f));
+                    g.fillRect(clipBounds);
+                }
+
                 for (std::size_t index = 0; index < regularPlacements_.size(); ++index)
                 {
                     const auto& placement = regularPlacements_[index];
