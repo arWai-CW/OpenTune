@@ -238,6 +238,31 @@ bool testTimingRejectionReportsStageAndCounts()
         && notEnoughMatches.matchedAttacks == 2;
 }
 
+bool testLastFramesOfOverlapCanProvideTheThirdMatch()
+{
+    constexpr int rate = 16000;
+    juce::AudioBuffer<float> targetAudio(1, 3 * rate), guideAudio(1, 3 * rate);
+    targetAudio.clear();
+    guideAudio.clear();
+    const auto attack = [](auto& audio, double time) {
+        const int start = static_cast<int>(std::lround(time * rate));
+        for (int i = 0; i < rate / 8; ++i)
+            audio.setSample(0, start + i, static_cast<float>(std::sin(2.0 * pi * 200.0 * i / rate)));
+    };
+    for (const double time : {0.49, 1.14, 1.99}) {
+        attack(guideAudio, time);
+        attack(targetAudio, time - 0.165);
+    }
+    const auto grid = TimeGridSnapshot::makeIdentity(3.0);
+    const ContentTimelineProjection targetPlacement{0.0, 3.0, 0.0, 3.0};
+    const ContentTimelineProjection guidePlacement{0.0, 2.0, 0.0, 2.0};
+    const auto targets = detectTimingOnsetsInOverlap(targetAudio, rate, *grid, targetPlacement, guidePlacement);
+    const auto guides = detectTimingOnsetsInOverlap(guideAudio, rate, *grid, guidePlacement, targetPlacement);
+    const auto plan = alignTimingToReference(targets, *grid, targetPlacement, guides, *grid, guidePlacement, 0.5);
+    return guides.size() == 3 && guides.back().sourceSeconds >= 1.985
+        && guides.back().sourceSeconds < 2.0 && plan.grid && plan.matchedAttacks == 3;
+}
+
 bool testPeriodicAttacksDoNotSlipByASyllable()
 {
     const auto grid = TimeGridSnapshot::makeIdentity(3.0);
@@ -318,6 +343,10 @@ int main()
     }
     if (!testTimingRejectionReportsStageAndCounts()) {
         std::fputs("Timing alignment did not report the rejection stage and counts\n", stderr);
+        return 1;
+    }
+    if (!testLastFramesOfOverlapCanProvideTheThirdMatch()) {
+        std::fputs("Timing alignment missed an attack in the last frames of the overlap\n", stderr);
         return 1;
     }
     if (!testIsolatedAttackStaysPut()) {
