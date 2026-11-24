@@ -730,6 +730,80 @@ bool testStableReferenceNoteOffsetsDoNotDriftOctaves()
     return true;
 }
 
+bool testChainedOffsetAlignmentStaysWithinRegister()
+{
+    const auto phraseStaysWithinRegister = [](
+        const std::vector<double>& offsetsCents,
+        int transitionFrames,
+        double targetStepCents) {
+        constexpr int stableFrames = 40;
+        constexpr double frameSeconds = 0.01;
+        constexpr float targetHz = 200.0f;
+        const int frameCount = static_cast<int>(offsetsCents.size()) * stableFrames
+            + (static_cast<int>(offsetsCents.size()) - 1) * transitionFrames;
+        std::vector<float> targetF0;
+        std::vector<float> referenceF0;
+        targetF0.reserve(static_cast<size_t>(frameCount));
+        referenceF0.reserve(static_cast<size_t>(frameCount));
+
+        int frame = 0;
+        for (size_t note = 0; note < offsetsCents.size(); ++note) {
+            const double noteBaseHz = targetHz * std::exp2(note * targetStepCents / 1200.0);
+            const int noteStart = frame;
+            for (int i = 0; i < stableFrames; ++i, ++frame) {
+                targetF0.push_back(static_cast<float>(noteBaseHz));
+                referenceF0.push_back(static_cast<float>(
+                    noteBaseHz * std::exp2(offsetsCents[note] / 1200.0)));
+            }
+            if (note + 1 < offsetsCents.size()) {
+                const double nextBaseHz = targetHz
+                    * std::exp2((note + 1) * targetStepCents / 1200.0);
+                for (int i = 1; i <= transitionFrames; ++i, ++frame) {
+                    const double fraction = static_cast<double>(i) / transitionFrames;
+                    const double baseHz = noteBaseHz + fraction * (nextBaseHz - noteBaseHz);
+                    const double offsetCents = offsetsCents[note]
+                        + fraction * (offsetsCents[note + 1] - offsetsCents[note]);
+                    targetF0.push_back(static_cast<float>(baseHz));
+                    referenceF0.push_back(static_cast<float>(
+                        baseHz * std::exp2(offsetCents / 1200.0)));
+                }
+            }
+        }
+
+        const double duration = frameCount * frameSeconds;
+        const auto grid = TimeGridSnapshot::makeIdentity(duration);
+        PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+            makeCurve(std::move(targetF0), {}, 1, 100.0)};
+        const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+            makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+        const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+        if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+            || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+            return false;
+
+        const auto& corrected = plan.segments[0].f0Data;
+        for (size_t note = 0; note < offsetsCents.size(); ++note) {
+            const int noteStart = static_cast<int>(note) * (stableFrames + transitionFrames);
+            const double baseHz = targetHz * std::exp2(note * targetStepCents / 1200.0);
+            for (int frameInNote : {noteStart + 10, noteStart + 20, noteStart + 30}) {
+                const double outputOffsetCents = 1200.0 * std::log2(
+                    static_cast<double>(corrected[static_cast<size_t>(frameInNote)]) / baseHz);
+                if (std::abs(outputOffsetCents) > 700.0)
+                    return false;
+            }
+        }
+        const size_t finalNoteFrame = (offsetsCents.size() - 1)
+            * static_cast<size_t>(stableFrames + transitionFrames) + 20;
+        const double finalBaseHz = targetHz
+            * std::exp2((offsetsCents.size() - 1) * targetStepCents / 1200.0);
+        return nearPitch(corrected[finalNoteFrame], static_cast<float>(finalBaseHz), 2.0);
+    };
+
+    return phraseStaysWithinRegister({440.0, 520.0, 600.0, 680.0, 760.0, 0.0}, 10, 0.0)
+        && phraseStaysWithinRegister(
+            {440.0, 480.0, 520.0, 560.0, 600.0, 640.0, 680.0, 720.0, 0.0}, 1, 200.0);
+}
+
 bool vibratoRateIsPreserved(double vibratoRateHz)
 {
     constexpr int frameCount = 200;
@@ -876,6 +950,10 @@ int main()
     }
     if (!testStableReferenceNoteOffsetsDoNotDriftOctaves()) {
         std::fputs("FAIL: Reference tuning does not drift octaves across stable notes\n", stderr);
+        return 1;
+    }
+    if (!testChainedOffsetAlignmentStaysWithinRegister()) {
+        std::fputs("FAIL: Reference tuning keeps chained offset alignment in the target register\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {

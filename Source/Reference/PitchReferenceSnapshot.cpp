@@ -240,8 +240,20 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     } else {
                         const float stretchShift = static_cast<float>(
                             std::round((previousOffset - nextOffset) / 1200.0) * 1200.0);
+                        medianWindow.clear();
                         for (int frame = stretchStart; frame < stretchEnd; ++frame)
-                            filteredOffsets[static_cast<size_t>(frame)] += stretchShift;
+                            medianWindow.push_back(filteredOffsets[static_cast<size_t>(frame)]);
+                        std::sort(medianWindow.begin(), medianWindow.end());
+                        const size_t middle = medianWindow.size() / 2;
+                        double stretchMedian = medianWindow[middle];
+                        if (medianWindow.size() % 2 == 0)
+                            stretchMedian = 0.5 * (medianWindow[middle - 1] + medianWindow[middle]);
+                        if (std::abs(stretchMedian + stretchShift) <= 700.0) {
+                            for (int frame = stretchStart; frame < stretchEnd; ++frame)
+                                filteredOffsets[static_cast<size_t>(frame)] += stretchShift;
+                        } else {
+                            ++smoothingSegment;
+                        }
                     }
                 }
                 for (int frame = stretchStart; frame < stretchEnd; ++frame) {
