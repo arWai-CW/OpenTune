@@ -20,6 +20,11 @@ bool isVoiced(float hz)
     return hz > 0.0f && std::isfinite(hz);
 }
 
+double wrapOffsetCents(double cents)
+{
+    return cents - 1200.0 * std::floor((cents + 600.0) / 1200.0);
+}
+
 bool canSample(const PitchReferenceSnapshot& region)
 {
     return region.projection.isValid() && region.timeGrid != nullptr && region.curve != nullptr
@@ -114,26 +119,6 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
-            for (int i = 1; i < count; ++i) {
-                auto& offsetCents = run[static_cast<size_t>(i)].offsetCents;
-                const auto& previous = run[static_cast<size_t>(i - 1)];
-                const auto& current = run[static_cast<size_t>(i)];
-                const auto pitchChangeCents = [](float previousHz, float currentHz) {
-                    return std::abs(1200.0 * std::log2(
-                        static_cast<double>(currentHz) / previousHz));
-                };
-                if (pitchChangeCents(previous.baseHz, current.baseHz)
-                        > kReferencePitchOffsetJumpThresholdCents
-                    || pitchChangeCents(previous.referenceHz, current.referenceHz)
-                        > kReferencePitchOffsetJumpThresholdCents)
-                    continue;
-                const float previousOffsetCents = previous.offsetCents;
-                while (offsetCents - previousOffsetCents > 600.0f)
-                    offsetCents -= 1200.0f;
-                while (offsetCents - previousOffsetCents < -600.0f)
-                    offsetCents += 1200.0f;
-            }
-
             std::vector<bool> stableCandidate(static_cast<size_t>(count), false);
             for (int i = stabilitySlopeRadiusFrames;
                  i + stabilitySlopeRadiusFrames < count; ++i) {
@@ -178,15 +163,44 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                                  noteBoundaries.end());
 
             std::vector<float> filteredOffsets(static_cast<size_t>(count), 0.0f);
+            std::vector<float> stableStretchOffsets(static_cast<size_t>(count), 0.0f);
             std::vector<float> medianWindow;
             medianWindow.reserve(static_cast<size_t>(medianWindowFrames));
             for (const auto& [stretchStart, stretchEnd] : stableStretches) {
+                for (int i = stretchStart; i < stretchEnd; ++i)
+                    stableStretchOffsets[static_cast<size_t>(i)] = run[static_cast<size_t>(i)].offsetCents;
+                for (int i = stretchStart + 1; i < stretchEnd; ++i) {
+                    auto& offsetCents = stableStretchOffsets[static_cast<size_t>(i)];
+                    const float previousOffsetCents = stableStretchOffsets[static_cast<size_t>(i - 1)];
+                    while (offsetCents - previousOffsetCents > 600.0f)
+                        offsetCents -= 1200.0f;
+                    while (offsetCents - previousOffsetCents < -600.0f)
+                        offsetCents += 1200.0f;
+                }
+
+                medianWindow.clear();
+                for (int i = stretchStart; i < stretchEnd; ++i)
+                    medianWindow.push_back(stableStretchOffsets[static_cast<size_t>(i)]);
+                std::sort(medianWindow.begin(), medianWindow.end());
+                const size_t stretchMiddle = medianWindow.size() / 2;
+                double stretchMedian = medianWindow[stretchMiddle];
+                if (medianWindow.size() % 2 == 0)
+                    stretchMedian = 0.5 * (medianWindow[stretchMiddle - 1] + medianWindow[stretchMiddle]);
+                double canonicalMedian = stretchMedian;
+                while (canonicalMedian > 600.0)
+                    canonicalMedian -= 1200.0;
+                while (canonicalMedian < -600.0)
+                    canonicalMedian += 1200.0;
+                const float stretchShift = static_cast<float>(canonicalMedian - stretchMedian);
+                for (int i = stretchStart; i < stretchEnd; ++i)
+                    stableStretchOffsets[static_cast<size_t>(i)] += stretchShift;
+
                 for (int i = stretchStart; i < stretchEnd; ++i) {
                     const int radius = std::min(medianWindowRadius,
                         std::min(i - stretchStart, stretchEnd - 1 - i));
                     medianWindow.clear();
                     for (int j = i - radius; j <= i + radius; ++j)
-                        medianWindow.push_back(run[static_cast<size_t>(j)].offsetCents);
+                        medianWindow.push_back(stableStretchOffsets[static_cast<size_t>(j)]);
                     std::sort(medianWindow.begin(), medianWindow.end());
                     const size_t middle = medianWindow.size() / 2;
                     float median = medianWindow[middle];
@@ -212,11 +226,17 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         [previousEnd, stretchStart](int boundary) {
                             return boundary > previousEnd - 1 && boundary <= stretchStart;
                         });
-                    const double offsetJump = std::abs(
-                        static_cast<double>(filteredOffsets[static_cast<size_t>(stretchStart)])
-                        - filteredOffsets[static_cast<size_t>(previousEnd - 1)]);
-                    if (noteBoundary || offsetJump > kReferencePitchOffsetJumpThresholdCents)
+                    const double previousOffset = filteredOffsets[static_cast<size_t>(previousEnd - 1)];
+                    const double nextOffset = filteredOffsets[static_cast<size_t>(stretchStart)];
+                    const double wrappedJump = wrapOffsetCents(nextOffset - previousOffset);
+                    if (noteBoundary || std::abs(wrappedJump) > kReferencePitchOffsetJumpThresholdCents) {
                         ++smoothingSegment;
+                    } else {
+                        const float stretchShift = static_cast<float>(
+                            std::round((previousOffset - nextOffset) / 1200.0) * 1200.0);
+                        for (int frame = stretchStart; frame < stretchEnd; ++frame)
+                            filteredOffsets[static_cast<size_t>(frame)] += stretchShift;
+                    }
                 }
                 for (int frame = stretchStart; frame < stretchEnd; ++frame) {
                     if (frame > stretchStart
@@ -230,13 +250,19 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             std::vector<float> smoothedOffsets(static_cast<size_t>(count), 0.0f);
             if (stableOffsets.empty()) {
                 medianWindow.clear();
+                const float firstOffset = run.front().offsetCents;
                 for (const auto& frame : run)
-                    medianWindow.push_back(frame.offsetCents);
+                    medianWindow.push_back(static_cast<float>(
+                        firstOffset + wrapOffsetCents(frame.offsetCents - firstOffset)));
                 std::sort(medianWindow.begin(), medianWindow.end());
                 const size_t middle = medianWindow.size() / 2;
                 float median = medianWindow[middle];
                 if (medianWindow.size() % 2 == 0)
                     median = (medianWindow[middle - 1] + medianWindow[middle]) * 0.5f;
+                while (median > 600.0f)
+                    median -= 1200.0f;
+                while (median < -600.0f)
+                    median += 1200.0f;
                 std::fill(smoothedOffsets.begin(), smoothedOffsets.end(), median);
             } else {
                 std::vector<float> stableSmoothedOffsets(stableOffsets.size());
@@ -267,13 +293,21 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     stableSmoothedOffsets[i] = static_cast<float>(weightedOffsetSum / weightSum);
                 }
 
+                std::vector<float> interpolationOffsets(stableSmoothedOffsets.size());
+                interpolationOffsets.front() = stableSmoothedOffsets.front();
+                for (size_t i = 1; i < stableSmoothedOffsets.size(); ++i) {
+                    interpolationOffsets[i] = interpolationOffsets[i - 1]
+                        + static_cast<float>(wrapOffsetCents(
+                            stableSmoothedOffsets[i] - stableSmoothedOffsets[i - 1]));
+                }
+
                 for (int frame = 0; frame < count; ++frame) {
                     const auto right = std::upper_bound(stableOffsets.begin(), stableOffsets.end(), frame,
                         [](int value, const StableOffset& offset) { return value < offset.frame; });
                     if (right == stableOffsets.begin()) {
-                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.front();
+                        smoothedOffsets[static_cast<size_t>(frame)] = interpolationOffsets.front();
                     } else if (right == stableOffsets.end()) {
-                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.back();
+                        smoothedOffsets[static_cast<size_t>(frame)] = interpolationOffsets.back();
                     } else {
                         const size_t rightIndex = static_cast<size_t>(right - stableOffsets.begin());
                         const size_t leftIndex = rightIndex - 1;
@@ -282,8 +316,8 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         const double fraction = static_cast<double>(frame - leftFrame)
                             / (rightFrame - leftFrame);
                         smoothedOffsets[static_cast<size_t>(frame)] = static_cast<float>(
-                            stableSmoothedOffsets[leftIndex]
-                            + fraction * (stableSmoothedOffsets[rightIndex] - stableSmoothedOffsets[leftIndex]));
+                            interpolationOffsets[leftIndex]
+                            + fraction * (interpolationOffsets[rightIndex] - interpolationOffsets[leftIndex]));
                     }
                 }
             }
