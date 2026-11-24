@@ -674,6 +674,62 @@ bool testSynchronizedNoteChangeKeepsOffsetContinuous()
         && synchronizedNoteChangeKeepsOffsetContinuous(605.0, 605.0);
 }
 
+bool testStableReferenceNoteOffsetsDoNotDriftOctaves()
+{
+    constexpr int noteCount = 4;
+    constexpr int stableFrames = 40;
+    constexpr int transitionFrames = 10;
+    constexpr int frameCount = noteCount * stableFrames + (noteCount - 1) * transitionFrames;
+    constexpr double frameSeconds = 0.01;
+    constexpr float targetHz = 200.0f;
+    const std::vector<double> noteOffsetsCents{500.0, -500.0, 500.0, -500.0};
+    std::vector<float> targetF0(frameCount, targetHz);
+    std::vector<float> referenceF0;
+    referenceF0.reserve(frameCount);
+
+    int frame = 0;
+    for (int note = 0; note < noteCount; ++note) {
+        const double noteOffsetCents = noteOffsetsCents[static_cast<size_t>(note)];
+        for (int i = 0; i < stableFrames; ++i, ++frame)
+            referenceF0.push_back(static_cast<float>(
+                targetHz * std::exp2(noteOffsetCents / 1200.0)));
+        if (note + 1 < noteCount) {
+            const double nextOffsetCents = noteOffsetsCents[static_cast<size_t>(note + 1)];
+            for (int i = 1; i <= transitionFrames; ++i, ++frame) {
+                const double fraction = static_cast<double>(i) / transitionFrames;
+                const double offsetCents = noteOffsetCents
+                    + fraction * (nextOffsetCents - noteOffsetCents);
+                referenceF0.push_back(static_cast<float>(
+                    targetHz * std::exp2(offsetCents / 1200.0)));
+            }
+        }
+    }
+
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int note = 0; note < noteCount; ++note) {
+        const int noteStart = note * (stableFrames + transitionFrames);
+        const float expectedHz = static_cast<float>(
+            targetHz * std::exp2(noteOffsetsCents[static_cast<size_t>(note)] / 1200.0));
+        for (int frameInNote : {noteStart + 10, noteStart + 20, noteStart + 30}) {
+            if (!nearPitch(corrected[static_cast<size_t>(frameInNote)], expectedHz, 2.0))
+                return false;
+        }
+    }
+    return true;
+}
+
 bool vibratoRateIsPreserved(double vibratoRateHz)
 {
     constexpr int frameCount = 200;
@@ -816,6 +872,10 @@ int main()
     }
     if (!testSynchronizedNoteChangeKeepsOffsetContinuous()) {
         std::fputs("FAIL: Reference tuning avoids octave glides at synchronized note changes\n", stderr);
+        return 1;
+    }
+    if (!testStableReferenceNoteOffsetsDoNotDriftOctaves()) {
+        std::fputs("FAIL: Reference tuning does not drift octaves across stable notes\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {

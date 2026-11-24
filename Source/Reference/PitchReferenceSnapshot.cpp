@@ -13,6 +13,7 @@ constexpr double kReferencePitchStabilitySlopeWindowSeconds = 0.05;
 constexpr double kReferencePitchMaximumStableSlopeCentsPerSecond = 1640.0;
 constexpr double kReferencePitchMinimumStableStretchSeconds = 0.08;
 constexpr double kReferencePitchChangeToleranceCents = 0.5;
+constexpr double kReferencePitchOctaveContinuityCents = 100.0;
 constexpr double kPi = 3.14159265358979323846;
 
 bool isVoiced(float hz)
@@ -23,6 +24,15 @@ bool isVoiced(float hz)
 double wrapOffsetCents(double cents)
 {
     return cents - 1200.0 * std::floor((cents + 600.0) / 1200.0);
+}
+
+double canonicalOffsetCents(double cents)
+{
+    while (cents > 600.0)
+        cents -= 1200.0;
+    while (cents < -600.0)
+        cents += 1200.0;
+    return cents;
 }
 
 bool canSample(const PitchReferenceSnapshot& region)
@@ -186,12 +196,8 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 double stretchMedian = medianWindow[stretchMiddle];
                 if (medianWindow.size() % 2 == 0)
                     stretchMedian = 0.5 * (medianWindow[stretchMiddle - 1] + medianWindow[stretchMiddle]);
-                double canonicalMedian = stretchMedian;
-                while (canonicalMedian > 600.0)
-                    canonicalMedian -= 1200.0;
-                while (canonicalMedian < -600.0)
-                    canonicalMedian += 1200.0;
-                const float stretchShift = static_cast<float>(canonicalMedian - stretchMedian);
+                const float stretchShift = static_cast<float>(
+                    canonicalOffsetCents(stretchMedian) - stretchMedian);
                 for (int i = stretchStart; i < stretchEnd; ++i)
                     stableStretchOffsets[static_cast<size_t>(i)] += stretchShift;
 
@@ -259,10 +265,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 float median = medianWindow[middle];
                 if (medianWindow.size() % 2 == 0)
                     median = (medianWindow[middle - 1] + medianWindow[middle]) * 0.5f;
-                while (median > 600.0f)
-                    median -= 1200.0f;
-                while (median < -600.0f)
-                    median += 1200.0f;
+                median = static_cast<float>(canonicalOffsetCents(median));
                 std::fill(smoothedOffsets.begin(), smoothedOffsets.end(), median);
             } else {
                 std::vector<float> stableSmoothedOffsets(stableOffsets.size());
@@ -294,11 +297,18 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 }
 
                 std::vector<float> interpolationOffsets(stableSmoothedOffsets.size());
-                interpolationOffsets.front() = stableSmoothedOffsets.front();
+                interpolationOffsets.front() = static_cast<float>(
+                    canonicalOffsetCents(stableSmoothedOffsets.front()));
                 for (size_t i = 1; i < stableSmoothedOffsets.size(); ++i) {
-                    interpolationOffsets[i] = interpolationOffsets[i - 1]
-                        + static_cast<float>(wrapOffsetCents(
-                            stableSmoothedOffsets[i] - stableSmoothedOffsets[i - 1]));
+                    const double deltaCents = wrapOffsetCents(
+                        stableSmoothedOffsets[i] - stableSmoothedOffsets[i - 1]);
+                    if (std::abs(deltaCents) <= kReferencePitchOctaveContinuityCents) {
+                        interpolationOffsets[i] = interpolationOffsets[i - 1]
+                            + static_cast<float>(deltaCents);
+                    } else {
+                        interpolationOffsets[i] = static_cast<float>(
+                            canonicalOffsetCents(stableSmoothedOffsets[i]));
+                    }
                 }
 
                 for (int frame = 0; frame < count; ++frame) {
