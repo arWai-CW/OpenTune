@@ -6,6 +6,7 @@
 #include "../../Utils/MagnifyZoom.h"
 #include "../../Utils/WheelPan.h"
 #include "../../Utils/PlayHeadState.h"
+#include "../../Utils/PlayHeadPresentation.h"
 #include "../../Utils/LocalizationManager.h"
 #include "../Utils/AppLogger.h"
 #include "../../Utils/PianoRollEditAction.h"
@@ -1902,7 +1903,7 @@ void PianoRollComponent::drawPlayheadOverlay(juce::Graphics& g)
     const int contentViewportRight = viewportBounds.getRight();
     const int viewportCentreX = (contentViewportLeft + contentViewportRight) / 2;
 
-    const bool playing = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    const bool playing = lastObservedPlayHeadPlaying_;
     const bool continuousMode = scrollMode_ == ScrollMode::Continuous && !userScrollHold_;
 
     const auto pres = TimelineViewportPolicy::computePlayheadPresentation(
@@ -1937,7 +1938,7 @@ void PianoRollComponent::drawPlayheadOverlay(juce::Graphics& g)
 
 void PianoRollComponent::drawPlayheadNoteHighlight(juce::Graphics& g)
 {
-    const bool playing = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    const bool playing = lastObservedPlayHeadPlaying_;
     if (!playing || playheadTimeForPaint_ <= 0.0) return;
 
     juce::Graphics::ScopedSaveState ss(g);
@@ -4240,7 +4241,16 @@ void PianoRollComponent::onScrollVBlankCallback(double timestampSec)
     lastVBlankMs_ = juce::Time::getMillisecondCounterHiRes();
     juce::ignoreUnused(timestampSec);
 
-    const bool playingNow = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    std::optional<PlayHeadPresentation> hostPresentation;
+    if (const auto transport = processor_ != nullptr ? processor_->getReaperTransport() : std::nullopt)
+    {
+        const double seconds = transport->isRunning() || transport->isPaused()
+            ? transport->playPosition : transport->editCursor;
+        hostPresentation = PlayHeadPresentation{transport->isRunning(), seconds};
+    }
+    const auto presentation = resolvePlayHeadPresentation(
+        playHeadState_, lastVBlankMs_ * 0.001, hostPresentation);
+    const bool playingNow = presentation.playing;
     bool playStateChanged = (playingNow != lastObservedPlayHeadPlaying_);
 
     // ── Playhead hit bookkeeping ──
@@ -4356,7 +4366,7 @@ void PianoRollComponent::onScrollVBlankCallback(double timestampSec)
     }
     trackReaperTransport();
 
-    double playheadTime = playHeadState_.getPresentedPositionSeconds();
+    double playheadTime = presentation.seconds;
     if (pendingSeekTime_ >= 0.0) {
         PendingSeekPolicy::Input pendingSeekInput;
         pendingSeekInput.pendingTimeSeconds = pendingSeekTime_;

@@ -1,8 +1,10 @@
 #include "../Source/Utils/PlayHeadState.h"
+#include "../Source/Utils/PlayHeadPresentation.h"
 
 #include <cstdio>
 #include <array>
 #include <thread>
+#include <limits>
 
 namespace {
 
@@ -210,6 +212,62 @@ void testConcurrentAraAnchorRetention()
     }
 }
 
+void testIndependentHostPresentationDuringCallbackGaps()
+{
+    OpenTune::PlayHeadState state;
+    auto update = state.update(makePosition(0.0, true));
+    state.presentationProjection.tryPublish(0.0, 10.0, 0.02, update.epoch);
+    double previous = 0.0;
+    for (int frame = 1; frame <= 200; ++frame)
+    {
+        const double seconds = frame * 0.01;
+        // Model a muted track publishing only every quarter second.
+        if (frame % 25 == 0)
+        {
+            update = state.update(makePosition(seconds, true));
+            state.presentationProjection.tryPublish(seconds, 10.0 + seconds, seconds + 0.02, update.epoch);
+        }
+        const auto presentation = OpenTune::resolvePlayHeadPresentation(
+            state, 10.0 + seconds, OpenTune::PlayHeadPresentation{true, seconds});
+        expect(presentation.playing, "native transport stays playing during callback gaps");
+        expect(std::abs(presentation.seconds - previous - 0.01) < 1.0e-9,
+               "independent host position has no holds or catch-up jumps during sparse callbacks");
+        previous = presentation.seconds;
+    }
+
+    // Two editor renderers can observe different scheduling frontiers.
+    for (int frame = 1; frame <= 40; ++frame)
+    {
+        const double seconds = 2.0 + frame * 0.01;
+        const double callbackPosition = seconds + (frame % 2 ? 0.2 : -0.1);
+        update = state.update(makePosition(callbackPosition, true));
+        state.presentationProjection.tryPublish(callbackPosition, 10.0 + seconds,
+                                                callbackPosition + 0.02, update.epoch);
+        const auto presentation = OpenTune::resolvePlayHeadPresentation(
+            state, 10.0 + seconds, OpenTune::PlayHeadPresentation{true, seconds});
+        expect(std::abs(presentation.seconds - previous - 0.01) < 1.0e-9,
+               "independent host position ignores alternating renderer offsets");
+        previous = presentation.seconds;
+    }
+    auto stopped = OpenTune::resolvePlayHeadPresentation(
+        state, 13.0, OpenTune::PlayHeadPresentation{false, 0.0});
+    expect(!stopped.playing && stopped.seconds == 0.0,
+           "native stop works even if muted audio never publishes stop");
+    const auto looped = OpenTune::resolvePlayHeadPresentation(
+        state, 13.01, OpenTune::PlayHeadPresentation{true, 1.0});
+    expect(looped.playing && looped.seconds == 1.0, "native loop or seek is not clamped");
+
+    const double fallback = state.getPresentedPositionAt(13.0);
+    expect(OpenTune::resolvePlayHeadPresentation(state, 13.0).seconds == fallback,
+           "hosts without an independent transport preserve projection behavior");
+    const auto invalid = OpenTune::resolvePlayHeadPresentation(
+        state, 13.0, OpenTune::PlayHeadPresentation{true, std::numeric_limits<double>::quiet_NaN()});
+    expect(invalid.seconds == fallback, "invalid native position falls back to projection");
+    OpenTune::PlayHeadState empty;
+    const auto initial = OpenTune::resolvePlayHeadPresentation(empty, 13.0);
+    expect(!initial.playing && initial.seconds == 0.0, "empty transport stays stopped");
+}
+
 } // namespace
 
 int main()
@@ -219,7 +277,8 @@ int main()
     testAraEpochChangesAndBursts();
     testLateCallbackAndTransportResets();
     testConcurrentAraAnchorRetention();
+    testIndependentHostPresentationDuringCallbackGaps();
     if (failures == 0)
-        std::puts("PlayHeadStateTests: PASS (duplicate writers, standalone/ARA jitter, epoch changes, bursts, late callbacks, underrun/resume, seek/loop, bounded lead, horizon, stop)");
+        std::puts("PlayHeadStateTests: PASS (projection regressions, sparse callbacks, offset writers, independent host stop/seek, missing/invalid host transport)");
     return failures == 0 ? 0 : 1;
 }
