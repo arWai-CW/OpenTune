@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace {
 using namespace OpenTune;
@@ -130,10 +131,12 @@ bool testTuneMatchesChromaticPitchAcrossTrimAndWarp()
         {{10.0, 1.25, 1.0, 1.25}, referenceGrid,
          makeCurve({180, 170, cSharp4 / 2.0f, 210, 100, 190}, {{4, 5, {eFlat4}}}), 2.0f},
     };
-    const auto plan = planPitchReferenceCorrection(target, references, {{0, 8}});
-    return plan.hasVoicedOverlap && plan.segments.size() == 1
-        && plan.segments[0].startFrame == 1 && plan.segments[0].endFrame == 3
-        && segmentNearPitch(plan.segments[0], {cSharp4, eFlat4}, 0.1)
+    const auto plan = planPitchReferenceCorrection(target, references, {{1, 2}, {2, 3}});
+    return plan.hasVoicedOverlap && plan.segments.size() == 2
+        && plan.segments[0].startFrame == 1 && plan.segments[0].endFrame == 2
+        && segmentNearPitch(plan.segments[0], {cSharp4}, 0.1)
+        && plan.segments[1].startFrame == 2 && plan.segments[1].endFrame == 3
+        && segmentNearPitch(plan.segments[1], {eFlat4}, 0.1)
         && target.curve->getCorrectionSegments().empty()
         && references[0].curve->getCorrectionSegments()[0].f0Data == std::vector<float>{eFlat4};
 }
@@ -152,7 +155,7 @@ bool testTuneSkipsUnselectedAndUnvoicedFrames()
         && plan.segments[0].startFrame == 0 && plan.segments[0].endFrame == 1
         && segmentNearPitch(plan.segments[0], {150}, 0.1)
         && plan.segments[1].startFrame == 3 && plan.segments[1].endFrame == 6
-        && segmentNearPitch(plan.segments[1], {151.5f, 152.0f, 152.5f}, 0.1)
+        && segmentNearPitch(plan.segments[1], {152.0f, 152.0f, 152.0f}, 0.1)
         && plan.segments[2].startFrame == 7 && plan.segments[2].endFrame == 8
         && segmentNearPitch(plan.segments[2], {153.5f}, 0.1);
 }
@@ -179,7 +182,7 @@ bool testConstantTargetMovesPitchCenterWithoutChangingRegister()
     return alreadyPitchClass.hasVoicedOverlap && alreadyPitchClass.segments.empty();
 }
 
-bool testRunStartMedianDoesNotLookPastReferenceNoteChange()
+bool testRunStartHoldsNearestStableOffset()
 {
     constexpr int frameCount = 80;
     constexpr int rangeStartFrame = 20;
@@ -208,9 +211,9 @@ bool testRunStartMedianDoesNotLookPastReferenceNoteChange()
         return false;
 
     const auto& corrected = plan.segments[0].f0Data;
-    return nearPitch(corrected[0], firstReferenceHz, 2.0)
-        && nearPitch(corrected[1], firstReferenceHz, 2.0)
-        && nearPitch(corrected[2], firstReferenceHz, 2.0)
+    return nearPitch(corrected[0], secondReferenceHz, 2.0)
+        && nearPitch(corrected[1], secondReferenceHz, 2.0)
+        && nearPitch(corrected[2], secondReferenceHz, 2.0)
         && nearPitch(corrected[changeFrame + 10 - rangeStartFrame], secondReferenceHz, 2.0)
         && nearPitch(corrected[outputFrameCount - 1], secondReferenceHz, 2.0);
 }
@@ -247,13 +250,19 @@ bool testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()
         return false;
 
     const auto& corrected = plan.segments[0].f0Data;
+    double previousOffsetCents = -std::numeric_limits<double>::infinity();
+    for (const float hz : corrected) {
+        const double offsetCents = 1200.0 * std::log2(hz / baseHz);
+        if (offsetCents + 0.01 < previousOffsetCents)
+            return false;
+        previousOffsetCents = offsetCents;
+    }
     return nearPitch(corrected[2], firstReferenceHz, 1.0)
-        && nearPitch(corrected[stepFrame - 1], firstReferenceHz, 1.0)
         && nearPitch(corrected[stepFrame + 10], secondReferenceHz, 2.0)
         && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
 }
 
-bool testNoteBoundaryReferenceOvershootIsMedianFiltered()
+bool testNoteBoundaryReferenceOvershootIsNotAnAnchor()
 {
     constexpr int frameCount = 100;
     constexpr int boundaryFrame = 40;
@@ -287,19 +296,20 @@ bool testNoteBoundaryReferenceOvershootIsMedianFiltered()
         || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
         return false;
 
-    double maximumOvershootDeviationCents = 0.0;
+    const double firstOffsetCents = 1200.0 * std::log2(firstReferenceHz / baseHz);
+    const double secondOffsetCents = 1200.0 * std::log2(secondReferenceHz / baseHz);
     const auto& corrected = plan.segments[0].f0Data;
     for (int i = boundaryFrame; i < overshootEndFrame; ++i) {
-        maximumOvershootDeviationCents = std::max(maximumOvershootDeviationCents,
-                                                  pitchErrorCents(corrected[i], secondReferenceHz));
+        const double outputOffsetCents = 1200.0 * std::log2(corrected[i] / baseHz);
+        if (outputOffsetCents < firstOffsetCents - 2.0 || outputOffsetCents > secondOffsetCents + 2.0)
+            return false;
     }
-    return nearPitch(corrected[boundaryFrame - 2], firstReferenceHz, 1.0)
-        && maximumOvershootDeviationCents < 40.0
-        && nearPitch(corrected[overshootEndFrame + 10], secondReferenceHz, 2.0)
+    return nearPitch(corrected[10], firstReferenceHz, 2.0)
+        && nearPitch(corrected[frameCount - 10], secondReferenceHz, 2.0)
         && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
 }
 
-bool testLeadingReferenceNoteChangeKeepsJumpBoundary()
+bool testShortLeadingReferenceNoteDoesNotBecomeStableAnchor()
 {
     constexpr int frameCount = 60;
     constexpr int boundaryFrame = 8;
@@ -326,8 +336,8 @@ bool testLeadingReferenceNoteChangeKeepsJumpBoundary()
         return false;
 
     const auto& corrected = plan.segments[0].f0Data;
-    return nearPitch(corrected[2], firstReferenceHz, 1.0)
-        && nearPitch(corrected[boundaryFrame - 2], firstReferenceHz, 1.0)
+    return nearPitch(corrected[2], secondReferenceHz, 2.0)
+        && nearPitch(corrected[boundaryFrame - 2], secondReferenceHz, 2.0)
         && nearPitch(corrected[boundaryFrame + 10], secondReferenceHz, 2.0)
         && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
 }
@@ -368,27 +378,121 @@ bool testShortReferenceOrnamentDoesNotBecomeTargetOrnament()
         && maximumDeviationCents < 40.0;
 }
 
-bool testLegatoNotesKeepIndependentReferenceOffsets()
+bool testLegatoRunKeepsTargetShape()
 {
-    constexpr int shortNoteFrames = 15;
-    constexpr int longNoteFrames = 50;
-    constexpr int frameCount = shortNoteFrames + longNoteFrames;
+    constexpr int noteCount = 6;
+    constexpr int framesPerNote = 9;
+    constexpr int frameCount = noteCount * framesPerNote;
     constexpr double frameSeconds = 0.01;
-    constexpr double meanHz = 200.0;
-    const float firstReferenceHz = static_cast<float>(meanHz * std::exp2(80.0 / 1200.0));
-    const float secondReferenceHz = static_cast<float>(meanHz * std::exp2(-40.0 / 1200.0));
-
-    std::vector<float> referenceF0(frameCount);
-    for (int i = 0; i < frameCount; ++i)
-        referenceF0[static_cast<size_t>(i)] = i < shortNoteFrames ? firstReferenceHz : secondReferenceHz;
+    const std::vector<float> targetNotes{200.0f, 240.0f, 180.0f, 300.0f, 220.0f, 280.0f};
+    std::vector<float> referenceNotes;
+    referenceNotes.reserve(noteCount);
+    for (const float hz : targetNotes)
+        referenceNotes.push_back(static_cast<float>(hz * std::exp2(80.0 / 1200.0)));
+    const std::vector<int> onsetShifts{2, 3, 2, 3, 2, 3};
+    std::vector<float> targetF0;
+    targetF0.reserve(frameCount);
+    std::vector<Note> targetNotesForSnapshot;
+    for (int noteIndex = 0; noteIndex < noteCount; ++noteIndex) {
+        const int start = noteIndex * framesPerNote;
+        const int end = start + framesPerNote;
+        targetNotesForSnapshot.push_back({start * frameSeconds, end * frameSeconds,
+                                          targetNotes[static_cast<size_t>(noteIndex)]});
+        targetF0.insert(targetF0.end(), framesPerNote, targetNotes[static_cast<size_t>(noteIndex)]);
+    }
+    std::vector<float> referenceF0(frameCount, referenceNotes.back());
+    for (int noteIndex = 0; noteIndex < noteCount; ++noteIndex) {
+        const int start = noteIndex * framesPerNote + onsetShifts[static_cast<size_t>(noteIndex)];
+        const int end = noteIndex + 1 == noteCount ? frameCount
+            : (noteIndex + 1) * framesPerNote + onsetShifts[static_cast<size_t>(noteIndex + 1)];
+        for (int frame = start; frame < end; ++frame)
+            referenceF0[static_cast<size_t>(frame)] = referenceNotes[static_cast<size_t>(noteIndex)];
+    }
     const double duration = frameCount * frameSeconds;
     const auto grid = TimeGridSnapshot::makeIdentity(duration);
     PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
-        makeCurve(std::vector<float>(frameCount, static_cast<float>(meanHz)), {}, 1, 100.0)};
-    target.notes = {
-        {0.0, shortNoteFrames * frameSeconds, static_cast<float>(meanHz)},
-        {shortNoteFrames * frameSeconds, duration, static_cast<float>(meanHz)},
-    };
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    target.notes = std::move(targetNotesForSnapshot);
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].startFrame != 0 || plan.segments[0].endFrame != frameCount
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    double minimumOutputOffsetCents = std::numeric_limits<double>::infinity();
+    double maximumOutputOffsetCents = -std::numeric_limits<double>::infinity();
+    double minimumReferenceOffsetCents = std::numeric_limits<double>::infinity();
+    double maximumReferenceOffsetCents = -std::numeric_limits<double>::infinity();
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int i = 0; i < frameCount; ++i) {
+        const double outputOffsetCents = 1200.0 * std::log2(
+            static_cast<double>(corrected[static_cast<size_t>(i)]) / target.curve->getOriginalF0()[static_cast<size_t>(i)]);
+        minimumOutputOffsetCents = std::min(minimumOutputOffsetCents, outputOffsetCents);
+        maximumOutputOffsetCents = std::max(maximumOutputOffsetCents, outputOffsetCents);
+    }
+    for (int i = 0; i < frameCount; ++i) {
+        const double referenceOffsetCents = 1200.0 * std::log2(
+            static_cast<double>(reference.curve->getOriginalF0()[static_cast<size_t>(i)])
+                / target.curve->getOriginalF0()[static_cast<size_t>(i)]);
+        minimumReferenceOffsetCents = std::min(minimumReferenceOffsetCents, referenceOffsetCents);
+        maximumReferenceOffsetCents = std::max(maximumReferenceOffsetCents, referenceOffsetCents);
+    }
+    return maximumOutputOffsetCents - minimumOutputOffsetCents < 2.0
+        && maximumReferenceOffsetCents - minimumReferenceOffsetCents > 100.0;
+}
+
+bool testRunOffsetInterpolatesBetweenStablePassages()
+{
+    constexpr int stableFrames = 100;
+    constexpr int noteCount = 6;
+    constexpr int framesPerNote = 9;
+    constexpr int runFrames = noteCount * framesPerNote;
+    constexpr int runStartFrame = stableFrames;
+    constexpr int runEndFrame = runStartFrame + runFrames;
+    constexpr int frameCount = runEndFrame + stableFrames;
+    constexpr double frameSeconds = 0.01;
+    constexpr float beforeHz = 200.0f;
+    constexpr float afterHz = 230.0f;
+    const float beforeReferenceHz = static_cast<float>(beforeHz * std::exp2(30.0 / 1200.0));
+    const float afterReferenceHz = static_cast<float>(afterHz * std::exp2(-20.0 / 1200.0));
+    const std::vector<float> runNotes{280.0f, 190.0f, 300.0f, 210.0f, 270.0f, 200.0f};
+    const std::vector<int> onsetShifts{2, 3, 2, 3, 2, 3};
+
+    std::vector<float> targetF0(frameCount, beforeHz);
+    std::vector<float> referenceF0(frameCount, beforeReferenceHz);
+    std::vector<Note> targetNotes;
+    targetNotes.push_back({0.0, runStartFrame * frameSeconds, beforeHz});
+    for (int noteIndex = 0; noteIndex < noteCount; ++noteIndex) {
+        const int start = runStartFrame + noteIndex * framesPerNote;
+        const int end = start + framesPerNote;
+        targetNotes.push_back({start * frameSeconds, end * frameSeconds,
+                               runNotes[static_cast<size_t>(noteIndex)]});
+        std::fill(targetF0.begin() + start, targetF0.begin() + end,
+                  runNotes[static_cast<size_t>(noteIndex)]);
+    }
+    targetNotes.push_back({runEndFrame * frameSeconds, frameCount * frameSeconds, afterHz});
+    std::fill(targetF0.begin() + runEndFrame, targetF0.end(), afterHz);
+    std::fill(referenceF0.begin() + runStartFrame, referenceF0.begin() + runEndFrame,
+              runNotes.back());
+    for (int noteIndex = 0; noteIndex < noteCount; ++noteIndex) {
+        const int start = runStartFrame + noteIndex * framesPerNote
+            + onsetShifts[static_cast<size_t>(noteIndex)];
+        const int end = noteIndex + 1 == noteCount ? runEndFrame
+            : runStartFrame + (noteIndex + 1) * framesPerNote
+                + onsetShifts[static_cast<size_t>(noteIndex + 1)];
+        for (int frame = start; frame < end; ++frame)
+            referenceF0[static_cast<size_t>(frame)] = runNotes[static_cast<size_t>(noteIndex)];
+    }
+    std::fill(referenceF0.begin() + runEndFrame, referenceF0.end(), afterReferenceHz);
+
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    target.notes = std::move(targetNotes);
     const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
         makeCurve(std::move(referenceF0), {}, 1, 100.0)};
 
@@ -399,10 +503,20 @@ bool testLegatoNotesKeepIndependentReferenceOffsets()
         return false;
 
     const auto& corrected = plan.segments[0].f0Data;
-    return nearPitch(corrected[2], firstReferenceHz, 2.0)
-        && nearPitch(corrected[shortNoteFrames - 3], firstReferenceHz, 2.0)
-        && nearPitch(corrected[shortNoteFrames + 5], secondReferenceHz, 2.0)
-        && nearPitch(corrected[frameCount - 1], secondReferenceHz, 2.0);
+    if (!nearPitch(corrected[40], beforeReferenceHz, 2.0)
+        || !nearPitch(corrected[frameCount - 40], afterReferenceHz, 2.0))
+        return false;
+    double previousOffsetCents = std::numeric_limits<double>::infinity();
+    for (int frame = runStartFrame; frame < runEndFrame; ++frame) {
+        const double offsetCents = 1200.0 * std::log2(
+            static_cast<double>(corrected[static_cast<size_t>(frame)])
+                / target.curve->getOriginalF0()[static_cast<size_t>(frame)]);
+        if (offsetCents > previousOffsetCents + 0.05
+            || offsetCents > 30.0 + 2.0 || offsetCents < -20.0 - 2.0)
+            return false;
+        previousOffsetCents = offsetCents;
+    }
+    return true;
 }
 
 bool vibratoRateIsPreserved(double vibratoRateHz)
@@ -509,28 +623,32 @@ int main()
         std::fputs("FAIL: Reference tuning moves the pitch center without changing register\n", stderr);
         return 1;
     }
-    if (!testRunStartMedianDoesNotLookPastReferenceNoteChange()) {
-        std::fputs("FAIL: Reference tuning uses a symmetric median window at run edges\n", stderr);
+    if (!testRunStartHoldsNearestStableOffset()) {
+        std::fputs("FAIL: Reference tuning holds the nearest stable offset at run edges\n", stderr);
         return 1;
     }
     if (!testOrnamentBriefReturnDoesNotHideSustainedReferenceStep()) {
         std::fputs("FAIL: Reference tuning keeps a sustained step after an ornament and brief return\n", stderr);
         return 1;
     }
-    if (!testNoteBoundaryReferenceOvershootIsMedianFiltered()) {
-        std::fputs("FAIL: Reference tuning median-filters note boundary overshoot\n", stderr);
+    if (!testNoteBoundaryReferenceOvershootIsNotAnAnchor()) {
+        std::fputs("FAIL: Reference tuning does not use note-boundary overshoot as an anchor\n", stderr);
         return 1;
     }
-    if (!testLeadingReferenceNoteChangeKeepsJumpBoundary()) {
-        std::fputs("FAIL: Reference tuning keeps a leading note change boundary\n", stderr);
+    if (!testShortLeadingReferenceNoteDoesNotBecomeStableAnchor()) {
+        std::fputs("FAIL: Reference tuning ignores an unstable leading note\n", stderr);
         return 1;
     }
     if (!testShortReferenceOrnamentDoesNotBecomeTargetOrnament()) {
         std::fputs("FAIL: Reference tuning smooths short reference ornaments into the pitch center\n", stderr);
         return 1;
     }
-    if (!testLegatoNotesKeepIndependentReferenceOffsets()) {
-        std::fputs("FAIL: Reference tuning keeps legato note offsets independent\n", stderr);
+    if (!testLegatoRunKeepsTargetShape()) {
+        std::fputs("FAIL: Reference tuning preserves the target's fast run shape\n", stderr);
+        return 1;
+    }
+    if (!testRunOffsetInterpolatesBetweenStablePassages()) {
+        std::fputs("FAIL: Reference tuning interpolates offsets between stable passages\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {

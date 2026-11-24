@@ -9,6 +9,9 @@ namespace {
 constexpr double kReferencePitchCenterWindowSeconds = 0.4;
 constexpr double kReferencePitchOffsetJumpThresholdCents = 50.0;
 constexpr double kReferencePitchOffsetMedianWindowSeconds = 0.12;
+constexpr double kReferencePitchStabilitySlopeWindowSeconds = 0.05;
+constexpr double kReferencePitchMaximumStableSlopeCentsPerSecond = 1640.0;
+constexpr double kReferencePitchMinimumStableStretchSeconds = 0.08;
 constexpr double kReferencePitchChangeToleranceCents = 0.5;
 constexpr double kPi = 3.14159265358979323846;
 
@@ -86,6 +89,10 @@ PitchReferenceCorrection planPitchReferenceCorrection(
     if (centerWindowFrames % 2 == 0)
         ++centerWindowFrames;
     const int centerWindowRadius = centerWindowFrames / 2;
+    const int stabilitySlopeRadiusFrames = std::max(1, static_cast<int>(std::ceil(
+        kReferencePitchStabilitySlopeWindowSeconds / (2.0 * frameSeconds))));
+    const int minimumStableStretchFrames = std::max(1, static_cast<int>(std::ceil(
+        kReferencePitchMinimumStableStretchSeconds / frameSeconds)));
     int medianWindowFrames = std::max(1, static_cast<int>(std::lround(
         kReferencePitchOffsetMedianWindowSeconds / frameSeconds)));
     if (medianWindowFrames % 2 == 0)
@@ -96,6 +103,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
     struct RunFrame
     {
         float baseHz;
+        float referenceHz;
         float offsetCents;
     };
 
@@ -106,7 +114,37 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             if (run.empty())
                 return;
             const int count = static_cast<int>(run.size());
-            std::vector<int> noteBoundaries{0, count};
+            std::vector<bool> stableCandidate(static_cast<size_t>(count), false);
+            for (int i = stabilitySlopeRadiusFrames;
+                 i + stabilitySlopeRadiusFrames < count; ++i) {
+                const auto slopeCentsPerSecond = [&](float leftHz, float rightHz) {
+                    return std::abs(1200.0 * std::log2(
+                        static_cast<double>(rightHz) / leftHz))
+                        / (2.0 * stabilitySlopeRadiusFrames * frameSeconds);
+                };
+                const auto& left = run[static_cast<size_t>(i - stabilitySlopeRadiusFrames)];
+                const auto& right = run[static_cast<size_t>(i + stabilitySlopeRadiusFrames)];
+                stableCandidate[static_cast<size_t>(i)] =
+                    slopeCentsPerSecond(left.baseHz, right.baseHz)
+                        <= kReferencePitchMaximumStableSlopeCentsPerSecond
+                    && slopeCentsPerSecond(left.referenceHz, right.referenceHz)
+                        <= kReferencePitchMaximumStableSlopeCentsPerSecond;
+            }
+
+            std::vector<std::pair<int, int>> stableStretches;
+            for (int i = 0; i < count;) {
+                if (!stableCandidate[static_cast<size_t>(i)]) {
+                    ++i;
+                    continue;
+                }
+                const int start = i;
+                while (i < count && stableCandidate[static_cast<size_t>(i)])
+                    ++i;
+                if (i - start >= minimumStableStretchFrames)
+                    stableStretches.emplace_back(start, i);
+            }
+
+            std::vector<int> noteBoundaries;
             for (const auto& note : target.notes) {
                 const int noteStart = timeline.nearestFrameBoundary(note.startTime) - runStartFrame;
                 const int noteEnd = timeline.nearestFrameBoundary(note.endTime) - runStartFrame;
@@ -119,53 +157,124 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             noteBoundaries.erase(std::unique(noteBoundaries.begin(), noteBoundaries.end()),
                                  noteBoundaries.end());
 
-            std::vector<float> filteredOffsets(static_cast<size_t>(count));
+            std::vector<float> filteredOffsets(static_cast<size_t>(count), 0.0f);
             std::vector<float> medianWindow;
             medianWindow.reserve(static_cast<size_t>(medianWindowFrames));
-            for (int i = 0; i < count; ++i) {
-                const int radius = std::min(medianWindowRadius, std::min(i, count - 1 - i));
+            for (const auto& [stretchStart, stretchEnd] : stableStretches) {
+                for (int i = stretchStart; i < stretchEnd; ++i) {
+                    const int radius = std::min(medianWindowRadius,
+                        std::min(i - stretchStart, stretchEnd - 1 - i));
+                    medianWindow.clear();
+                    for (int j = i - radius; j <= i + radius; ++j)
+                        medianWindow.push_back(run[static_cast<size_t>(j)].offsetCents);
+                    std::sort(medianWindow.begin(), medianWindow.end());
+                    const size_t middle = medianWindow.size() / 2;
+                    float median = medianWindow[middle];
+                    if (medianWindow.size() % 2 == 0)
+                        median = (medianWindow[middle - 1] + medianWindow[middle]) * 0.5f;
+                    filteredOffsets[static_cast<size_t>(i)] = median;
+                }
+            }
+
+            struct StableOffset
+            {
+                int frame;
+                float cents;
+                int smoothingSegment;
+            };
+            std::vector<StableOffset> stableOffsets;
+            int smoothingSegment = 0;
+            for (size_t stretchIndex = 0; stretchIndex < stableStretches.size(); ++stretchIndex) {
+                const auto [stretchStart, stretchEnd] = stableStretches[stretchIndex];
+                if (stretchIndex > 0) {
+                    const int previousEnd = stableStretches[stretchIndex - 1].second;
+                    const bool noteBoundary = std::any_of(noteBoundaries.begin(), noteBoundaries.end(),
+                        [previousEnd, stretchStart](int boundary) {
+                            return boundary > previousEnd - 1 && boundary <= stretchStart;
+                        });
+                    const double offsetJump = std::abs(
+                        static_cast<double>(filteredOffsets[static_cast<size_t>(stretchStart)])
+                        - filteredOffsets[static_cast<size_t>(previousEnd - 1)]);
+                    if (noteBoundary || offsetJump > kReferencePitchOffsetJumpThresholdCents)
+                        ++smoothingSegment;
+                }
+                for (int frame = stretchStart; frame < stretchEnd; ++frame) {
+                    if (frame > stretchStart
+                        && std::binary_search(noteBoundaries.begin(), noteBoundaries.end(), frame))
+                        ++smoothingSegment;
+                    stableOffsets.push_back({frame, filteredOffsets[static_cast<size_t>(frame)],
+                                             smoothingSegment});
+                }
+            }
+
+            std::vector<float> smoothedOffsets(static_cast<size_t>(count), 0.0f);
+            if (stableOffsets.empty()) {
                 medianWindow.clear();
-                for (int j = i - radius; j <= i + radius; ++j)
-                    medianWindow.push_back(run[static_cast<size_t>(j)].offsetCents);
+                for (const auto& frame : run)
+                    medianWindow.push_back(frame.offsetCents);
                 std::sort(medianWindow.begin(), medianWindow.end());
                 const size_t middle = medianWindow.size() / 2;
                 float median = medianWindow[middle];
                 if (medianWindow.size() % 2 == 0)
                     median = (medianWindow[middle - 1] + medianWindow[middle]) * 0.5f;
-                filteredOffsets[static_cast<size_t>(i)] = median;
-            }
+                std::fill(smoothedOffsets.begin(), smoothedOffsets.end(), median);
+            } else {
+                std::vector<float> stableSmoothedOffsets(stableOffsets.size());
+                for (size_t i = 0; i < stableOffsets.size(); ++i) {
+                    double weightedOffsetSum = 0.0;
+                    double weightSum = 0.0;
+                    for (size_t j = i; j > 0;) {
+                        --j;
+                        if (stableOffsets[i].smoothingSegment != stableOffsets[j].smoothingSegment
+                            || stableOffsets[i].frame - stableOffsets[j].frame > centerWindowRadius)
+                            break;
+                        const int lag = stableOffsets[i].frame - stableOffsets[j].frame;
+                        const double weight = centerWindowRadius == 0 ? 1.0
+                            : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
+                        weightedOffsetSum += stableOffsets[j].cents * weight;
+                        weightSum += weight;
+                    }
+                    for (size_t j = i; j < stableOffsets.size(); ++j) {
+                        if (stableOffsets[i].smoothingSegment != stableOffsets[j].smoothingSegment
+                            || stableOffsets[j].frame - stableOffsets[i].frame > centerWindowRadius)
+                            break;
+                        const int lag = stableOffsets[j].frame - stableOffsets[i].frame;
+                        const double weight = centerWindowRadius == 0 ? 1.0
+                            : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
+                        weightedOffsetSum += stableOffsets[j].cents * weight;
+                        weightSum += weight;
+                    }
+                    stableSmoothedOffsets[i] = static_cast<float>(weightedOffsetSum / weightSum);
+                }
 
-            std::vector<int> boundaries = noteBoundaries;
-            for (int i = 1; i < count; ++i) {
-                if (std::abs(static_cast<double>(filteredOffsets[static_cast<size_t>(i)])
-                        - filteredOffsets[static_cast<size_t>(i - 1)]) > kReferencePitchOffsetJumpThresholdCents)
-                    boundaries.push_back(i);
+                for (int frame = 0; frame < count; ++frame) {
+                    const auto right = std::upper_bound(stableOffsets.begin(), stableOffsets.end(), frame,
+                        [](int value, const StableOffset& offset) { return value < offset.frame; });
+                    if (right == stableOffsets.begin()) {
+                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.front();
+                    } else if (right == stableOffsets.end()) {
+                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.back();
+                    } else {
+                        const size_t rightIndex = static_cast<size_t>(right - stableOffsets.begin());
+                        const size_t leftIndex = rightIndex - 1;
+                        const int leftFrame = stableOffsets[leftIndex].frame;
+                        const int rightFrame = stableOffsets[rightIndex].frame;
+                        const double fraction = static_cast<double>(frame - leftFrame)
+                            / (rightFrame - leftFrame);
+                        smoothedOffsets[static_cast<size_t>(frame)] = static_cast<float>(
+                            stableSmoothedOffsets[leftIndex]
+                            + fraction * (stableSmoothedOffsets[rightIndex] - stableSmoothedOffsets[leftIndex]));
+                    }
+                }
             }
-            std::sort(boundaries.begin(), boundaries.end());
-            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
 
             PitchCorrectionSegment segment{runStartFrame, runStartFrame + count, {},
                                            PitchCorrectionSegment::Source::HandDraw};
             segment.f0Data.reserve(run.size());
             bool changed = false;
             for (int i = 0; i < count; ++i) {
-                const auto endBoundary = std::upper_bound(boundaries.begin(), boundaries.end(), i);
-                const int smoothingEnd = *endBoundary;
-                const int smoothingStart = *(endBoundary - 1);
-                const int begin = std::max(smoothingStart, i - centerWindowRadius);
-                const int end = std::min(smoothingEnd, i + centerWindowRadius + 1);
-                double weightedOffsetSum = 0.0;
-                double weightSum = 0.0;
-                for (int j = begin; j < end; ++j) {
-                    const int lag = j > i ? j - i : i - j;
-                    const double weight = centerWindowRadius == 0 ? 1.0
-                        : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
-                    weightedOffsetSum += filteredOffsets[static_cast<size_t>(j)] * weight;
-                    weightSum += weight;
-                }
-                const double smoothedCents = weightedOffsetSum / weightSum;
                 const float correctedHz = static_cast<float>(run[static_cast<size_t>(i)].baseHz
-                    * std::exp2(smoothedCents / 1200.0));
+                    * std::exp2(smoothedOffsets[static_cast<size_t>(i)] / 1200.0));
                 segment.f0Data.push_back(correctedHz);
                 const float currentHz = effectivePitch(target, runStartFrame + i);
                 if (!isVoiced(currentHz) || std::abs(1200.0 * std::log2(
@@ -196,7 +305,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             double offsetCents = 1200.0 * std::log2(
                 static_cast<double>(referenceHz) / baseHz);
             offsetCents -= 1200.0 * std::round(offsetCents / 1200.0);
-            run.push_back({baseHz, static_cast<float>(offsetCents)});
+            run.push_back({baseHz, referenceHz, static_cast<float>(offsetCents)});
         }
         finishRun();
     }
