@@ -124,6 +124,21 @@ std::vector<PitchReferenceSnapshot> readPitchReferences(
 
 class TimingStrengthControl final : public juce::Component
 {
+    class Slider final : public juce::Slider
+    {
+    public:
+        double snapValue(double attemptedValue, DragMode dragMode) override
+        {
+            if (dragMode == notDragging)
+                return attemptedValue;
+            if (attemptedValue >= 47.0 && attemptedValue <= 53.0)
+                return 50.0;
+            if (attemptedValue >= 97.0)
+                return 100.0;
+            return attemptedValue;
+        }
+    };
+
 public:
     using PlanForStrength = std::function<TimingAlignment(double)>;
 
@@ -136,19 +151,14 @@ public:
         addAndMakeVisible(clipLabel_);
 
         slider_.setSliderStyle(juce::Slider::LinearHorizontal);
-        slider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 54, 20);
+        slider_.setTextBoxStyle(juce::Slider::TextBoxRight, true, 54, 20);
         slider_.setRange(0, 100, 1);
         slider_.setTextValueSuffix("%");
         slider_.setTitle(clipName);
+        slider_.setWantsKeyboardFocus(true);
         slider_.setDoubleClickReturnValue(true, initialStrength);
         slider_.onValueChange = [this] {
-            int strength = static_cast<int>(std::lround(slider_.getValue()));
-            const int snapped = strength >= 47 && strength <= 53 ? 50
-                : strength >= 97 ? 100 : strength;
-            if (strength != snapped) {
-                slider_.setValue(snapped, juce::dontSendNotification);
-                strength = snapped;
-            }
+            const int strength = static_cast<int>(std::lround(slider_.getValue()));
             currentPlan_ = strength == 0 ? TimingAlignment{} : planForStrength_(strength / 100.0);
             updateReadout();
         };
@@ -208,7 +218,7 @@ private:
     PlanForStrength planForStrength_;
     TimingAlignment currentPlan_;
     juce::Label clipLabel_, gentleLabel_, tightLabel_, readout_;
-    juce::Slider slider_;
+    Slider slider_;
 };
 
 class TimingStrengthRows final : public juce::Component
