@@ -22,6 +22,7 @@ public:
         if (!playing)
         {
             initialized_ = false;
+            holding_ = false;
             return {false, canonical};
         }
 
@@ -35,8 +36,21 @@ public:
 
         const bool transportJump = initialized_ && epoch != lastEpoch_
             && std::abs(canonical - lastHorizon_) > seekThreshold;
-        if (!initialized_ || transportJump || target < lastDisplayed_ - seekThreshold)
+        if (initialized_ && target < lastDisplayed_)
+        {
+            if (!holding_)
+                holdStartedAt_ = nowClockSeconds;
+            holding_ = true;
+        }
+        else
+            holding_ = false;
+
+        if (!initialized_ || transportJump || target < lastDisplayed_ - seekThreshold
+            || (holding_ && nowClockSeconds - holdStartedAt_ >= maxHoldDuration))
+        {
             lastDisplayed_ = target;
+            holding_ = false;
+        }
         else
             lastDisplayed_ = std::max(lastDisplayed_, target);
 
@@ -48,9 +62,12 @@ public:
 
     static constexpr double maxOvershoot = 0.5;
     static constexpr double seekThreshold = 0.25;
+    static constexpr double maxHoldDuration = 0.1;
 
 private:
     bool initialized_ = false;
+    bool holding_ = false;
+    double holdStartedAt_ = 0.0;
     double lastDisplayed_ = 0.0;
     double lastHorizon_ = 0.0;
     uint64_t lastEpoch_ = 0;

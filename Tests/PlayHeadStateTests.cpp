@@ -303,6 +303,42 @@ void testPresenterOffsetsAndTransportChanges()
     expect(presenter.present(empty, 17.0).seconds == 0.2, "invalid anchor falls back to canonical time");
 }
 
+void testPresenterShortLoopsAndSmallSeeks()
+{
+    OpenTune::PlayHeadState state;
+    OpenTune::PlayHeadPresenter presenter;
+    for (int frame = 0; frame < 120; ++frame)
+    {
+        const double clock = 10.0 + frame * 0.01;
+        const double target = (frame % 20) * 0.01;
+        const auto update = state.update(makePosition(target, true));
+        state.presentationProjection.tryPublish(target, clock, target + 0.01, update.epoch);
+        const double displayed = presenter.present(state, clock).seconds;
+        if (frame % 20 >= 11)
+            expect(std::abs(displayed - target) < 1.0e-9,
+                   "short loop follows target within hold duration plus a frame");
+    }
+
+    OpenTune::PlayHeadState seekState;
+    OpenTune::PlayHeadPresenter seekPresenter;
+    auto update = seekState.update(makePosition(1.0, true));
+    seekState.presentationProjection.tryPublish(1.0, 20.0, 1.01, update.epoch);
+    seekPresenter.present(seekState, 20.0);
+    for (int frame = 0; frame <= 12; ++frame)
+    {
+        const double target = 0.9 + frame * 0.005;
+        const double clock = 20.01 + frame * 0.01;
+        update = seekState.update(makePosition(target, true));
+        seekState.presentationProjection.tryPublish(target, clock, target + 0.005, update.epoch);
+        const double displayed = seekPresenter.present(seekState, clock).seconds;
+        if (frame == 0)
+            expect(displayed == 1.0, "small backwards target initially holds to suppress flicker");
+        if (frame >= 11)
+            expect(std::abs(displayed - target) < 1.0e-9,
+                   "small seek snaps within hold duration plus a frame");
+    }
+}
+
 void testPresenterDenseCallbacks()
 {
     OpenTune::PlayHeadState state;
@@ -333,7 +369,8 @@ int main()
     testPresenterDuringCallbackGaps();
     testPresenterOffsetsAndTransportChanges();
     testPresenterDenseCallbacks();
+    testPresenterShortLoopsAndSmallSeeks();
     if (failures == 0)
-        std::puts("PlayHeadStateTests: PASS (earlier projection regressions, sparse bursts, offset writers, seek/loop, stop/reset, bounded overshoot, dense callbacks, missing/invalid anchors)");
+        std::puts("PlayHeadStateTests: PASS (earlier projection regressions, sparse bursts, offset writers, seek/loop, short loops, small seeks, stop/reset, bounded overshoot, dense callbacks, missing/invalid anchors)");
     return failures == 0 ? 0 : 1;
 }
