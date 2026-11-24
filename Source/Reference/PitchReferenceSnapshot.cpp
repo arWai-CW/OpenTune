@@ -33,6 +33,8 @@ double canonicalOffsetCents(double cents)
         cents -= 1200.0;
     while (cents < -600.0)
         cents += 1200.0;
+    if (cents == -600.0)
+        return 600.0;
     return cents;
 }
 
@@ -236,26 +238,29 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     const double previousOffset = filteredOffsets[static_cast<size_t>(previousEnd - 1)];
                     const double nextOffset = filteredOffsets[static_cast<size_t>(stretchStart)];
                     const double wrappedJump = wrapOffsetCents(nextOffset - previousOffset);
-                    if (noteBoundary || std::abs(wrappedJump) > kReferencePitchOffsetJumpThresholdCents) {
-                        ++smoothingSegment;
-                    } else {
-                        const float stretchShift = static_cast<float>(
-                            std::round((previousOffset - nextOffset) / 1200.0) * 1200.0);
-                        medianWindow.clear();
+                    const double stretchShift = std::round(
+                        (previousOffset - nextOffset) / 1200.0) * 1200.0;
+                    medianWindow.clear();
+                    for (int frame = stretchStart; frame < stretchEnd; ++frame)
+                        medianWindow.push_back(filteredOffsets[static_cast<size_t>(frame)]);
+                    std::sort(medianWindow.begin(), medianWindow.end());
+                    const size_t middle = medianWindow.size() / 2;
+                    double stretchMedian = medianWindow[middle];
+                    if (medianWindow.size() % 2 == 0)
+                        stretchMedian = 0.5 * (medianWindow[middle - 1] + medianWindow[middle]);
+                    const bool canShift = std::abs(wrappedJump)
+                            <= kReferencePitchOctaveContinuityCents
+                        && std::abs(stretchMedian + stretchShift) <= 700.0;
+                    if (canShift) {
                         for (int frame = stretchStart; frame < stretchEnd; ++frame)
-                            medianWindow.push_back(filteredOffsets[static_cast<size_t>(frame)]);
-                        std::sort(medianWindow.begin(), medianWindow.end());
-                        const size_t middle = medianWindow.size() / 2;
-                        double stretchMedian = medianWindow[middle];
-                        if (medianWindow.size() % 2 == 0)
-                            stretchMedian = 0.5 * (medianWindow[middle - 1] + medianWindow[middle]);
-                        if (std::abs(stretchMedian + stretchShift) <= 700.0) {
-                            for (int frame = stretchStart; frame < stretchEnd; ++frame)
-                                filteredOffsets[static_cast<size_t>(frame)] += stretchShift;
-                        } else {
-                            ++smoothingSegment;
-                        }
+                            filteredOffsets[static_cast<size_t>(frame)] += static_cast<float>(stretchShift);
                     }
+                    const bool shiftRefused = std::abs(wrappedJump)
+                        <= kReferencePitchOffsetJumpThresholdCents && !canShift;
+                    if (noteBoundary
+                        || std::abs(wrappedJump) > kReferencePitchOffsetJumpThresholdCents
+                        || shiftRefused)
+                        ++smoothingSegment;
                 }
                 for (int frame = stretchStart; frame < stretchEnd; ++frame) {
                     if (frame > stretchStart
@@ -320,29 +325,13 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     stableSmoothedOffsets[i] = static_cast<float>(weightedOffsetSum / weightSum);
                 }
 
-                std::vector<float> interpolationOffsets(stableSmoothedOffsets.size());
-                interpolationOffsets.front() = static_cast<float>(
-                    canonicalOffsetCents(stableSmoothedOffsets.front()));
-                for (size_t i = 1; i < stableSmoothedOffsets.size(); ++i) {
-                    const double deltaCents = wrapOffsetCents(
-                        stableSmoothedOffsets[i] - stableSmoothedOffsets[i - 1]);
-                    if (std::abs(deltaCents) <= kReferencePitchOctaveContinuityCents
-                        && std::abs(interpolationOffsets[i - 1] + deltaCents) <= 700.0) {
-                        interpolationOffsets[i] = interpolationOffsets[i - 1]
-                            + static_cast<float>(deltaCents);
-                    } else {
-                        interpolationOffsets[i] = static_cast<float>(
-                            canonicalOffsetCents(stableSmoothedOffsets[i]));
-                    }
-                }
-
                 for (int frame = 0; frame < count; ++frame) {
                     const auto right = std::upper_bound(stableOffsets.begin(), stableOffsets.end(), frame,
                         [](int value, const StableOffset& offset) { return value < offset.frame; });
                     if (right == stableOffsets.begin()) {
-                        smoothedOffsets[static_cast<size_t>(frame)] = interpolationOffsets.front();
+                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.front();
                     } else if (right == stableOffsets.end()) {
-                        smoothedOffsets[static_cast<size_t>(frame)] = interpolationOffsets.back();
+                        smoothedOffsets[static_cast<size_t>(frame)] = stableSmoothedOffsets.back();
                     } else {
                         const size_t rightIndex = static_cast<size_t>(right - stableOffsets.begin());
                         const size_t leftIndex = rightIndex - 1;
@@ -351,8 +340,9 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         const double fraction = static_cast<double>(frame - leftFrame)
                             / (rightFrame - leftFrame);
                         smoothedOffsets[static_cast<size_t>(frame)] = static_cast<float>(
-                            interpolationOffsets[leftIndex]
-                            + fraction * (interpolationOffsets[rightIndex] - interpolationOffsets[leftIndex]));
+                            stableSmoothedOffsets[leftIndex]
+                            + fraction * (stableSmoothedOffsets[rightIndex]
+                                - stableSmoothedOffsets[leftIndex]));
                     }
                 }
             }

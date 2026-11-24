@@ -558,6 +558,90 @@ bool testReferenceOffsetRampUnwrapsAcrossTritone()
     return true;
 }
 
+bool testSustainedOffsetRampPastSevenHundredHasNoOctaveDrop()
+{
+    constexpr int frameCount = 101;
+    constexpr double frameSeconds = 0.01;
+    constexpr float targetHz = 200.0f;
+    constexpr double firstOffsetCents = 650.0;
+    constexpr double lastOffsetCents = 760.0;
+    std::vector<float> targetF0(frameCount, targetHz);
+    std::vector<float> referenceF0;
+    referenceF0.reserve(frameCount);
+    for (int frame = 0; frame < frameCount; ++frame) {
+        const double fraction = static_cast<double>(frame) / (frameCount - 1);
+        const double offsetCents = firstOffsetCents
+            + fraction * (lastOffsetCents - firstOffsetCents);
+        referenceF0.push_back(static_cast<float>(
+            targetHz * std::exp2(offsetCents / 1200.0)));
+    }
+
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(targetF0, {}, 1, 100.0)};
+    target.notes.push_back({0.0, duration, targetHz});
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int frame = 1; frame < frameCount; ++frame) {
+        const double outputChangeCents = 1200.0 * std::log2(
+            static_cast<double>(corrected[static_cast<size_t>(frame)])
+                / corrected[static_cast<size_t>(frame - 1)]);
+        const double targetChangeCents = 1200.0 * std::log2(
+            static_cast<double>(targetF0[static_cast<size_t>(frame)])
+                / targetF0[static_cast<size_t>(frame - 1)]);
+        if (std::abs(outputChangeCents - targetChangeCents) > 20.0)
+            return false;
+    }
+    return true;
+}
+
+bool testStableStretchKeepsUpperOffsetBranchAcrossFallingTritone()
+{
+    constexpr int frameCount = 101;
+    constexpr double frameSeconds = 0.01;
+    constexpr float targetHz = 200.0f;
+    constexpr double firstOffsetCents = 615.0;
+    constexpr double lastOffsetCents = 585.0;
+    std::vector<float> targetF0(frameCount, targetHz);
+    std::vector<float> referenceF0;
+    referenceF0.reserve(frameCount);
+    for (int frame = 0; frame < frameCount; ++frame) {
+        const double fraction = static_cast<double>(frame) / (frameCount - 1);
+        const double offsetCents = firstOffsetCents
+            + fraction * (lastOffsetCents - firstOffsetCents);
+        referenceF0.push_back(static_cast<float>(
+            targetHz * std::exp2(offsetCents / 1200.0)));
+    }
+
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(targetF0, {}, 1, 100.0)};
+    target.notes.push_back({0.0, duration, targetHz});
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(referenceF0, {}, 1, 100.0)};
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int frame = 0; frame < frameCount; ++frame) {
+        const double toleranceCents = frame < 20 || frame >= frameCount - 20 ? 5.0 : 2.0;
+        if (!nearPitch(corrected[static_cast<size_t>(frame)],
+                referenceF0[static_cast<size_t>(frame)], toleranceCents))
+            return false;
+    }
+    return true;
+}
+
 bool testReferenceOnsetGlideDoesNotSetStableOffsetBranch()
 {
     constexpr int frameCount = 120;
@@ -734,31 +818,36 @@ bool testChainedOffsetAlignmentStaysWithinRegister()
 {
     const auto phraseStaysWithinRegister = [](
         const std::vector<double>& offsetsCents,
-        int transitionFrames,
+        const std::vector<int>& transitionFrames,
         double targetStepCents) {
         constexpr int stableFrames = 40;
         constexpr double frameSeconds = 0.01;
         constexpr float targetHz = 200.0f;
-        const int frameCount = static_cast<int>(offsetsCents.size()) * stableFrames
-            + (static_cast<int>(offsetsCents.size()) - 1) * transitionFrames;
+        int frameCount = static_cast<int>(offsetsCents.size()) * stableFrames;
+        for (const int frames : transitionFrames)
+            frameCount += frames;
         std::vector<float> targetF0;
         std::vector<float> referenceF0;
+        std::vector<int> noteStarts;
         targetF0.reserve(static_cast<size_t>(frameCount));
         referenceF0.reserve(static_cast<size_t>(frameCount));
+        noteStarts.reserve(offsetsCents.size());
 
         int frame = 0;
         for (size_t note = 0; note < offsetsCents.size(); ++note) {
             const double noteBaseHz = targetHz * std::exp2(note * targetStepCents / 1200.0);
+            noteStarts.push_back(frame);
             for (int i = 0; i < stableFrames; ++i, ++frame) {
                 targetF0.push_back(static_cast<float>(noteBaseHz));
                 referenceF0.push_back(static_cast<float>(
                     noteBaseHz * std::exp2(offsetsCents[note] / 1200.0)));
             }
             if (note + 1 < offsetsCents.size()) {
+                const int noteTransitionFrames = transitionFrames[note];
                 const double nextBaseHz = targetHz
                     * std::exp2((note + 1) * targetStepCents / 1200.0);
-                for (int i = 1; i <= transitionFrames; ++i, ++frame) {
-                    const double fraction = static_cast<double>(i) / transitionFrames;
+                for (int i = 1; i <= noteTransitionFrames; ++i, ++frame) {
+                    const double fraction = static_cast<double>(i) / noteTransitionFrames;
                     const double baseHz = noteBaseHz + fraction * (nextBaseHz - noteBaseHz);
                     const double offsetCents = offsetsCents[note]
                         + fraction * (offsetsCents[note + 1] - offsetsCents[note]);
@@ -781,26 +870,33 @@ bool testChainedOffsetAlignmentStaysWithinRegister()
             return false;
 
         const auto& corrected = plan.segments[0].f0Data;
-        for (size_t note = 0; note < offsetsCents.size(); ++note) {
-            const int noteStart = static_cast<int>(note) * (stableFrames + transitionFrames);
-            const double baseHz = targetHz * std::exp2(note * targetStepCents / 1200.0);
-            for (int frameInNote : {noteStart + 10, noteStart + 20, noteStart + 30}) {
-                const double outputOffsetCents = 1200.0 * std::log2(
-                    static_cast<double>(corrected[static_cast<size_t>(frameInNote)]) / baseHz);
-                if (std::abs(outputOffsetCents) > 700.0)
+        const auto& targetBaseF0 = target.curve->getOriginalF0();
+        for (int frame = 0; frame < frameCount; ++frame) {
+            const double outputOffsetCents = 1200.0 * std::log2(
+                static_cast<double>(corrected[static_cast<size_t>(frame)])
+                    / targetBaseF0[static_cast<size_t>(frame)]);
+            if (std::abs(outputOffsetCents) > 800.0)
+                return false;
+            if (frame > 0) {
+                const double outputChangeCents = 1200.0 * std::log2(
+                    static_cast<double>(corrected[static_cast<size_t>(frame)])
+                        / corrected[static_cast<size_t>(frame - 1)]);
+                const double targetChangeCents = 1200.0 * std::log2(
+                    static_cast<double>(targetBaseF0[static_cast<size_t>(frame)])
+                        / targetBaseF0[static_cast<size_t>(frame - 1)]);
+                if (std::abs(outputChangeCents - targetChangeCents) > 20.0)
                     return false;
             }
         }
-        const size_t finalNoteFrame = (offsetsCents.size() - 1)
-            * static_cast<size_t>(stableFrames + transitionFrames) + 20;
-        const double finalBaseHz = targetHz
-            * std::exp2((offsetsCents.size() - 1) * targetStepCents / 1200.0);
-        return nearPitch(corrected[finalNoteFrame], static_cast<float>(finalBaseHz), 2.0);
+        const size_t finalNoteFrame = static_cast<size_t>(noteStarts.back() + 20);
+        return nearPitch(corrected[finalNoteFrame], targetBaseF0[finalNoteFrame], 2.0);
     };
 
-    return phraseStaysWithinRegister({440.0, 520.0, 600.0, 680.0, 760.0, 0.0}, 10, 0.0)
+    return phraseStaysWithinRegister({440.0, 520.0, 600.0, 680.0, 760.0, 0.0},
+            {10, 10, 10, 10, 45}, 0.0)
         && phraseStaysWithinRegister(
-            {440.0, 480.0, 520.0, 560.0, 600.0, 640.0, 680.0, 720.0, 0.0}, 1, 200.0);
+            {440.0, 480.0, 520.0, 560.0, 600.0, 640.0, 680.0, 720.0, 0.0},
+            {2, 2, 2, 2, 2, 2, 2, 40}, 200.0);
 }
 
 bool testNoAnchorFallbackUsesCircularMedian()
@@ -967,6 +1063,14 @@ int main()
     }
     if (!testReferenceOffsetRampUnwrapsAcrossTritone()) {
         std::fputs("FAIL: Reference tuning unwraps offset ramps across the tritone\n", stderr);
+        return 1;
+    }
+    if (!testSustainedOffsetRampPastSevenHundredHasNoOctaveDrop()) {
+        std::fputs("FAIL: Reference tuning keeps a sustained offset ramp continuous above 700 cents\n", stderr);
+        return 1;
+    }
+    if (!testStableStretchKeepsUpperOffsetBranchAcrossFallingTritone()) {
+        std::fputs("FAIL: Reference tuning keeps a stable stretch on its upper offset branch\n", stderr);
         return 1;
     }
     if (!testReferenceOnsetGlideDoesNotSetStableOffsetBranch()) {
