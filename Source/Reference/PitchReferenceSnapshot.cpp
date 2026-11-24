@@ -227,8 +227,17 @@ PitchReferenceCorrection planPitchReferenceCorrection(
             };
             std::vector<StableOffset> stableOffsets;
             int smoothingSegment = 0;
+            double previousStretchMedian = 0.0;
             for (size_t stretchIndex = 0; stretchIndex < stableStretches.size(); ++stretchIndex) {
                 const auto [stretchStart, stretchEnd] = stableStretches[stretchIndex];
+                medianWindow.clear();
+                for (int frame = stretchStart; frame < stretchEnd; ++frame)
+                    medianWindow.push_back(filteredOffsets[static_cast<size_t>(frame)]);
+                std::sort(medianWindow.begin(), medianWindow.end());
+                const size_t middle = medianWindow.size() / 2;
+                double stretchMedian = medianWindow[middle];
+                if (medianWindow.size() % 2 == 0)
+                    stretchMedian = 0.5 * (medianWindow[middle - 1] + medianWindow[middle]);
                 if (stretchIndex > 0) {
                     const int previousEnd = stableStretches[stretchIndex - 1].second;
                     const bool noteBoundary = std::any_of(noteBoundaries.begin(), noteBoundaries.end(),
@@ -239,21 +248,16 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                     const double nextOffset = filteredOffsets[static_cast<size_t>(stretchStart)];
                     const double wrappedJump = wrapOffsetCents(nextOffset - previousOffset);
                     const double stretchShift = std::round(
-                        (previousOffset - nextOffset) / 1200.0) * 1200.0;
-                    medianWindow.clear();
-                    for (int frame = stretchStart; frame < stretchEnd; ++frame)
-                        medianWindow.push_back(filteredOffsets[static_cast<size_t>(frame)]);
-                    std::sort(medianWindow.begin(), medianWindow.end());
-                    const size_t middle = medianWindow.size() / 2;
-                    double stretchMedian = medianWindow[middle];
-                    if (medianWindow.size() % 2 == 0)
-                        stretchMedian = 0.5 * (medianWindow[middle - 1] + medianWindow[middle]);
-                    const bool canShift = std::abs(wrappedJump)
+                        (previousStretchMedian - stretchMedian) / 1200.0) * 1200.0;
+                    const double wrappedMedianJump = wrapOffsetCents(
+                        stretchMedian - previousStretchMedian);
+                    const bool canShift = std::abs(wrappedMedianJump)
                             <= kReferencePitchOctaveContinuityCents
                         && std::abs(stretchMedian + stretchShift) <= 700.0;
                     if (canShift) {
                         for (int frame = stretchStart; frame < stretchEnd; ++frame)
                             filteredOffsets[static_cast<size_t>(frame)] += static_cast<float>(stretchShift);
+                        stretchMedian += stretchShift;
                     }
                     const bool shiftRefused = std::abs(wrappedJump)
                         <= kReferencePitchOffsetJumpThresholdCents && !canShift;
@@ -262,6 +266,7 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         || shiftRefused)
                         ++smoothingSegment;
                 }
+                previousStretchMedian = stretchMedian;
                 for (int frame = stretchStart; frame < stretchEnd; ++frame) {
                     if (frame > stretchStart
                         && std::binary_search(noteBoundaries.begin(), noteBoundaries.end(), frame))

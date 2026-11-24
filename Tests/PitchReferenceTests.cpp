@@ -814,6 +814,112 @@ bool testStableReferenceNoteOffsetsDoNotDriftOctaves()
     return true;
 }
 
+bool testVibratoPhaseDoesNotRefuseStableStretchAlignment()
+{
+    constexpr int stableFrames = 60;
+    constexpr int transitionFrames = 10;
+    constexpr int secondNoteStart = stableFrames + transitionFrames;
+    constexpr int frameCount = 2 * stableFrames + transitionFrames;
+    constexpr double frameSeconds = 0.01;
+    constexpr double vibratoDepthCents = 50.0;
+    constexpr double vibratoHz = 5.0;
+    constexpr double firstOffsetCents = 590.0;
+    constexpr double secondOffsetCents = 605.0;
+    constexpr double secondBaseOffsetCents = 400.0;
+    constexpr float targetHz = 200.0f;
+    const double pi = std::acos(-1.0);
+    const double angularSpeed = 2.0 * pi * vibratoHz * frameSeconds;
+    constexpr int firstStableEnd = 58;
+    constexpr int secondStableStart = 70;
+    const double firstPhase = pi / 2.0 - angularSpeed * firstStableEnd;
+    const double secondPhase = -pi / 2.0 - angularSpeed * secondStableStart;
+
+    std::vector<float> targetF0;
+    std::vector<float> referenceF0;
+    std::vector<double> targetVibratoCents;
+    targetF0.reserve(frameCount);
+    referenceF0.reserve(frameCount);
+    targetVibratoCents.reserve(frameCount);
+    for (int frame = 0; frame < frameCount; ++frame) {
+        double baseOffsetCents = 0.0;
+        double offsetCents = firstOffsetCents;
+        double phase = firstPhase;
+        if (frame < stableFrames) {
+            baseOffsetCents = 0.0;
+        } else if (frame < secondNoteStart) {
+            const double fraction = static_cast<double>(frame - stableFrames + 1)
+                / transitionFrames;
+            baseOffsetCents = fraction * secondBaseOffsetCents;
+            offsetCents = firstOffsetCents + fraction * (secondOffsetCents - firstOffsetCents);
+            phase = firstPhase + fraction * (secondPhase - firstPhase);
+        } else {
+            baseOffsetCents = secondBaseOffsetCents;
+            offsetCents = secondOffsetCents;
+            phase = secondPhase;
+        }
+
+        const double vibratoCents = vibratoDepthCents
+            * std::sin(angularSpeed * frame + phase);
+        targetVibratoCents.push_back(vibratoCents);
+        targetF0.push_back(static_cast<float>(targetHz
+            * std::exp2((baseOffsetCents + vibratoCents) / 1200.0)));
+        referenceF0.push_back(static_cast<float>(targetHz
+            * std::exp2((baseOffsetCents + offsetCents) / 1200.0)));
+    }
+
+    const auto wrapCents = [](double cents) {
+        return cents - 1200.0 * std::floor((cents + 600.0) / 1200.0);
+    };
+    const double previousEndOffset = firstOffsetCents
+        - targetVibratoCents[static_cast<size_t>(firstStableEnd)];
+    const double nextStartOffset = wrapCents(secondOffsetCents
+        - targetVibratoCents[static_cast<size_t>(secondStableStart)]);
+    if (std::abs(wrapCents(nextStartOffset - previousEndOffset)) <= 100.0)
+        return false;
+
+    const double duration = frameCount * frameSeconds;
+    const double boundaryTime = secondNoteStart * frameSeconds;
+    const float secondBaseHz = static_cast<float>(
+        targetHz * std::exp2(secondBaseOffsetCents / 1200.0));
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    target.notes = {{0.0, boundaryTime, targetHz}, {boundaryTime, duration, secondBaseHz}};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    const auto& targetBaseF0 = target.curve->getOriginalF0();
+    std::vector<double> secondNoteOffsets;
+    for (int frame = stableFrames + transitionFrames + 10;
+         frame < frameCount - 10; ++frame) {
+        secondNoteOffsets.push_back(1200.0 * std::log2(
+            static_cast<double>(corrected[static_cast<size_t>(frame)])
+                / targetBaseF0[static_cast<size_t>(frame)]));
+    }
+    std::sort(secondNoteOffsets.begin(), secondNoteOffsets.end());
+    if (secondNoteOffsets.empty()
+        || std::abs(secondNoteOffsets[secondNoteOffsets.size() / 2] - secondOffsetCents) > 10.0)
+        return false;
+
+    for (int frame = stableFrames; frame < secondNoteStart; ++frame) {
+        const double fraction = static_cast<double>(frame - stableFrames + 1)
+            / transitionFrames;
+        const double expectedOffset = firstOffsetCents
+            + fraction * (secondOffsetCents - firstOffsetCents);
+        const double outputOffset = 1200.0 * std::log2(
+            static_cast<double>(corrected[static_cast<size_t>(frame)])
+                / targetBaseF0[static_cast<size_t>(frame)]);
+        if (std::abs(outputOffset - expectedOffset) > 100.0)
+            return false;
+    }
+    return true;
+}
+
 bool testChainedOffsetAlignmentStaysWithinRegister()
 {
     const auto phraseStaysWithinRegister = [](
@@ -1083,6 +1189,10 @@ int main()
     }
     if (!testStableReferenceNoteOffsetsDoNotDriftOctaves()) {
         std::fputs("FAIL: Reference tuning does not drift octaves across stable notes\n", stderr);
+        return 1;
+    }
+    if (!testVibratoPhaseDoesNotRefuseStableStretchAlignment()) {
+        std::fputs("FAIL: Reference tuning aligns stable stretches across vibrato phases\n", stderr);
         return 1;
     }
     if (!testChainedOffsetAlignmentStaysWithinRegister()) {
