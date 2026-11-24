@@ -212,60 +212,113 @@ void testConcurrentAraAnchorRetention()
     }
 }
 
-void testIndependentHostPresentationDuringCallbackGaps()
+void testPresenterDuringCallbackGaps()
 {
     OpenTune::PlayHeadState state;
+    OpenTune::PlayHeadPresenter presenter;
     auto update = state.update(makePosition(0.0, true));
     state.presentationProjection.tryPublish(0.0, 10.0, 0.02, update.epoch);
     double previous = 0.0;
-    for (int frame = 1; frame <= 200; ++frame)
+    presenter.present(state, 10.0);
+    int nextPublish = 10;
+    int burstIndex = 0;
+    for (int frame = 1; frame <= 300; ++frame)
     {
         const double seconds = frame * 0.01;
-        // Model a muted track publishing only every quarter second.
-        if (frame % 25 == 0)
+        if (frame == nextPublish)
         {
             update = state.update(makePosition(seconds, true));
             state.presentationProjection.tryPublish(seconds, 10.0 + seconds, seconds + 0.02, update.epoch);
+            nextPublish += (++burstIndex % 3 + 1) * 10;
+            const double beforeBurst = presenter.present(state, 10.0 + seconds).seconds;
+            for (int block = 1; block < 4; ++block)
+            {
+                const double position = seconds + block * 0.02;
+                update = state.update(makePosition(position, true));
+                state.presentationProjection.tryPublish(position, 10.0 + seconds, position + 0.02, update.epoch);
+            }
+            expect(std::abs(presenter.present(state, 10.0 + seconds).seconds - beforeBurst) < 1.0e-9,
+                   "presenter does not jump during a contiguous burst");
         }
-        const auto presentation = OpenTune::resolvePlayHeadPresentation(
-            state, 10.0 + seconds, OpenTune::PlayHeadPresentation{true, seconds});
-        expect(presentation.playing, "native transport stays playing during callback gaps");
+        const auto presentation = presenter.present(state, 10.0 + seconds);
+        expect(presentation.playing, "presenter stays playing during callback gaps");
         expect(std::abs(presentation.seconds - previous - 0.01) < 1.0e-9,
-               "independent host position has no holds or catch-up jumps during sparse callbacks");
+               "presenter crosses sparse callback gaps at one frame delta");
+        expect(presentation.seconds >= previous, "sparse playback never steps backwards");
         previous = presentation.seconds;
     }
+    const auto snapshot = state.presentationProjection.load();
+    const auto capped = presenter.present(state, 100.0);
+    expect(std::abs(capped.seconds - snapshot.horizon - OpenTune::PlayHeadPresenter::maxOvershoot) < 1.0e-9,
+           "presenter bounds extrapolation after long callback starvation");
+    expect(state.getPresentedPositionAt(100.0) == snapshot.horizon,
+           "other callers retain the committed horizon cap");
+}
 
-    // Two editor renderers can observe different scheduling frontiers.
-    for (int frame = 1; frame <= 40; ++frame)
+void testPresenterOffsetsAndTransportChanges()
+{
+    OpenTune::PlayHeadState state;
+    OpenTune::PlayHeadPresenter presenter;
+    double previous = 0.0;
+    for (int frame = 0; frame <= 100; ++frame)
     {
         const double seconds = 2.0 + frame * 0.01;
-        const double callbackPosition = seconds + (frame % 2 ? 0.2 : -0.1);
-        update = state.update(makePosition(callbackPosition, true));
+        const double callbackPosition = seconds + (frame % 2 ? 0.02 : -0.02);
+        const auto update = state.update(makePosition(callbackPosition, true));
         state.presentationProjection.tryPublish(callbackPosition, 10.0 + seconds,
                                                 callbackPosition + 0.02, update.epoch);
-        const auto presentation = OpenTune::resolvePlayHeadPresentation(
-            state, 10.0 + seconds, OpenTune::PlayHeadPresentation{true, seconds});
-        expect(std::abs(presentation.seconds - previous - 0.01) < 1.0e-9,
-               "independent host position ignores alternating renderer offsets");
+        const auto presentation = presenter.present(state, 10.0 + seconds);
+        expect(presentation.seconds >= previous, "presenter suppresses backwards flicker from offset writers");
         previous = presentation.seconds;
     }
-    auto stopped = OpenTune::resolvePlayHeadPresentation(
-        state, 13.0, OpenTune::PlayHeadPresentation{false, 0.0});
-    expect(!stopped.playing && stopped.seconds == 0.0,
-           "native stop works even if muted audio never publishes stop");
-    const auto looped = OpenTune::resolvePlayHeadPresentation(
-        state, 13.01, OpenTune::PlayHeadPresentation{true, 1.0});
-    expect(looped.playing && looped.seconds == 1.0, "native loop or seek is not clamped");
+    auto update = state.update(makePosition(1.0, true));
+    state.presentationProjection.tryPublish(1.0, 14.0, 1.02, update.epoch);
+    expect(presenter.present(state, 14.0).seconds == 1.0, "presenter snaps on backwards seek");
+    update = state.update(makePosition(0.0, true));
+    state.presentationProjection.tryPublish(0.0, 14.02, 0.02, update.epoch);
+    expect(presenter.present(state, 14.02).seconds == 0.0, "presenter snaps on loop wrap");
+    state.update(makePosition(0.1, false));
+    const auto stopped = presenter.present(state, 15.0);
+    expect(!stopped.playing && stopped.seconds == 0.1, "stop presents canonical time and resets state");
+    update = state.update(makePosition(0.0, true));
+    state.presentationProjection.tryPublish(0.0, 16.0, 0.02, update.epoch);
+    expect(presenter.present(state, 16.0).seconds == 0.0, "restart does not inherit the previous display floor");
+    expect(std::abs(presenter.present(state, 16.4).seconds - 0.4) < 1.0e-9,
+           "presenter can bridge a gap before an epoch-changing seek");
+    update = state.update(makePosition(0.3, true));
+    state.presentationProjection.tryPublish(0.3, 16.4, 0.32, update.epoch);
+    expect(presenter.present(state, 16.4).seconds == 0.3,
+           "non-contiguous epoch change snaps even a small displayed backwards move");
+    state.presentationProjection.tryPublish(0.0, 16.5, 0.02, update.epoch);
+    expect(presenter.present(state, 16.5).seconds == 0.0,
+           "large backwards target snaps even without an epoch change");
 
-    const double fallback = state.getPresentedPositionAt(13.0);
-    expect(OpenTune::resolvePlayHeadPresentation(state, 13.0).seconds == fallback,
-           "hosts without an independent transport preserve projection behavior");
-    const auto invalid = OpenTune::resolvePlayHeadPresentation(
-        state, 13.0, OpenTune::PlayHeadPresentation{true, std::numeric_limits<double>::quiet_NaN()});
-    expect(invalid.seconds == fallback, "invalid native position falls back to projection");
     OpenTune::PlayHeadState empty;
-    const auto initial = OpenTune::resolvePlayHeadPresentation(empty, 13.0);
+    const auto initial = presenter.present(empty, 17.0);
     expect(!initial.playing && initial.seconds == 0.0, "empty transport stays stopped");
+    empty.update(makePosition(0.2, true));
+    expect(presenter.present(empty, 17.0).seconds == 0.2, "missing anchor falls back to canonical time");
+    empty.presentationProjection.publish(std::numeric_limits<double>::quiet_NaN(), 17.0, 0.22,
+                                        empty.presentationEpoch.load());
+    expect(presenter.present(empty, 17.0).seconds == 0.2, "invalid anchor falls back to canonical time");
+}
+
+void testPresenterDenseCallbacks()
+{
+    OpenTune::PlayHeadState state;
+    OpenTune::PlayHeadPresenter presenter;
+    for (int block = 0; block < 100; ++block)
+    {
+        const double seconds = block * 0.02;
+        const auto update = state.update(makePosition(seconds, true));
+        state.presentationProjection.tryPublish(seconds, 10.0 + seconds, seconds + 0.02, update.epoch);
+        for (int frame = 0; frame < 4; ++frame)
+        {
+            const double clock = 10.0 + seconds + frame * 0.005;
+            expect(std::abs(presenter.present(state, clock).seconds - state.getPresentedPositionAt(clock)) < 1.0e-9,
+                   "dense callbacks match the existing projection");
+        }
+    }
 }
 
 } // namespace
@@ -277,8 +330,10 @@ int main()
     testAraEpochChangesAndBursts();
     testLateCallbackAndTransportResets();
     testConcurrentAraAnchorRetention();
-    testIndependentHostPresentationDuringCallbackGaps();
+    testPresenterDuringCallbackGaps();
+    testPresenterOffsetsAndTransportChanges();
+    testPresenterDenseCallbacks();
     if (failures == 0)
-        std::puts("PlayHeadStateTests: PASS (projection regressions, sparse callbacks, offset writers, independent host stop/seek, missing/invalid host transport)");
+        std::puts("PlayHeadStateTests: PASS (earlier projection regressions, sparse bursts, offset writers, seek/loop, stop/reset, bounded overshoot, dense callbacks, missing/invalid anchors)");
     return failures == 0 ? 0 : 1;
 }

@@ -6,7 +6,6 @@
 #include "../../Utils/MagnifyZoom.h"
 #include "../../Utils/WheelPan.h"
 #include "../../Utils/PlayHeadState.h"
-#include "../../Utils/PlayHeadPresentation.h"
 #include "../../Utils/LocalizationManager.h"
 #include "../Utils/AppLogger.h"
 #include "../../Utils/PianoRollEditAction.h"
@@ -4241,15 +4240,7 @@ void PianoRollComponent::onScrollVBlankCallback(double timestampSec)
     lastVBlankMs_ = juce::Time::getMillisecondCounterHiRes();
     juce::ignoreUnused(timestampSec);
 
-    std::optional<PlayHeadPresentation> hostPresentation;
-    if (const auto transport = processor_ != nullptr ? processor_->getReaperTransport() : std::nullopt)
-    {
-        const double seconds = transport->isRunning() || transport->isPaused()
-            ? transport->playPosition : transport->editCursor;
-        hostPresentation = PlayHeadPresentation{transport->isRunning(), seconds};
-    }
-    const auto presentation = resolvePlayHeadPresentation(
-        playHeadState_, lastVBlankMs_ * 0.001, hostPresentation);
+    const auto presentation = playHeadPresenter_.present(playHeadState_, lastVBlankMs_ * 0.001);
     const bool playingNow = presentation.playing;
     bool playStateChanged = (playingNow != lastObservedPlayHeadPlaying_);
 

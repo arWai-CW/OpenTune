@@ -18,6 +18,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include "Utils/PlayHeadPresentation.h"
 #include "ViewMapper.h"
 #include "ToolIds.h"
 #include "UIColors.h"
@@ -613,6 +614,7 @@ private:
     ScrollMode scrollMode_ = ScrollMode::Page;
 
     const PlayHeadState& playHeadState_;
+    PlayHeadPresenter playHeadPresenter_;
     UndoManager& undoManager_;
     SpectrumReader spectrumReader_;
     bool lastObservedPlayHeadPlaying_{false};

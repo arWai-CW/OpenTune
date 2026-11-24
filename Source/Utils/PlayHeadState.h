@@ -59,6 +59,13 @@ struct PlayHeadPresentationProjection
         uint64_t epoch        = 0;
         bool     valid        = false;
 
+        double projectUncappedAt(double nowClockSeconds) const
+        {
+            if (!valid) return 0.0;
+            const double elapsed = nowClockSeconds - anchorClock;
+            return anchorPosition + (elapsed > 0.0 ? elapsed : 0.0);
+        }
+
         double projectAt(double nowClockSeconds) const
         {
             if (!valid) return 0.0;
