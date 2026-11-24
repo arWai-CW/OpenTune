@@ -749,7 +749,6 @@ bool testChainedOffsetAlignmentStaysWithinRegister()
         int frame = 0;
         for (size_t note = 0; note < offsetsCents.size(); ++note) {
             const double noteBaseHz = targetHz * std::exp2(note * targetStepCents / 1200.0);
-            const int noteStart = frame;
             for (int i = 0; i < stableFrames; ++i, ++frame) {
                 targetF0.push_back(static_cast<float>(noteBaseHz));
                 referenceF0.push_back(static_cast<float>(

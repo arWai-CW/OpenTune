@@ -326,7 +326,8 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 for (size_t i = 1; i < stableSmoothedOffsets.size(); ++i) {
                     const double deltaCents = wrapOffsetCents(
                         stableSmoothedOffsets[i] - stableSmoothedOffsets[i - 1]);
-                    if (std::abs(deltaCents) <= kReferencePitchOctaveContinuityCents) {
+                    if (std::abs(deltaCents) <= kReferencePitchOctaveContinuityCents
+                        && std::abs(interpolationOffsets[i - 1] + deltaCents) <= 700.0) {
                         interpolationOffsets[i] = interpolationOffsets[i - 1]
                             + static_cast<float>(deltaCents);
                     } else {
