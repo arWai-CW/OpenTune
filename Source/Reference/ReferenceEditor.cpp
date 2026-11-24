@@ -211,6 +211,79 @@ private:
     juce::Slider slider_;
 };
 
+class TimingStrengthRows final : public juce::Component
+{
+public:
+    void addControl(std::unique_ptr<TimingStrengthControl> control)
+    {
+        addAndMakeVisible(control.get());
+        controls_.push_back(std::move(control));
+        resized();
+    }
+
+    int naturalHeight() const
+    {
+        constexpr int rowSpacing = 6;
+        return controls_.empty() ? 0
+            : static_cast<int>(controls_.size()) * 76
+                + static_cast<int>(controls_.size() - 1) * rowSpacing;
+    }
+
+    size_t size() const { return controls_.size(); }
+
+    TimingStrengthControl& control(size_t index) const { return *controls_[index]; }
+
+    void resized() override
+    {
+        constexpr int rowSpacing = 6;
+        int y = 0;
+        for (auto& control : controls_) {
+            control->setBounds(0, y, getWidth(), 76);
+            y += 76 + rowSpacing;
+        }
+    }
+
+private:
+    std::vector<std::unique_ptr<TimingStrengthControl>> controls_;
+};
+
+class TimingStrengthPreview final : public juce::Component
+{
+public:
+    TimingStrengthPreview()
+    {
+        viewport_.setScrollBarsShown(true, false);
+        viewport_.setViewedComponent(&rows_, false);
+        addAndMakeVisible(viewport_);
+        setSize(460, 1);
+    }
+
+    void addControl(std::unique_ptr<TimingStrengthControl> control)
+    {
+        rows_.addControl(std::move(control));
+        resized();
+    }
+
+    int naturalHeight() const { return rows_.naturalHeight(); }
+    size_t size() const { return rows_.size(); }
+    TimingStrengthControl& control(size_t index) const { return rows_.control(index); }
+
+    void setVisibleHeight(int height)
+    {
+        setSize(460, height);
+    }
+
+    void resized() override
+    {
+        viewport_.setBounds(getLocalBounds());
+        rows_.setSize(viewport_.getMaximumVisibleWidth(), rows_.naturalHeight());
+    }
+
+private:
+    TimingStrengthRows rows_;
+    juce::Viewport viewport_;
+};
+
 } // namespace
 
 juce::PopupMenu ReferenceEditor::createPitchReferenceMenu()
@@ -611,8 +684,7 @@ void ReferenceEditor::alignTimingToPitchReference()
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
             auto sharedTargets = std::make_shared<std::vector<Target>>(std::move(targets));
             auto sharedGuides = std::make_shared<std::vector<Input>>(std::move(guides));
-            std::vector<std::unique_ptr<TimingStrengthControl>> controls;
-            controls.reserve(sharedTargets->size());
+            auto strengthPreview = std::make_unique<TimingStrengthPreview>();
             for (size_t i = 0; i < sharedTargets->size(); ++i) {
                 const auto& target = (*sharedTargets)[i];
                 auto planForStrength = [sharedTargets, sharedGuides, makePlan, i](double strength) {
@@ -652,13 +724,17 @@ void ReferenceEditor::alignTimingToPitchReference()
                         }
                     }
                 }
-                auto control = std::make_unique<TimingStrengthControl>(
-                    target.label, initialStrength, std::move(initialPlan), std::move(planForStrength));
-                preview->addCustomComponent(control.get());
-                controls.push_back(std::move(control));
+                strengthPreview->addControl(std::make_unique<TimingStrengthControl>(
+                    target.label, initialStrength, std::move(initialPlan), std::move(planForStrength)));
             }
             preview->addButton(LOC_RAW("Apply"), 1, juce::KeyPress(juce::KeyPress::returnKey));
             preview->addButton(LOC(kCancel), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+            constexpr int dialogMargin = 16;
+            const int availableDialogHeight = safe->contentRoot_.getHeight() - dialogMargin * 2;
+            const int maxViewportHeight = juce::jmax(1,
+                availableDialogHeight - preview->getHeight() - 10);
+            strengthPreview->setVisibleHeight(juce::jmin(strengthPreview->naturalHeight(), maxViewportHeight));
+            preview->addCustomComponent(strengthPreview.get());
             safe->timingAlignmentPreview_ = std::move(preview);
             safe->refreshControls();
             auto& window = *safe->timingAlignmentPreview_;
@@ -667,7 +743,8 @@ void ReferenceEditor::alignTimingToPitchReference()
             safe->contentRoot_.addChildComponent(window);
             window.enterModalState(true, juce::ModalCallbackFunction::create(
                 [safe, guideTrack, sharedGuides = std::move(sharedGuides), sharedTargets = std::move(sharedTargets),
-                 controls = std::move(controls), title, showFailure, protectedRangesFor, makePlan](int choice) mutable {
+                 strengthPreview = std::move(strengthPreview), title, showFailure,
+                 protectedRangesFor, makePlan](int choice) mutable {
                     if (safe == nullptr)
                         return;
                     const auto dialog = std::move(safe->timingAlignmentPreview_);
@@ -695,9 +772,9 @@ void ReferenceEditor::alignTimingToPitchReference()
                     int lastAppliedStrength = 0;
                     for (size_t i = 0; i < sharedTargets->size(); ++i) {
                         const auto& target = (*sharedTargets)[i];
-                        const auto strengthPercent = controls[i]->strengthPercent();
+                        const auto strengthPercent = strengthPreview->control(i).strengthPercent();
                         const auto strength = strengthPercent / 100.0;
-                        const auto previewGrid = controls[i]->plan().grid;
+                        const auto previewGrid = strengthPreview->control(i).plan().grid;
                         if (strengthPercent == 0 || !previewGrid)
                             continue;
                         const auto& input = target.input;
