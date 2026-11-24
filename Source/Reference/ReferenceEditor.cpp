@@ -1,6 +1,7 @@
 #include "ReferenceEditor.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "ARA/OpenTuneDocumentController.h"
@@ -382,6 +383,7 @@ void ReferenceEditor::alignTimingToPitchReference()
         std::vector<TimingOutputRange> protectedRanges;
         std::vector<TimingOnset> onsets, guideOnsets;
         TimingAlignment gentle, tight;
+        std::array<TimingAlignment, 10> probes;
     };
 
     const auto protectedRangesFor = [](const Input& input) {
@@ -495,7 +497,7 @@ void ReferenceEditor::alignTimingToPitchReference()
         if (name.isEmpty())
             name = LOC(kUnnamedReferenceTrack);
         name += " @ " + juce::String(region.startInPlaybackTime, 2) + " s";
-        targets.push_back({input, guideIndex, std::move(name), protectedRangesFor(input), {}, {}, {}, {}});
+        targets.push_back({input, guideIndex, std::move(name), protectedRangesFor(input), {}, {}, {}, {}, {}});
     }
     const auto sharedTargetHelp = juce::PluginHostType{}.isReaper()
         ? Loc::format(LOC_RAW("Some targets share ARA edits. Select those items in REAPER, run this action, then retry: {0}"),
@@ -540,9 +542,13 @@ void ReferenceEditor::alignTimingToPitchReference()
                 const auto plan = [&](double strength) {
                     return makePlan(target, guide, *target.input.snapshot->timeGrid, strength, target.protectedRanges);
                 };
-                target.gentle = plan(0.5);
-                target.tight = plan(1.0);
-                if (!target.gentle.grid && !target.tight.grid) {
+                for (size_t i = 0; i < target.probes.size(); ++i)
+                    target.probes[i] = plan(static_cast<double>(i + 1) / target.probes.size());
+                target.gentle = target.probes[4];
+                target.tight = target.probes[9];
+                const bool hasSafeProbe = std::any_of(target.probes.begin(), target.probes.end(),
+                    [](const auto& result) { return result.grid != nullptr; });
+                if (!hasSafeProbe) {
                     const auto& a = target.tight;
                     sharedConflict = sharedConflict || a.affectsProtectedTiming || target.gentle.affectsProtectedTiming;
                     const auto& targetRegion = target.input.region;
@@ -570,9 +576,10 @@ void ReferenceEditor::alignTimingToPitchReference()
         const bool alreadyAligned = targets.size() == count
             && std::all_of(targets.begin(), targets.end(), [](const auto& target) {
                 return target.tight.alreadyAligned;
-            });
+        });
         targets.erase(std::remove_if(targets.begin(), targets.end(), [](const auto& target) {
-            return !target.gentle.grid && !target.tight.grid;
+            return std::none_of(target.probes.begin(), target.probes.end(),
+                [](const auto& result) { return result.grid != nullptr; });
         }), targets.end());
         juce::MessageManager::callAsync([safe, guideTrack, count, guides = std::move(guides),
                 targets = std::move(targets), title, showFailure, sharedTargetHelp,
@@ -614,13 +621,35 @@ void ReferenceEditor::alignTimingToPitchReference()
                         *current.input.snapshot->timeGrid, strength, current.protectedRanges);
                 };
 
-                int initialStrength = target.gentle.grid ? 50 : 100;
-                TimingAlignment initialPlan = target.gentle.grid ? target.gentle : target.tight;
+                int initialStrength = 0;
+                TimingAlignment initialPlan;
                 if (safe->lastTimingAlignmentStrength_) {
                     auto rememberedPlan = planForStrength(*safe->lastTimingAlignmentStrength_ / 100.0);
                     if (rememberedPlan.grid) {
                         initialStrength = *safe->lastTimingAlignmentStrength_;
                         initialPlan = std::move(rememberedPlan);
+                    }
+                }
+                if (initialStrength == 0) {
+                    if (target.gentle.grid) {
+                        initialStrength = 50;
+                        initialPlan = target.gentle;
+                    } else if (target.tight.grid) {
+                        initialStrength = 100;
+                        initialPlan = target.tight;
+                    } else {
+                        int closestDistance = 101;
+                        for (size_t probe = 0; probe < target.probes.size(); ++probe) {
+                            if (!target.probes[probe].grid)
+                                continue;
+                            const int strength = static_cast<int>((probe + 1) * 10);
+                            const int distance = std::abs(strength - 50);
+                            if (distance < closestDistance) {
+                                closestDistance = distance;
+                                initialStrength = strength;
+                                initialPlan = target.probes[probe];
+                            }
+                        }
                     }
                 }
                 auto control = std::make_unique<TimingStrengthControl>(
