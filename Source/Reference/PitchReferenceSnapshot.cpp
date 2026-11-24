@@ -242,7 +242,6 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                 std::vector<float> stableSmoothedOffsets(stableOffsets.size());
                 for (size_t i = 0; i < stableOffsets.size(); ++i) {
                     double weightedOffsetSum = 0.0;
-                    double weightedFrameOffsetSum = 0.0;
                     double weightSum = 0.0;
                     for (size_t j = i; j > 0;) {
                         --j;
@@ -253,7 +252,6 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         const double weight = centerWindowRadius == 0 ? 1.0
                             : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
                         weightedOffsetSum += stableOffsets[j].cents * weight;
-                        weightedFrameOffsetSum += (stableOffsets[j].frame - stableOffsets[i].frame) * weight;
                         weightSum += weight;
                     }
                     for (size_t j = i; j < stableOffsets.size(); ++j) {
@@ -264,30 +262,9 @@ PitchReferenceCorrection planPitchReferenceCorrection(
                         const double weight = centerWindowRadius == 0 ? 1.0
                             : 0.5 * (1.0 + std::cos(kPi * lag / centerWindowRadius));
                         weightedOffsetSum += stableOffsets[j].cents * weight;
-                        weightedFrameOffsetSum += (stableOffsets[j].frame - stableOffsets[i].frame) * weight;
                         weightSum += weight;
                     }
-                    double localSlopeCentsPerFrame = 0.0;
-                    const bool hasPrevious = i > 0
-                        && stableOffsets[i - 1].smoothingSegment == stableOffsets[i].smoothingSegment;
-                    const bool hasNext = i + 1 < stableOffsets.size()
-                        && stableOffsets[i + 1].smoothingSegment == stableOffsets[i].smoothingSegment;
-                    if (hasPrevious && hasNext) {
-                        localSlopeCentsPerFrame = static_cast<double>(
-                            stableOffsets[i + 1].cents - stableOffsets[i - 1].cents)
-                            / (stableOffsets[i + 1].frame - stableOffsets[i - 1].frame);
-                    } else if (hasNext) {
-                        localSlopeCentsPerFrame = static_cast<double>(
-                            stableOffsets[i + 1].cents - stableOffsets[i].cents)
-                            / (stableOffsets[i + 1].frame - stableOffsets[i].frame);
-                    } else if (hasPrevious) {
-                        localSlopeCentsPerFrame = static_cast<double>(
-                            stableOffsets[i].cents - stableOffsets[i - 1].cents)
-                            / (stableOffsets[i].frame - stableOffsets[i - 1].frame);
-                    }
-                    stableSmoothedOffsets[i] = static_cast<float>(
-                        weightedOffsetSum / weightSum
-                        - localSlopeCentsPerFrame * weightedFrameOffsetSum / weightSum);
+                    stableSmoothedOffsets[i] = static_cast<float>(weightedOffsetSum / weightSum);
                 }
 
                 for (int frame = 0; frame < count; ++frame) {

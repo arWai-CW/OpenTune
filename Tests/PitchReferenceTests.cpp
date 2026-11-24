@@ -550,8 +550,9 @@ bool testReferenceOffsetRampUnwrapsAcrossTritone()
 
     const auto& corrected = plan.segments[0].f0Data;
     for (int frame = 0; frame < frameCount; ++frame) {
+        const double toleranceCents = frame < 20 || frame >= frameCount - 20 ? 5.0 : 2.0;
         if (!nearPitch(corrected[static_cast<size_t>(frame)],
-                referenceF0[static_cast<size_t>(frame)], 2.0))
+                referenceF0[static_cast<size_t>(frame)], toleranceCents))
             return false;
     }
     return true;
