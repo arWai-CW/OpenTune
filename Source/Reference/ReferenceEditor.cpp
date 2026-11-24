@@ -141,6 +141,8 @@ class TimingStrengthControl final : public juce::Component
         void focusGained(FocusChangeType cause) override
         {
             juce::Slider::focusGained(cause);
+            if (cause == focusChangedByMouseClick)
+                return;
 
             auto* control = getParentComponent();
             auto* parent = control;
