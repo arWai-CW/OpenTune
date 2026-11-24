@@ -5813,8 +5813,8 @@ void PianoRollComponent::pasteNotes()
     // Accessibility: with REAPER stopped the plugin's playhead is where playback last
     // stopped, not where the user moved the edit cursor; ask REAPER for the cursor then.
     const auto songPosition = currentSongPosition();
-    const double playheadTime = lastObservedPlayHeadPlaying_ ? playheadTimeForPaint_
-        : (songPosition ? songPosition->seconds : playHeadState_.getPresentedPositionSeconds());
+    const double playheadTime = songPosition ? songPosition->seconds
+        : (lastObservedPlayHeadPlaying_ ? playheadTimeForPaint_ : playHeadState_.getPresentedPositionSeconds());
     if (playheadTime > 0.0) {
         const auto projection = activeContentProjection();
         const auto snap = readEditedSnapshot();
