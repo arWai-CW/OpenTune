@@ -153,6 +153,7 @@ public:
         slider_.setSliderStyle(juce::Slider::LinearHorizontal);
         slider_.setTextBoxStyle(juce::Slider::TextBoxRight, true, 54, 20);
         slider_.setRange(0, 100, 1);
+        slider_.setScrollWheelEnabled(false);
         slider_.setTextValueSuffix("%");
         slider_.setTitle(clipName);
         slider_.setWantsKeyboardFocus(true);
