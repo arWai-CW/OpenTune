@@ -137,6 +137,38 @@ class TimingStrengthControl final : public juce::Component
                 return 100.0;
             return attemptedValue;
         }
+
+        void focusGained(FocusChangeType cause) override
+        {
+            juce::Slider::focusGained(cause);
+
+            auto* control = getParentComponent();
+            auto* parent = control;
+            while (parent != nullptr
+                   && dynamic_cast<juce::Viewport*>(parent) == nullptr)
+                parent = parent->getParentComponent();
+
+            auto* viewport = dynamic_cast<juce::Viewport*>(parent);
+            auto* viewedComponent = viewport != nullptr ? viewport->getViewedComponent() : nullptr;
+            if (viewport == nullptr || viewedComponent == nullptr)
+                return;
+
+            while (control != nullptr && control->getParentComponent() != viewedComponent)
+                control = control->getParentComponent();
+            if (control == nullptr)
+                return;
+
+            const auto bounds = control->getBounds();
+            const auto visible = viewport->getViewArea();
+            const int currentY = viewport->getViewPositionY();
+            int targetY = currentY;
+            if (bounds.getY() < currentY)
+                targetY = bounds.getY();
+            else if (bounds.getBottom() > currentY + visible.getHeight())
+                targetY = bounds.getBottom() - visible.getHeight();
+            if (targetY != currentY)
+                viewport->setViewPosition(viewport->getViewPositionX(), targetY);
+        }
     };
 
 public:
