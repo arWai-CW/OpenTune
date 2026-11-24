@@ -1902,7 +1902,7 @@ void PianoRollComponent::drawPlayheadOverlay(juce::Graphics& g)
     const int contentViewportRight = viewportBounds.getRight();
     const int viewportCentreX = (contentViewportLeft + contentViewportRight) / 2;
 
-    const bool playing = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    const bool playing = lastObservedPlayHeadPlaying_;
     const bool continuousMode = scrollMode_ == ScrollMode::Continuous && !userScrollHold_;
 
     const auto pres = TimelineViewportPolicy::computePlayheadPresentation(
@@ -1937,7 +1937,7 @@ void PianoRollComponent::drawPlayheadOverlay(juce::Graphics& g)
 
 void PianoRollComponent::drawPlayheadNoteHighlight(juce::Graphics& g)
 {
-    const bool playing = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    const bool playing = lastObservedPlayHeadPlaying_;
     if (!playing || playheadTimeForPaint_ <= 0.0) return;
 
     juce::Graphics::ScopedSaveState ss(g);
@@ -4240,7 +4240,8 @@ void PianoRollComponent::onScrollVBlankCallback(double timestampSec)
     lastVBlankMs_ = juce::Time::getMillisecondCounterHiRes();
     juce::ignoreUnused(timestampSec);
 
-    const bool playingNow = playHeadState_.isPlaying.load(std::memory_order_relaxed);
+    const auto presentation = playHeadPresenter_.present(playHeadState_, lastVBlankMs_ * 0.001);
+    const bool playingNow = presentation.playing;
     bool playStateChanged = (playingNow != lastObservedPlayHeadPlaying_);
 
     // ── Playhead hit bookkeeping ──
@@ -4356,7 +4357,7 @@ void PianoRollComponent::onScrollVBlankCallback(double timestampSec)
     }
     trackReaperTransport();
 
-    double playheadTime = playHeadState_.getPresentedPositionSeconds();
+    double playheadTime = presentation.seconds;
     if (pendingSeekTime_ >= 0.0) {
         PendingSeekPolicy::Input pendingSeekInput;
         pendingSeekInput.pendingTimeSeconds = pendingSeekTime_;
@@ -5812,7 +5813,8 @@ void PianoRollComponent::pasteNotes()
     // Accessibility: with REAPER stopped the plugin's playhead is where playback last
     // stopped, not where the user moved the edit cursor; ask REAPER for the cursor then.
     const auto songPosition = currentSongPosition();
-    const double playheadTime = songPosition ? songPosition->seconds : playHeadState_.getPresentedPositionSeconds();
+    const double playheadTime = songPosition ? songPosition->seconds
+        : (lastObservedPlayHeadPlaying_ ? playheadTimeForPaint_ : playHeadState_.getPresentedPositionSeconds());
     if (playheadTime > 0.0) {
         const auto projection = activeContentProjection();
         const auto snap = readEditedSnapshot();
