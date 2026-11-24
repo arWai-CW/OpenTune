@@ -804,6 +804,36 @@ bool testChainedOffsetAlignmentStaysWithinRegister()
             {440.0, 480.0, 520.0, 560.0, 600.0, 640.0, 680.0, 720.0, 0.0}, 1, 200.0);
 }
 
+bool testNoAnchorFallbackUsesCircularMedian()
+{
+    constexpr float targetHz = 200.0f;
+    constexpr double frameSeconds = 0.01;
+    const std::vector<double> offsetsCents{
+        0.0, 0.0, 0.0, 590.0, 590.0, -590.0, -590.0, 590.0, 590.0, -590.0, -590.0};
+    std::vector<float> targetF0(offsetsCents.size(), targetHz);
+    std::vector<float> referenceF0;
+    referenceF0.reserve(offsetsCents.size());
+    for (const double offsetCents : offsetsCents)
+        referenceF0.push_back(static_cast<float>(
+            targetHz * std::exp2(offsetCents / 1200.0)));
+
+    const double duration = offsetsCents.size() * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(referenceF0), {}, 1, 100.0)};
+    const auto plan = planPitchReferenceCorrection(
+        target, {reference}, {{0, static_cast<int>(offsetsCents.size())}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != offsetsCents.size())
+        return false;
+
+    const double outputOffsetCents = 1200.0 * std::log2(
+        static_cast<double>(plan.segments[0].f0Data.front()) / targetHz);
+    return std::abs(std::abs(outputOffsetCents) - 590.0) <= 5.0;
+}
+
 bool vibratoRateIsPreserved(double vibratoRateHz)
 {
     constexpr int frameCount = 200;
@@ -954,6 +984,10 @@ int main()
     }
     if (!testChainedOffsetAlignmentStaysWithinRegister()) {
         std::fputs("FAIL: Reference tuning keeps chained offset alignment in the target register\n", stderr);
+        return 1;
+    }
+    if (!testNoAnchorFallbackUsesCircularMedian()) {
+        std::fputs("FAIL: Reference tuning uses a circular median without stable anchors\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {

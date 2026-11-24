@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace OpenTune {
 namespace {
@@ -267,11 +268,22 @@ PitchReferenceCorrection planPitchReferenceCorrection(
 
             std::vector<float> smoothedOffsets(static_cast<size_t>(count), 0.0f);
             if (stableOffsets.empty()) {
+                double minimumCost = std::numeric_limits<double>::infinity();
+                double referenceOffset = run.front().offsetCents;
+                for (const auto& candidate : run) {
+                    double cost = 0.0;
+                    for (const auto& frame : run)
+                        cost += std::abs(wrapOffsetCents(
+                            frame.offsetCents - candidate.offsetCents));
+                    if (cost < minimumCost) {
+                        minimumCost = cost;
+                        referenceOffset = candidate.offsetCents;
+                    }
+                }
                 medianWindow.clear();
-                const float firstOffset = run.front().offsetCents;
                 for (const auto& frame : run)
                     medianWindow.push_back(static_cast<float>(
-                        firstOffset + wrapOffsetCents(frame.offsetCents - firstOffset)));
+                        referenceOffset + wrapOffsetCents(frame.offsetCents - referenceOffset)));
                 std::sort(medianWindow.begin(), medianWindow.end());
                 const size_t middle = medianWindow.size() / 2;
                 float median = medianWindow[middle];
