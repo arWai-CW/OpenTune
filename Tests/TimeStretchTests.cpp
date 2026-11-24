@@ -432,7 +432,10 @@ bool testBlockedAttackDoesNotDiscardSafeEdits()
         {1.35, true}, {1.90, false}, {2.45, true}};
     const std::vector<TimingOnset> guide{{0.552, true}, {0.763, false},
         {1.39, true}, {1.94, false}, {2.49, true}};
-    for (const double strength : {0.5, 1.0}) {
+    double gentleMaxMove = 0.0;
+    double intermediateMaxMove = 0.0;
+    double tightMaxMove = 0.0;
+    for (const double strength : {0.5, 0.75, 1.0}) {
         const auto plan = alignTimingToReference(target, *grid, placement, guide, *grid, placement, strength);
         if (!plan.grid) {
             std::fprintf(stderr, "Safe attacks discarded: %s\n", plan.rejection);
@@ -447,8 +450,14 @@ bool testBlockedAttackDoesNotDiscardSafeEdits()
             if (std::abs(plan.grid->tauForward(before) - expected) > 1e-9)
                 return false;
         }
+        if (strength == 0.5)
+            gentleMaxMove = plan.maxMoveSeconds;
+        else if (strength == 0.75)
+            intermediateMaxMove = plan.maxMoveSeconds;
+        else
+            tightMaxMove = plan.maxMoveSeconds;
     }
-    return true;
+    return gentleMaxMove < intermediateMaxMove && intermediateMaxMove < tightMaxMove;
 }
 
 bool testBlockedAttackKeepsSafeNeighbor()

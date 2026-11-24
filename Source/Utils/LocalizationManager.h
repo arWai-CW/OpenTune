@@ -237,6 +237,10 @@ constexpr const char* kTuneReferenceToolbarLabel = "Tune";
 constexpr const char* kAlignReferenceToolbarLabel = "Align";
 constexpr const char* kTimingGentle = "Gentle (Harmony)";
 constexpr const char* kTimingTight = "Tight (Double)";
+constexpr const char* kTimingStrengthInstructions = "Set timing strength per clip. 0% skips; 50% is Gentle (Harmony); 100% is Tight (Double). Pitch and reference audio are unchanged.";
+constexpr const char* kTimingAlignmentResult = "{0} anchors, {1} ms max";
+constexpr const char* kNoSafeTimingAtStrength = "No safe alignment at this strength";
+constexpr const char* kSkip = "Skip";
 constexpr const char* kNoVoicedReferenceOverlap = "No voiced pitch overlaps in the active clip or selected notes.";
 constexpr const char* kUnnamedReferenceTrack = "Unnamed Track";
 constexpr const char* kClassic = "Classic";
@@ -618,6 +622,10 @@ inline juce::String get(Language lang, const char* key)
         { Keys::kAlignReferenceToolbarLabel, "Align", "对齐", "同期", "Ритм", "Alinear" },
         { Keys::kTimingGentle, "Gentle (Harmony)", "柔和（和声）", "ゆるめ（ハーモニー）", "Мягко (гармония)", "Suave (armonía)" },
         { Keys::kTimingTight, "Tight (Double)", "紧密（叠唱）", "タイト（ダブル）", "Плотно (дабл)", "Preciso (doble)" },
+        { Keys::kTimingStrengthInstructions, "Set timing strength per clip. 0% skips; 50% is Gentle (Harmony); 100% is Tight (Double). Pitch and reference audio are unchanged.", "设置每个片段的时序强度。0% 跳过；50% 为柔和（和声）；100% 为紧密（叠唱）。音高和参考音频不会更改。", "クリップごとにタイミング強度を設定します。0% はスキップ、50% はゆるめ（ハーモニー）、100% はタイト（ダブル）です。音高と参照音声は変更されません。", "Настройте силу выравнивания для каждого клипа. 0% — пропустить; 50% — мягко (гармония); 100% — плотно (дабл). Высота тона и опорный звук не изменяются.", "Ajusta la intensidad del ritmo de cada clip. 0% omite; 50% es Suave (armonía); 100% es Preciso (doble). El tono y el audio de referencia no se modifican." },
+        { Keys::kTimingAlignmentResult, "{0} anchors, {1} ms max", "{0} 个锚点，最大 {1} 毫秒", "{0} 個のアンカー、最大 {1} ms", "{0} якорей, макс. {1} мс", "{0} anclas, máx. {1} ms" },
+        { Keys::kNoSafeTimingAtStrength, "No safe alignment at this strength", "此强度下没有安全的对齐方式", "この強度では安全に整列できません", "При этой силе безопасное выравнивание невозможно", "No hay una alineación segura con esta intensidad" },
+        { Keys::kSkip, "Skip", "跳过", "スキップ", "Пропустить", "Omitir" },
         { Keys::kNoVoicedReferenceOverlap, "No voiced pitch overlaps in the active clip or selected notes.", "当前片段或所选音符没有重叠的有声音高。", "現在のクリップまたは選択したノートに、有声音の重なりがありません。", "В активном клипе или выбранных нотах нет перекрывающихся участков с высотой тона.", "No hay tramos con tono superpuestos en el clip activo o las notas seleccionadas." },
         { Keys::kUnnamedReferenceTrack, "Unnamed Track", "未命名轨道", "名称未設定のトラック", "Дорожка без названия", "Pista sin nombre" },
         { Keys::kClassic, "Classic", "经典", "クラシック", "Классика", "Clásico" },
