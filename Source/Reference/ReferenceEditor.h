@@ -4,6 +4,7 @@
 #include "UI/TransportBarComponent.h"
 
 #include <functional>
+#include <optional>
 
 namespace OpenTune {
 
@@ -59,6 +60,7 @@ private:
     juce::ARARegionSequence* pitchReferenceTrack_ = nullptr;
     std::unique_ptr<juce::ThreadPool> timingAlignmentWorker_;
     std::unique_ptr<juce::AlertWindow> timingAlignmentPreview_;
+    std::optional<int> lastTimingAlignmentStrength_;
     bool timingAlignmentRunning_ = false;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(ReferenceEditor)

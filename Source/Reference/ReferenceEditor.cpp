@@ -121,6 +121,95 @@ std::vector<PitchReferenceSnapshot> readPitchReferences(
     return references;
 }
 
+class TimingStrengthControl final : public juce::Component
+{
+public:
+    using PlanForStrength = std::function<TimingAlignment(double)>;
+
+    TimingStrengthControl(const juce::String& clipName, int initialStrength,
+                          TimingAlignment initialPlan, PlanForStrength planForStrength)
+        : planForStrength_(std::move(planForStrength)), currentPlan_(std::move(initialPlan))
+    {
+        clipLabel_.setText(clipName, juce::dontSendNotification);
+        clipLabel_.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
+        addAndMakeVisible(clipLabel_);
+
+        slider_.setSliderStyle(juce::Slider::LinearHorizontal);
+        slider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 54, 20);
+        slider_.setRange(0, 100, 1);
+        slider_.setTextValueSuffix("%");
+        slider_.setTitle(clipName);
+        slider_.setDoubleClickReturnValue(true, initialStrength);
+        slider_.onValueChange = [this] {
+            int strength = static_cast<int>(std::lround(slider_.getValue()));
+            const int snapped = strength >= 47 && strength <= 53 ? 50
+                : strength >= 97 ? 100 : strength;
+            if (strength != snapped) {
+                slider_.setValue(snapped, juce::dontSendNotification);
+                strength = snapped;
+            }
+            currentPlan_ = strength == 0 ? TimingAlignment{} : planForStrength_(strength / 100.0);
+            updateReadout();
+        };
+        slider_.setValue(initialStrength, juce::dontSendNotification);
+        addAndMakeVisible(slider_);
+
+        gentleLabel_.setText(LOC(kTimingGentle), juce::dontSendNotification);
+        gentleLabel_.setFont(juce::Font(juce::FontOptions(11.0f)));
+        gentleLabel_.setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(gentleLabel_);
+
+        tightLabel_.setText(LOC(kTimingTight), juce::dontSendNotification);
+        tightLabel_.setFont(juce::Font(juce::FontOptions(11.0f)));
+        tightLabel_.setJustificationType(juce::Justification::centredRight);
+        addAndMakeVisible(tightLabel_);
+
+        readout_.setJustificationType(juce::Justification::centredLeft);
+        addAndMakeVisible(readout_);
+        updateReadout();
+        setSize(460, 76);
+    }
+
+    int strengthPercent() const
+    {
+        return static_cast<int>(std::lround(slider_.getValue()));
+    }
+
+    const TimingAlignment& plan() const { return currentPlan_; }
+
+    void resized() override
+    {
+        clipLabel_.setBounds(0, 0, getWidth(), 18);
+        slider_.setBounds(0, 18, getWidth(), 25);
+
+        const int labelWidth = juce::jmin(160, getWidth() / 2);
+        const int gentleX = juce::roundToInt(slider_.getPositionOfValue(50.0) * slider_.getWidth())
+            - labelWidth / 2;
+        const int tightX = juce::roundToInt(slider_.getPositionOfValue(100.0) * slider_.getWidth())
+            - labelWidth;
+        gentleLabel_.setBounds(juce::jlimit(0, getWidth() - labelWidth, gentleX),
+                               43, labelWidth, 16);
+        tightLabel_.setBounds(juce::jlimit(0, getWidth() - labelWidth, tightX),
+                              43, labelWidth, 16);
+        readout_.setBounds(0, 59, getWidth(), 16);
+    }
+
+private:
+    void updateReadout()
+    {
+        const auto text = strengthPercent() == 0 ? LOC(kSkip)
+            : !currentPlan_.grid ? LOC(kNoSafeTimingAtStrength)
+            : Loc::format(LOC(kTimingAlignmentResult), juce::String(currentPlan_.movedAnchors),
+                          juce::String(static_cast<int>(std::lround(currentPlan_.maxMoveSeconds * 1000))));
+        readout_.setText(text, juce::dontSendNotification);
+    }
+
+    PlanForStrength planForStrength_;
+    TimingAlignment currentPlan_;
+    juce::Label clipLabel_, gentleLabel_, tightLabel_, readout_;
+    juce::Slider slider_;
+};
+
 } // namespace
 
 juce::PopupMenu ReferenceEditor::createPitchReferenceMenu()
@@ -505,7 +594,7 @@ void ReferenceEditor::alignTimingToPitchReference()
                 return;
             }
 
-            auto detail = LOC_RAW("Choose alignment strength per clip. Pitch and the reference track are not edited.");
+            auto detail = LOC(kTimingStrengthInstructions);
             if (count != targets.size())
                 detail += "\n" + Loc::format(LOC_RAW("{0} selected clips have no safe alignment and will be skipped."),
                                              juce::String(static_cast<int>(count - targets.size())));
@@ -513,20 +602,31 @@ void ReferenceEditor::alignTimingToPitchReference()
                 detail += "\n" + sharedTargetHelp;
             auto preview = std::make_unique<juce::AlertWindow>(title, detail,
                 juce::MessageBoxIconType::NoIcon, &safe->contentRoot_);
-            const auto label = [](const juce::String& mode, const TimingAlignment& plan) {
-                return Loc::format(LOC_RAW("{0} — {1} anchors, {2} ms max"), mode, juce::String(plan.movedAnchors),
-                    juce::String(static_cast<int>(std::lround(plan.maxMoveSeconds * 1000))));
-            };
-            for (size_t i = 0; i < targets.size(); ++i) {
-                const auto id = juce::String(static_cast<int>(i));
-                preview->addComboBox(id, {}, targets[i].label);
-                auto* box = preview->getComboBoxComponent(id);
-                box->addItem(LOC_RAW("Skip"), 1);
-                if (targets[i].gentle.grid)
-                    box->addItem(label(LOC(kTimingGentle), targets[i].gentle), 2);
-                if (targets[i].tight.grid)
-                    box->addItem(label(LOC(kTimingTight), targets[i].tight), 3);
-                box->setSelectedId(targets[i].gentle.grid ? 2 : 1, juce::dontSendNotification);
+            auto sharedTargets = std::make_shared<std::vector<Target>>(std::move(targets));
+            auto sharedGuides = std::make_shared<std::vector<Input>>(std::move(guides));
+            std::vector<std::unique_ptr<TimingStrengthControl>> controls;
+            controls.reserve(sharedTargets->size());
+            for (size_t i = 0; i < sharedTargets->size(); ++i) {
+                const auto& target = (*sharedTargets)[i];
+                auto planForStrength = [sharedTargets, sharedGuides, makePlan, i](double strength) {
+                    const auto& current = (*sharedTargets)[i];
+                    return makePlan(current, (*sharedGuides)[current.guideIndex],
+                        *current.input.snapshot->timeGrid, strength, current.protectedRanges);
+                };
+
+                int initialStrength = target.gentle.grid ? 50 : 100;
+                TimingAlignment initialPlan = target.gentle.grid ? target.gentle : target.tight;
+                if (safe->lastTimingAlignmentStrength_) {
+                    auto rememberedPlan = planForStrength(*safe->lastTimingAlignmentStrength_ / 100.0);
+                    if (rememberedPlan.grid) {
+                        initialStrength = *safe->lastTimingAlignmentStrength_;
+                        initialPlan = std::move(rememberedPlan);
+                    }
+                }
+                auto control = std::make_unique<TimingStrengthControl>(
+                    target.label, initialStrength, std::move(initialPlan), std::move(planForStrength));
+                preview->addCustomComponent(control.get());
+                controls.push_back(std::move(control));
             }
             preview->addButton(LOC_RAW("Apply"), 1, juce::KeyPress(juce::KeyPress::returnKey));
             preview->addButton(LOC(kCancel), 0, juce::KeyPress(juce::KeyPress::escapeKey));
@@ -537,8 +637,8 @@ void ReferenceEditor::alignTimingToPitchReference()
             window.setCentrePosition(bounds.getCentreX(), bounds.getCentreY());
             safe->contentRoot_.addChildComponent(window);
             window.enterModalState(true, juce::ModalCallbackFunction::create(
-                [safe, guideTrack, guides = std::move(guides), targets = std::move(targets), title,
-                 showFailure, protectedRangesFor, makePlan](int choice) {
+                [safe, guideTrack, sharedGuides = std::move(sharedGuides), sharedTargets = std::move(sharedTargets),
+                 controls = std::move(controls), title, showFailure, protectedRangesFor, makePlan](int choice) mutable {
                     if (safe == nullptr)
                         return;
                     const auto dialog = std::move(safe->timingAlignmentPreview_);
@@ -563,17 +663,17 @@ void ReferenceEditor::alignTimingToPitchReference()
                             LOC_RAW("A clip or the reference changed. Run timing alignment again."));
                     };
                     std::vector<TimeGridChange> changes;
-                    for (size_t i = 0; i < targets.size(); ++i) {
-                        const auto* box = dialog->getComboBoxComponent(juce::String(static_cast<int>(i)));
-                        const auto& target = targets[i];
-                        const auto mode = box->getSelectedId();
-                        const auto previewGrid = mode == 2 ? target.gentle.grid
-                            : mode == 3 ? target.tight.grid : nullptr;
-                        if (!previewGrid)
+                    int lastAppliedStrength = 0;
+                    for (size_t i = 0; i < sharedTargets->size(); ++i) {
+                        const auto& target = (*sharedTargets)[i];
+                        const auto strengthPercent = controls[i]->strengthPercent();
+                        const auto strength = strengthPercent / 100.0;
+                        const auto previewGrid = controls[i]->plan().grid;
+                        if (strengthPercent == 0 || !previewGrid)
                             continue;
                         const auto& input = target.input;
                         if (safe->pitchReferenceTrack_ != guideTrack || !unchanged(input)
-                            || !unchanged(guides[target.guideIndex])) {
+                            || !unchanged((*sharedGuides)[target.guideIndex])) {
                             stale();
                             return;
                         }
@@ -589,11 +689,12 @@ void ReferenceEditor::alignTimingToPitchReference()
                                 return;
                             }
                             changes.push_back({input.region.contentKey, input.snapshot->timeGrid, previewGrid});
+                            lastAppliedStrength = strengthPercent;
                             continue;
                         }
                         // Build one undoable grid per modification, with each split limited to its own audio.
-                        auto combined = makePlan(target, guides[target.guideIndex], *previous->after,
-                                                 mode == 2 ? 0.5 : 1.0, ranges);
+                        auto combined = makePlan(target, (*sharedGuides)[target.guideIndex], *previous->after,
+                                                 strength, ranges);
                         const auto& projection = input.region.contentProjection;
                         if (!combined.grid || !preservesTimingAudioInRange(*previewGrid, *combined.grid,
                                 {projection.contentStartSeconds, projection.contentStartSeconds + projection.contentDurationSeconds})) {
@@ -602,13 +703,15 @@ void ReferenceEditor::alignTimingToPitchReference()
                             return;
                         }
                         previous->after = std::move(combined.grid);
+                        lastAppliedStrength = strengthPercent;
                     }
                     if (changes.empty())
                         return;
 
-                    if (safe->processorRef_.commitTimeGridEdits(changes, title))
+                    if (safe->processorRef_.commitTimeGridEdits(changes, title)) {
+                        safe->lastTimingAlignmentStrength_ = lastAppliedStrength;
                         a11y::announce(safe->pianoRoll_, title);
-                    else
+                    } else
                         stale();
                 }));
         });
