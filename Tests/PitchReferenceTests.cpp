@@ -519,6 +519,44 @@ bool testRunOffsetInterpolatesBetweenStablePassages()
     return true;
 }
 
+bool testReferenceOffsetRampUnwrapsAcrossTritone()
+{
+    constexpr int frameCount = 100;
+    constexpr double frameSeconds = 0.01;
+    constexpr float targetHz = 200.0f;
+    constexpr double firstOffsetCents = 580.0;
+    constexpr double lastOffsetCents = 620.0;
+    std::vector<float> targetF0(frameCount, targetHz);
+    std::vector<float> referenceF0;
+    referenceF0.reserve(frameCount);
+    for (int frame = 0; frame < frameCount; ++frame) {
+        const double fraction = static_cast<double>(frame) / (frameCount - 1);
+        const double offsetCents = firstOffsetCents + fraction * (lastOffsetCents - firstOffsetCents);
+        referenceF0.push_back(static_cast<float>(targetHz * std::exp2(offsetCents / 1200.0)));
+    }
+
+    const double duration = frameCount * frameSeconds;
+    const auto grid = TimeGridSnapshot::makeIdentity(duration);
+    PitchReferenceSnapshot target{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(std::move(targetF0), {}, 1, 100.0)};
+    target.notes.push_back({0.0, duration, targetHz});
+    const PitchReferenceSnapshot reference{{0.0, duration, 0.0, duration}, grid,
+        makeCurve(referenceF0, {}, 1, 100.0)};
+
+    const auto plan = planPitchReferenceCorrection(target, {reference}, {{0, frameCount}});
+    if (!plan.hasVoicedOverlap || plan.segments.size() != 1
+        || plan.segments[0].f0Data.size() != static_cast<size_t>(frameCount))
+        return false;
+
+    const auto& corrected = plan.segments[0].f0Data;
+    for (int frame = 0; frame < frameCount; ++frame) {
+        if (!nearPitch(corrected[static_cast<size_t>(frame)],
+                referenceF0[static_cast<size_t>(frame)], 2.0))
+            return false;
+    }
+    return true;
+}
+
 bool vibratoRateIsPreserved(double vibratoRateHz)
 {
     constexpr int frameCount = 200;
@@ -649,6 +687,10 @@ int main()
     }
     if (!testRunOffsetInterpolatesBetweenStablePassages()) {
         std::fputs("FAIL: Reference tuning interpolates offsets between stable passages\n", stderr);
+        return 1;
+    }
+    if (!testReferenceOffsetRampUnwrapsAcrossTritone()) {
+        std::fputs("FAIL: Reference tuning unwraps offset ramps across the tritone\n", stderr);
         return 1;
     }
     if (!testVibratoIsPreservedWhileCenterFollowsReference()) {
